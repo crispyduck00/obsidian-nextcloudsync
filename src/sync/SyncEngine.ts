@@ -373,6 +373,11 @@ export class SyncEngine {
     return isCellularBlocked(this.opts.settings.syncOnWifiOnly, Platform.isIosApp, conn?.type);
   }
 
+  /** True while a full-vault sync session is running. Used by external trigger schedulers. */
+  isSyncRunning(): boolean {
+    return this.running;
+  }
+
   async syncManual(opts: { manual?: boolean } = {}): Promise<void> {
     // Mobile has no status bar; sync state (progress + result) is surfaced via NoticeStatusBar,
     // which implements IStatusBar and is driven uniformly for every run. The two early-return

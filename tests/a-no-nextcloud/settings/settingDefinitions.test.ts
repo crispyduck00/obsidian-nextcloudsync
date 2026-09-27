@@ -42,6 +42,9 @@ const BASELINE: { heading: string | null; rows: string[] }[] = [
       'App password',
       'Sync folder',
       'Sync target (WebDAV)',
+      'Use Nextcloud client push',
+      'Client Push URL override',
+      'Client Push status',
     ],
   },
   {
@@ -73,7 +76,7 @@ const BASELINE: { heading: string | null; rows: string[] }[] = [
   { heading: 'Maintenance', rows: ['Reset vault index', 'Mirror from remote', 'Last session summary'] },
 ];
 
-const STATIC_ROW_COUNT = BASELINE.reduce((n, s) => n + s.rows.length, 0); // 27
+const STATIC_ROW_COUNT = BASELINE.reduce((n, s) => n + s.rows.length, 0); // 30
 
 function makeHost(over: Partial<SettingDefinitionsHost> = {}): SettingDefinitionsHost {
   return {
@@ -84,6 +87,7 @@ function makeHost(over: Partial<SettingDefinitionsHost> = {}): SettingDefinition
     configDir: '.obsidian',
     vaultName: 'TestVault',
     syncTargetUrl: () => 'https://example.invalid/dav/TestVault',
+    clientPushStatusSummary: () => 'Disabled',
     runSyncNow: () => undefined,
     runRemoteMirror: () => undefined,
     resetVaultIndex: () => undefined,
@@ -322,6 +326,11 @@ describe('[SPEC:DSD-5] predicates reflect platform and sign-in state', () => {
   it('disables "Sync on file change" on every mobile platform', () => {
     expect(isDisabled(rowNamed(makeHost({ isMobile: true }), 'Sync on file change'))).toBe(true);
     expect(isDisabled(rowNamed(makeHost({ isMobile: false }), 'Sync on file change'))).toBe(false);
+  });
+
+  it('enables the Client Push URL override only while Client Push is enabled', () => {
+    expect(isDisabled(rowNamed(makeHost({ settings: { ...DEFAULT_SETTINGS, useClientPush: false } }), 'Client Push URL override'))).toBe(true);
+    expect(isDisabled(rowNamed(makeHost({ settings: { ...DEFAULT_SETTINGS, useClientPush: true } }), 'Client Push URL override'))).toBe(false);
   });
 
   it('disables "Sync now" until the credentials are complete', () => {
