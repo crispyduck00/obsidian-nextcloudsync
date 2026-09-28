@@ -733,6 +733,8 @@ export default class ObsidianNextcloudsync extends Plugin {
 
     const scheduler = new PushSyncScheduler({
       isSyncRunning: () => this.syncEngine?.isSyncRunning() ?? false,
+      shouldSync: async () => this.syncEngine?.shouldReconcileClientPush() ?? true,
+      onReconciliationTriggered: () => this.pushStatusItem?.pulse(),
       sync: async () => {
         await this.syncEngine?.syncManual();
       },
@@ -746,10 +748,7 @@ export default class ObsidianNextcloudsync extends Plugin {
       password,
       networkTimeoutMs: (this.settings.networkTimeoutSeconds ?? 0) * 1000,
       endpointOverride: this.settings.clientPushUrlOverride,
-      onFileNotification: (notification) => {
-        this.pushStatusItem?.pulse();
-        scheduler.notify(notification);
-      },
+      onFileNotification: (notification) => scheduler.notify(notification),
       onStatusChange: (status) => this.pushStatusItem?.setStatus(status),
       log: (message) => { void this.logger.log(`client-push: ${message}`); },
     });

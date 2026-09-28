@@ -378,6 +378,40 @@ export class SyncEngine {
     return this.running;
   }
 
+  /**
+   * Cheap Client Push scope gate. Returns false only when Nextcloud's vault-root ETag proves that the
+   * configured sync root is unchanged since the last real full scan. Every uncertain case preserves
+   * the old behavior and returns true so the ordinary sync engine remains authoritative.
+   *
+   * This method never updates StateDB: only a real full scan may advance the stored root ETag.
+   */
+  async shouldReconcileClientPush(): Promise<boolean> {
+    // Preserve the existing Wi-Fi-only behavior without making a new network request on cellular.
+    if (this.isBlockedByWifiOnly()) return true;
+
+    // Do not create/connect a client just for the optimization. The first ordinary sync establishes
+    // the client and the root-ETag baseline; until then a push follows the original full-sync path.
+    const client = this.client;
+    if (!client || this.features?.isNextcloud !== true) return true;
+
+    // A token-capable server can advance StateDB without a real full scan, while remoteRootEtag is
+    // deliberately updated only by full scans. Avoid using a potentially stale baseline there.
+    if (this.opts.stateDB.getSyncToken()) return true;
+
+    const stored = this.opts.stateDB.getRemoteRootEtag();
+    if (stored == null) return true;
+
+    const current = await client.getRootEtag();
+    if (current == null) return true;
+    if (current !== stored) {
+      void this.opts.logger?.log(`client-push: vault root ETag changed (${stored} → ${current}) → reconciliation required`);
+      return true;
+    }
+
+    void this.opts.logger?.log(`client-push: vault root ETag unchanged (${current})`);
+    return false;
+  }
+
   async syncManual(opts: { manual?: boolean } = {}): Promise<void> {
     // Mobile has no status bar; sync state (progress + result) is surfaced via NoticeStatusBar,
     // which implements IStatusBar and is driven uniformly for every run. The two early-return

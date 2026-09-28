@@ -5,6 +5,10 @@ const BUSY_RETRY_MS = 500;
 
 export interface PushSyncSchedulerOptions {
   isSyncRunning(): boolean;
+  /** Optional cheap scope check. False means the push is proven irrelevant to this vault. */
+  shouldSync?(): Promise<boolean>;
+  /** Called only when a push survives scope filtering and will trigger reconciliation. */
+  onReconciliationTriggered?(): void;
   sync(): Promise<void>;
   log?(message: string): void;
   debounceMs?: number;
@@ -74,8 +78,33 @@ export class PushSyncScheduler {
 
     this.pending = false;
     this.syncing = true;
-    this.opts.log?.('push: triggering full reconciliation');
     try {
+      if (this.opts.shouldSync) {
+        let shouldSync = true;
+        try {
+          shouldSync = await this.opts.shouldSync();
+        } catch (err) {
+          // Scope filtering is only an optimization. If it cannot prove irrelevance, preserve the
+          // original behavior and let the ordinary sync engine decide what changed.
+          this.opts.log?.(`push: vault scope check failed — ${err instanceof Error ? err.message : String(err)}; reconciling normally`);
+        }
+
+        if (this.stopped) return;
+        // A manual/startup/periodic sync may have started while the async scope check was running.
+        // Keep the push pending so it is reconsidered after that run; it may have arrived too late
+        // for the running sync's remote scan.
+        if (this.opts.isSyncRunning()) {
+          this.pending = true;
+          return;
+        }
+        if (!shouldSync) {
+          this.opts.log?.('push: vault root unchanged → no vault reconciliation needed');
+          return;
+        }
+      }
+
+      this.opts.onReconciliationTriggered?.();
+      this.opts.log?.('push: triggering full reconciliation');
       await this.opts.sync();
       this.lastTriggeredSyncAt = Date.now();
     } catch (err) {
