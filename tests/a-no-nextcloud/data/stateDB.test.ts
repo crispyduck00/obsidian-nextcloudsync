@@ -185,6 +185,28 @@ describe('StateDB', () => {
     expect(db.getFileByRemoteId('fid-2')?.path).toBe('new.md');
   });
 
+  it('does not let stale path deletion remove a newer remoteFileId mapping', async () => {
+    const db = new StateDB(makeAdapter(), PLUGIN_DIR, DEVICE_ID);
+    await db.load();
+    db.setFile({ path: 'old.md', localHash: 'h', remoteId: 'r', idType: 'sha256', size: 5, mtime: 0, remoteFileId: 'fid-1', isConflicted: false });
+    db.setFile({ path: 'new.md', localHash: 'h', remoteId: 'r', idType: 'sha256', size: 5, mtime: 0, remoteFileId: 'fid-1', isConflicted: false });
+    expect(db.getFileByRemoteId('fid-1')?.path).toBe('new.md');
+
+    db.deleteFile('old.md');
+
+    expect(db.getFileByRemoteId('fid-1')?.path).toBe('new.md');
+    expect(db.getFile('new.md')?.remoteFileId).toBe('fid-1');
+  });
+  it('does not let stale path replacement remove a newer remoteFileId mapping', async () => {
+    const db = new StateDB(makeAdapter(), PLUGIN_DIR, DEVICE_ID);
+    await db.load();
+    db.setFile({ path: 'old.md', localHash: 'h', remoteId: 'r', idType: 'sha256', size: 5, mtime: 0, remoteFileId: 'fid-1', isConflicted: false });
+    db.setFile({ path: 'new.md', localHash: 'h', remoteId: 'r', idType: 'sha256', size: 5, mtime: 0, remoteFileId: 'fid-1', isConflicted: false });
+    db.setFile({ path: 'old.md', localHash: 'h2', remoteId: 'r2', idType: 'sha256', size: 6, mtime: 1, remoteFileId: 'fid-2', isConflicted: false });
+
+    expect(db.getFileByRemoteId('fid-1')?.path).toBe('new.md');
+    expect(db.getFileByRemoteId('fid-2')?.path).toBe('old.md');
+  });
   it('rebuilds the remoteFileId index on load (survives reload)', async () => {
     const adapter = makeAdapter();
     const db = new StateDB(adapter, PLUGIN_DIR, DEVICE_ID);
