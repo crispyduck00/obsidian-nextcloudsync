@@ -1252,11 +1252,19 @@ export class SyncEngine {
         await this.handleConflict(remote.path, base, remote, remoteId, idType, summary);
         return;
       }
-      // Both sides match what we last synced → the file has converged. If it was previously
-      // flagged as conflicted (e.g. an error-policy skip or a prior markers write that has since
-      // been resolved), clear that stale flag now so the conflict count does not stay stuck.
-      if (base?.isConflicted) {
-        this.opts.stateDB.setFile({ ...base, isConflicted: false });
+      // Both sides match what we last synced → the file has converged. Refresh metadata that can
+      // safely be learned from the current remote object, and clear a stale conflict flag if needed.
+      // A missing fileId (standard WebDAV) must never erase an identity already known from Nextcloud.
+      const remoteFileIdChanged =
+        remote.fileId !== null &&
+        base?.remoteFileId !== remote.fileId;
+
+      if (base && (base.isConflicted || remoteFileIdChanged)) {
+        this.opts.stateDB.setFile({
+          ...base,
+          remoteFileId: remote.fileId ?? base.remoteFileId,
+          isConflicted: false,
+        });
       }
       return; // Unchanged
     }
