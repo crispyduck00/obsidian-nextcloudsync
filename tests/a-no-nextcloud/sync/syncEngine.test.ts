@@ -394,7 +394,7 @@ describe('SyncEngine.processRemoteFile — stale conflict-flag clearing', () => 
     size: 12, lastModified: 1000,
   };
 
-  function buildHarness(base: FileState) {
+  function buildHarness(base: FileState, remoteInfo: RemoteFileInfo = remote) {
     const setFile = jest.fn();
     const localAdapter = {
       // The stat signature matches base.localMtime/localSize so the fast-path treats the file as
@@ -411,7 +411,7 @@ describe('SyncEngine.processRemoteFile — stale conflict-flag clearing', () => 
     const invoke = (summary: SyncSessionSummary) =>
       (engine as unknown as {
         processRemoteFile(r: RemoteFileInfo, s: SyncSessionSummary): Promise<void>;
-      }).processRemoteFile(remote, summary);
+      }).processRemoteFile(remoteInfo, summary);
     return { invoke, setFile };
   }
 
@@ -439,6 +439,55 @@ describe('SyncEngine.processRemoteFile — stale conflict-flag clearing', () => 
     await h.invoke(makeSummary());
     expect(h.setFile).not.toHaveBeenCalled();
   });
+
+  it('refreshes a missing remoteFileId when an unchanged file has converged', async () => {
+  const base: FileState = {
+    path: 'note.md', localHash: 'lh', remoteId: 'same-checksum', idType: 'sha256',
+    size: 12, mtime: 1000, remoteFileId: null, isConflicted: false,
+    localMtime: 1000, localSize: 12,
+  };
+
+  const h = buildHarness(base);
+  await h.invoke(makeSummary());
+
+  expect(h.setFile).toHaveBeenCalledTimes(1);
+  expect(h.setFile).toHaveBeenCalledWith(expect.objectContaining({
+    path: 'note.md',
+    remoteFileId: 'fid-1',
+    isConflicted: false,
+  }));
+});
+
+it('refreshes a stale remoteFileId when an unchanged file has converged', async () => {
+  const base: FileState = {
+    path: 'note.md', localHash: 'lh', remoteId: 'same-checksum', idType: 'sha256',
+    size: 12, mtime: 1000, remoteFileId: 'old-fid', isConflicted: false,
+    localMtime: 1000, localSize: 12,
+  };
+
+  const h = buildHarness(base);
+  await h.invoke(makeSummary());
+
+  expect(h.setFile).toHaveBeenCalledTimes(1);
+  expect(h.setFile).toHaveBeenCalledWith(expect.objectContaining({
+    path: 'note.md',
+    remoteFileId: 'fid-1',
+    isConflicted: false,
+  }));
+});
+
+it('does not discard a known remoteFileId when the current remote reports none', async () => {
+  const base: FileState = {
+    path: 'note.md', localHash: 'lh', remoteId: 'same-checksum', idType: 'sha256',
+    size: 12, mtime: 1000, remoteFileId: 'fid-1', isConflicted: false,
+    localMtime: 1000, localSize: 12,
+  };
+
+  const h = buildHarness(base, { ...remote, fileId: null });
+  await h.invoke(makeSummary());
+
+  expect(h.setFile).not.toHaveBeenCalled();
+});
 });
 
 describe('SyncEngine.processRemoteFile — divergent (corrupt) baseline detection', () => {
