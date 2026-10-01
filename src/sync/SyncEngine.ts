@@ -463,10 +463,11 @@ export class SyncEngine {
   /**
    * Mobile Watch structural recovery.
    *
-   * If an ordinary full sync (resume/startup/push/manual) already started on the same foreground
-   * transition, await that authoritative run instead of racing it or showing an "already running"
-   * notice. Otherwise start the same ordinary full-sync path. Watch never gets separate merge or
-   * reconciliation semantics.
+   * Normally an ordinary full sync that started after the uncertain event (resume/startup/push/
+   * manual) is authoritative enough, so await it instead of racing a second run. When the structural
+   * event itself occurred DURING the current scan, requireFreshAfterCurrent=true: that scan may
+   * already have passed the affected path, so wait for it to settle and then use/start a successor.
+   * Either way this is the ordinary full-sync path; Watch owns no separate merge/reconcile rules.
    */
   async syncForWatchRecovery(requireFreshAfterCurrent = false): Promise<boolean> {
     const current = this.currentRun;
