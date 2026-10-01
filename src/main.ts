@@ -387,14 +387,15 @@ export default class ObsidianNextcloudsync extends Plugin {
 
       if (mobileWatch) {
         // One best-effort flush when Android hides the WebView; no new background work after that.
-        // On visible, defer one macrotask so Client Push reconnect and upstream resume get their
-        // normal chance first. If one starts a full sync, watch recovery awaits that same run.
+        // On visible, defer to a microtask so every listener for this visibility event (Client Push
+        // reconnect + upstream resume included) gets its normal chance first. Unlike a timer, this
+        // cannot linger into a later task after plugin teardown.
         this.registerDomEvent(document, 'visibilitychange', () => {
           if (document.hidden) {
             mobileWatch.onHidden();
             return;
           }
-          window.setTimeout(() => mobileWatch.onVisible(), 0);
+          queueMicrotask(() => mobileWatch.onVisible());
         });
 
         // window online handles connectivity recovery. NetworkInformation change handles the
