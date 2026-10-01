@@ -87,6 +87,16 @@ export class MobileWatchLifecycle {
       return false;
     } finally {
       this.structuralInFlight = Math.max(0, this.structuralInFlight - 1);
+      if (
+        this.structuralInFlight === 0
+        && this.pendingFiles.size > 0
+        && !this.structuralDirty
+        && this.recovery === null
+        && this.deps.isVisible()
+        && this.deps.canUseNetwork()
+      ) {
+        void this.flushFiles(false);
+      }
     }
   }
 
@@ -119,7 +129,7 @@ export class MobileWatchLifecycle {
       this.resetQueuedState();
       return;
     }
-    if (this.structuralDirty || this.recovery !== null) return;
+    if (this.structuralDirty || this.recovery !== null || this.structuralInFlight > 0) return;
     if (!this.deps.canUseNetwork()) return;
     if (!allowHidden && !this.deps.isVisible()) return;
 
