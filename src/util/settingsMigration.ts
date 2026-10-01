@@ -220,6 +220,29 @@ export function applyMobileFirstRunDefaults(
 }
 
 /**
+ * One-time safety migration for the release that first makes Android watch mode runnable.
+ *
+ * Before this feature, mobile runtime always ignored watchOnChangeEnabled even if data.json carried
+ * true (for example after copying a desktop profile). Letting that latent value suddenly become live
+ * would enable a high-frequency automatic sync without an Android user opting in. On the first
+ * Android load after this feature lands, force the setting off once and record the boundary.
+ *
+ * Later loads preserve the user's choice, including true. Desktop never calls this migration, so its
+ * established default/setting remains untouched.
+ *
+ * Returns true when settings changed and should be persisted.
+ */
+export function migrateAndroidWatchOptIn(
+  saved: { mobileWatchMigrationVersion?: unknown },
+  settings: DavSyncSettings,
+): boolean {
+  if (saved.mobileWatchMigrationVersion === 1) return false;
+  settings.watchOnChangeEnabled = false;
+  settings.mobileWatchMigrationVersion = 1;
+  return true;
+}
+
+/**
  * Runtime watch-mode gate.
  *
  * Desktop keeps the original behaviour. Android may opt into foreground watch; iOS remains disabled
