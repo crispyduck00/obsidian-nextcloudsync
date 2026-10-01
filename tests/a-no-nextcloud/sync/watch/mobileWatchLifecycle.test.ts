@@ -233,6 +233,23 @@ describe('MobileWatchLifecycle', () => {
     expect(h.syncFile).toHaveBeenCalledTimes(2);
   });
 
+  it('holds file uploads until an in-flight structural operation has settled', async () => {
+    const h = harness();
+    const structure = deferred<boolean>();
+    const running = h.lifecycle.runStructural(() => structure.promise);
+    await settle();
+
+    h.lifecycle.queueFile('Folder/note.md');
+    await h.lifecycle.flushFiles();
+    expect(h.syncFile).not.toHaveBeenCalled();
+
+    structure.resolve(true);
+    await running;
+    await settle();
+
+    expect(h.syncFile).toHaveBeenCalledWith('Folder/note.md');
+  });
+
   it('defers a hidden structural event to authoritative recovery instead of running it blindly', async () => {
     const h = harness();
     h.setVisible(false);
