@@ -428,6 +428,7 @@ export default class ObsidianNextcloudsync extends Plugin {
         // window online handles connectivity recovery. NetworkInformation change handles the
         // Android case where the device remains online but switches cellular ↔ Wi-Fi.
         this.registerDomEvent(window, 'online', () => mobileWatch.onNetworkChanged());
+        this.registerDomEvent(window, 'offline', () => mobileWatch.onNetworkChanged());
         const connection = (navigator as Navigator & { connection?: EventTarget }).connection;
         if (connection) {
           const onConnectionChange = (): void => mobileWatch.onNetworkChanged();
