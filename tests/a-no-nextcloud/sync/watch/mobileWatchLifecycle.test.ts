@@ -160,7 +160,7 @@ describe('MobileWatchLifecycle', () => {
 
   it('marks an in-flight structural operation uncertain when network becomes blocked', async () => {
     const h = harness();
-    const op = deferred<void>();
+    const op = deferred<boolean>();
     const running = h.lifecycle.runStructural(() => op.promise);
     await settle();
 
@@ -168,7 +168,7 @@ describe('MobileWatchLifecycle', () => {
     h.lifecycle.onNetworkChanged();
     expect(h.lifecycle.isStructuralDirty()).toBe(true);
 
-    op.resolve();
+    op.resolve(true);
     await running;
     expect(h.recoverStructural).not.toHaveBeenCalled();
 
@@ -236,7 +236,7 @@ describe('MobileWatchLifecycle', () => {
   it('defers a hidden structural event to authoritative recovery instead of running it blindly', async () => {
     const h = harness();
     h.setVisible(false);
-    const structuralWork = jest.fn(async () => undefined);
+    const structuralWork = jest.fn(async () => true);
 
     const ran = await h.lifecycle.runStructural(structuralWork);
 
@@ -255,7 +255,7 @@ describe('MobileWatchLifecycle', () => {
   it('Wi-Fi-blocked rename/delete/folder work becomes structural-dirty and waits for Wi-Fi', async () => {
     const h = harness();
     h.setNetwork(false);
-    const structuralWork = jest.fn(async () => undefined);
+    const structuralWork = jest.fn(async () => true);
 
     expect(await h.lifecycle.runStructural(structuralWork)).toBe(false);
     expect(structuralWork).not.toHaveBeenCalled();
@@ -269,7 +269,7 @@ describe('MobileWatchLifecycle', () => {
 
   it('marks structure dirty when the app hides during an in-flight structural operation', async () => {
     const h = harness();
-    const op = deferred<void>();
+    const op = deferred<boolean>();
     const running = h.lifecycle.runStructural(() => op.promise);
     await settle();
 
@@ -278,7 +278,7 @@ describe('MobileWatchLifecycle', () => {
 
     expect(h.lifecycle.isStructuralDirty()).toBe(true);
 
-    op.resolve();
+    op.resolve(true);
     await running;
 
     h.setVisible(true);
@@ -377,6 +377,17 @@ describe('MobileWatchLifecycle', () => {
 
     expect(h.lifecycle.pendingFileCount()).toBe(1);
     expect(h.log).toHaveBeenCalledWith(expect.stringContaining('retry-me.md'));
+  });
+
+  it('turns a contained non-converged structural result into authoritative recovery work', async () => {
+    const h = harness();
+
+    expect(await h.lifecycle.runStructural(async () => false)).toBe(false);
+    expect(h.lifecycle.isStructuralDirty()).toBe(true);
+
+    h.lifecycle.onVisible();
+    await settle();
+    expect(h.recoverStructural).toHaveBeenCalledTimes(1);
   });
 
   it('turns an unexpected structural rejection into authoritative recovery work', async () => {
