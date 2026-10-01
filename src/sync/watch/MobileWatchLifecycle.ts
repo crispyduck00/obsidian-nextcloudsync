@@ -145,14 +145,19 @@ export class MobileWatchLifecycle {
       return;
     }
 
-    for (const path of this.inFlightFiles) this.pendingFiles.add(path);
+    const inFlightAtHide = [...this.inFlightFiles];
     if (this.structuralInFlight > 0) {
       this.markStructuralDirty('app hidden during structural watch operation');
     }
 
-    if (this.hiddenFlushAttempted) return;
-    this.hiddenFlushAttempted = true;
-    void this.flushFiles(true);
+    if (!this.hiddenFlushAttempted) {
+      this.hiddenFlushAttempted = true;
+      // Flush only work that was pending BEFORE hide. In-flight paths are added afterwards so they
+      // are retried on the next foreground, not started a second time while already running.
+      void this.flushFiles(true);
+    }
+
+    for (const path of inFlightAtHide) this.pendingFiles.add(path);
   }
 
   /**
