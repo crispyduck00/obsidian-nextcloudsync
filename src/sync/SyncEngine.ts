@@ -646,9 +646,13 @@ export class SyncEngine {
    * open, so report whether this attempt added retry work without changing the classifier itself.
    */
   async syncSingleFileForMobileWatch(path: string): Promise<boolean> {
-    const retriesBefore = this.retryQueue.length;
+    const retryCount = (): number => this.retryQueue.reduce(
+      (count, queued) => count + (queued === path ? 1 : 0),
+      0,
+    );
+    const retriesBefore = retryCount();
     await this.watch.syncSingleFile(path);
-    return this.retryQueue.length <= retriesBefore;
+    return retryCount() <= retriesBefore;
   }
 
   /**
