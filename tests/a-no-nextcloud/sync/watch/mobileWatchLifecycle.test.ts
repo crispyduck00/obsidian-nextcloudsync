@@ -276,6 +276,17 @@ describe('MobileWatchLifecycle', () => {
     expect(h.lifecycle.isStructuralDirty()).toBe(false);
   });
 
+  it('requests a fresh-after-current recovery when the dirty marker came from a mid-sync event', async () => {
+    const h = harness();
+
+    h.lifecycle.markStructuralDirty('changed during full sync', true);
+    h.lifecycle.onVisible();
+    await settle();
+
+    expect(h.recoverStructural).toHaveBeenCalledWith(true);
+    expect(h.lifecycle.isStructuralDirty()).toBe(false);
+  });
+
   it('keeps structural-dirty state when recovery does not complete', async () => {
     const h = harness();
     h.recoverStructural.mockResolvedValueOnce(false);
