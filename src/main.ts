@@ -293,6 +293,16 @@ export default class ObsidianNextcloudsync extends Plugin {
 
       const runStructural = (work: (engine: SyncEngine) => Promise<void>): void => {
         if (mobileWatch) {
+          const engineAtEvent = this.syncEngine;
+          if (engineAtEvent?.isSyncRunning()) {
+            // A full scan snapshots/enumerates the vault over time. Queueing a MOVE/DELETE behind it
+            // can replay structure the scan may already have reconciled. Treat the mid-scan event as
+            // uncertain and let one authoritative pass after the current run settle the final shape.
+            mobileWatch.markStructuralDirty('structural event arrived during full sync');
+            mobileWatch.onVisible(); // awaits the current run through syncForWatchRecovery()
+            return;
+          }
+
           void mobileWatch.runStructural(async () => {
             const engine = this.syncEngine;
             if (!engine) {
@@ -303,6 +313,10 @@ export default class ObsidianNextcloudsync extends Plugin {
               return;
             }
             await work(engine);
+          }).then((ran) => {
+            // Hidden/cellular cases simply no-op here because onVisible re-checks those guards.
+            // A propagated structural failure while still foregrounded starts recovery immediately.
+            if (!ran) mobileWatch.onVisible();
           });
           return;
         }
