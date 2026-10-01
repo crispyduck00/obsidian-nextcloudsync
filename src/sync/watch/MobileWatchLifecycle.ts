@@ -18,7 +18,7 @@ export interface MobileWatchLifecycleDeps {
   isEnabled(): boolean;
   isVisible(): boolean;
   canUseNetwork(): boolean;
-  syncFile(path: string): Promise<void>;
+  syncFile(path: string): Promise<boolean>;
   recoverStructural(requireFreshAfterCurrent: boolean): Promise<boolean>;
   log?(message: string): void;
 }
@@ -199,7 +199,12 @@ export class MobileWatchLifecycle {
   private async startFile(path: string): Promise<void> {
     this.inFlightFiles.add(path);
     try {
-      await this.deps.syncFile(path);
+      const completed = await this.deps.syncFile(path);
+      if (!completed && this.deps.isEnabled()) {
+        // WatchOperations queued retry work (typically NetworkError). Keep the mobile trigger too so
+        // an online/Wi-Fi transition can retry immediately without waiting for a later full sync.
+        this.pendingFiles.add(path);
+      }
     } catch (err) {
       // The existing WatchOperations normally contains network/classifier failures itself. This is a
       // final lifecycle safety net for an unexpected rejection: keep the local path for a later
