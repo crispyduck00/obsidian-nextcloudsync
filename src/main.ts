@@ -453,9 +453,10 @@ export default class ObsidianNextcloudsync extends Plugin {
       }
       // Feature 079 (discussion #44): sync when the app comes back to the foreground.
       //
-      // On mobile this is the only trigger that fires at all once the app has been left running —
-      // periodic sync and watch mode are both off there because the OS suspends background timers.
-      // Registered on every platform rather than only on mobile: a desktop that slept has the same
+      // Mobile has no reliable periodic background sync. Android foreground Watch accelerates local
+      // changes while the app is alive, but Resume remains the authoritative catch-up after suspend
+      // (and for remote changes when Client Push is off). Registered on every platform: a desktop
+      // that slept has the same
       // hole, since its interval timer did not tick while it was asleep, and not branching is
       // simpler than branching. The cooldown inside the handler is what keeps a burst of app
       // switches from turning into a burst of syncs.
@@ -471,10 +472,6 @@ export default class ObsidianNextcloudsync extends Plugin {
   }
 
   /**
-   * Run "Sync Now". On the very first sync (no recorded state), the engine performs a full scan and
-   * applies the initial plan directly. Shared by the command and the settings button.
-   */
-  /**
    * Re-evaluate Android Watch after a live setting change. Used by the declarative settings layer
    * for Wi-Fi-only / Watch toggles so pending work does not wait for an unrelated network or
    * visibility event. The lifecycle itself re-checks enabled/visible/network policy before acting.
@@ -483,6 +480,10 @@ export default class ObsidianNextcloudsync extends Plugin {
     this.mobileWatch?.onNetworkChanged();
   }
 
+  /**
+   * Run "Sync Now". On the very first sync (no recorded state), the engine performs a full scan and
+   * applies the initial plan directly. Shared by the command and the settings button.
+   */
   async runSyncNow(): Promise<void> {
     void this.logger.log('sync: "Sync now" clicked');
     // Initialize lazily if credentials were entered after startup (e.g. first-time setup).
