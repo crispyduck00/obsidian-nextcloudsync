@@ -468,13 +468,26 @@ export class SyncEngine {
    * notice. Otherwise start the same ordinary full-sync path. Watch never gets separate merge or
    * reconciliation semantics.
    */
-  async syncForWatchRecovery(): Promise<boolean> {
+  async syncForWatchRecovery(requireFreshAfterCurrent = false): Promise<boolean> {
     const current = this.currentRun;
     if (current) {
       try {
-        return await current;
+        const completed = await current;
+        if (!requireFreshAfterCurrent) return completed;
       } catch {
-        return false;
+        if (!requireFreshAfterCurrent) return false;
+        // A structural event occurred during the failed run; retry below with a fresh full sync.
+      }
+
+      // Another authoritative run may have started after the old one settled (resume/push/manual).
+      // Because that successor necessarily began after the structural event, it is fresh enough.
+      const successor = this.currentRun;
+      if (successor) {
+        try {
+          return await successor;
+        } catch {
+          return false;
+        }
       }
     }
     return this.syncManualWithResult();
