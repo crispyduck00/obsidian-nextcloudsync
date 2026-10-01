@@ -255,9 +255,9 @@ export default class ObsidianNextcloudsync extends Plugin {
               const engine = this.syncEngine;
               if (engine) await engine.syncSingleFile(path);
             },
-            recoverStructural: async () => {
+            recoverStructural: async (requireFreshAfterCurrent) => {
               const engine = this.syncEngine;
-              return engine ? engine.syncForWatchRecovery() : false;
+              return engine ? engine.syncForWatchRecovery(requireFreshAfterCurrent) : false;
             },
             log: (message) => { void this.logger.log(message); },
           })
@@ -301,7 +301,7 @@ export default class ObsidianNextcloudsync extends Plugin {
             // A full scan snapshots/enumerates the vault over time. Queueing a MOVE/DELETE behind it
             // can replay structure the scan may already have reconciled. Treat the mid-scan event as
             // uncertain and let one authoritative pass after the current run settle the final shape.
-            mobileWatch.markStructuralDirty('structural event arrived during full sync');
+            mobileWatch.markStructuralDirty('structural event arrived during full sync', true);
             mobileWatch.onVisible(); // awaits the current run through syncForWatchRecovery()
             return;
           }
@@ -383,7 +383,7 @@ export default class ObsidianNextcloudsync extends Plugin {
 
         if (mobileWatch) {
           if (engine.isSyncRunning()) {
-            mobileWatch.markStructuralDirty('rename arrived during full sync');
+            mobileWatch.markStructuralDirty('rename arrived during full sync', true);
             if (hadPendingUpload) mobileWatch.queueFile(newPath);
             mobileWatch.onVisible(); // await the current full run, then reconcile the final structure
             return;
