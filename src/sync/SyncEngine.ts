@@ -669,9 +669,34 @@ export class SyncEngine {
     return this.watch.deleteSingleFile(path);
   }
 
+  /**
+   * Mobile result wrapper for a local file deletion. A guarded delete may legitimately restore the
+   * remote file when another device changed it; that is converged too. What needs structural recovery
+   * is the state where the tracked entry remains AND the local path is still absent (e.g. transport
+   * failure swallowed by the upstream watch method).
+   */
+  async deleteSingleFileForMobileWatch(path: string): Promise<boolean> {
+    const trackedBefore = this.opts.stateDB.getFile(path);
+    await this.watch.deleteSingleFile(path);
+    if (!trackedBefore || !this.opts.stateDB.getFile(path)) return true;
+    return (await this.opts.localAdapter.stat(path)) != null;
+  }
+
   /** @see WatchOperations.renameSingleFile */
   renameSingleFile(oldPath: string, newPath: string): Promise<void> {
     return this.watch.renameSingleFile(oldPath, newPath);
+  }
+
+  /**
+   * Mobile result wrapper for MOVE. A tracked rename is converged only when the existing StateDB
+   * identity moved with it. Untracked renames are intentionally conservative: a full reconcile is
+   * safer than guessing whether a pre-first-sync/new local file ever existed remotely.
+   */
+  async renameSingleFileForMobileWatch(oldPath: string, newPath: string): Promise<boolean> {
+    const trackedBefore = this.opts.stateDB.getFile(oldPath);
+    await this.watch.renameSingleFile(oldPath, newPath);
+    if (!trackedBefore) return false;
+    return this.opts.stateDB.getFile(oldPath) == null && this.opts.stateDB.getFile(newPath) != null;
   }
 
   /** @see WatchOperations.createSingleFolder */
@@ -679,14 +704,32 @@ export class SyncEngine {
     return this.watch.createSingleFolder(path);
   }
 
+  async createSingleFolderForMobileWatch(path: string): Promise<boolean> {
+    await this.watch.createSingleFolder(path);
+    return this.opts.stateDB.getDir(path) != null;
+  }
+
   /** @see WatchOperations.deleteSingleFolder */
   deleteSingleFolder(path: string): Promise<void> {
     return this.watch.deleteSingleFolder(path);
   }
 
+  async deleteSingleFolderForMobileWatch(path: string): Promise<boolean> {
+    const trackedBefore = this.opts.stateDB.getDir(path);
+    await this.watch.deleteSingleFolder(path);
+    return !trackedBefore || this.opts.stateDB.getDir(path) == null;
+  }
+
   /** @see WatchOperations.renameSingleFolder */
   renameSingleFolder(oldPath: string, newPath: string): Promise<void> {
     return this.watch.renameSingleFolder(oldPath, newPath);
+  }
+
+  async renameSingleFolderForMobileWatch(oldPath: string, newPath: string): Promise<boolean> {
+    const trackedBefore = this.opts.stateDB.getDir(oldPath);
+    await this.watch.renameSingleFolder(oldPath, newPath);
+    if (!trackedBefore) return false;
+    return this.opts.stateDB.getDir(oldPath) == null && this.opts.stateDB.getDir(newPath) != null;
   }
 
   startAutoSync(intervalMinutes: number): void {
