@@ -30,6 +30,21 @@ describe('SyncEngine.syncForWatchRecovery', () => {
     expect(startAnother).not.toHaveBeenCalled();
   });
 
+  it('starts a fresh full sync when structure changed during the already-running sync', async () => {
+    const engine = makeEngine();
+    const internals = engine as unknown as {
+      currentRun: Promise<boolean> | null;
+      syncManualWithResult: () => Promise<boolean>;
+    };
+
+    internals.currentRun = Promise.resolve(true);
+    const freshFullSync = jest.fn(async () => true);
+    internals.syncManualWithResult = freshFullSync;
+
+    await expect(engine.syncForWatchRecovery(true)).resolves.toBe(true);
+    expect(freshFullSync).toHaveBeenCalledTimes(1);
+  });
+
   it('uses the ordinary full-sync path when no authoritative run is active', async () => {
     const engine = makeEngine();
     const internals = engine as unknown as {
