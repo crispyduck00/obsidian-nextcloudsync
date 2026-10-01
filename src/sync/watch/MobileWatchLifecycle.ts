@@ -75,6 +75,10 @@ export class MobileWatchLifecycle {
     try {
       await work();
       return true;
+    } catch (err) {
+      this.markStructuralDirty('structural watch operation failed');
+      this.deps.log?.(`mobile-watch: structural operation error — ${this.errorMessage(err)}`);
+      return false;
     } finally {
       this.structuralInFlight = Math.max(0, this.structuralInFlight - 1);
     }
@@ -191,6 +195,12 @@ export class MobileWatchLifecycle {
     this.inFlightFiles.add(path);
     try {
       await this.deps.syncFile(path);
+    } catch (err) {
+      // The existing WatchOperations normally contains network/classifier failures itself. This is a
+      // final lifecycle safety net for an unexpected rejection: keep the local path for a later
+      // foreground re-check rather than creating an unhandled promise or losing the trigger.
+      if (this.deps.isEnabled()) this.pendingFiles.add(path);
+      this.deps.log?.(`mobile-watch: file sync failed for ${path} — ${this.errorMessage(err)}`);
     } finally {
       this.inFlightFiles.delete(path);
     }
@@ -236,5 +246,9 @@ export class MobileWatchLifecycle {
     this.structuralDirty = false;
     this.structuralGeneration++;
     this.hiddenFlushAttempted = false;
+  }
+
+  private errorMessage(err: unknown): string {
+    return err instanceof Error ? err.message : String(err);
   }
 }
