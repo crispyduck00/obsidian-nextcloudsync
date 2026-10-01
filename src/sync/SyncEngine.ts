@@ -402,6 +402,7 @@ export class SyncEngine {
    * existing Wi-Fi-only setting applies to watch mode as well as full sync / Client Push.
    */
   canRunWatchSync(): boolean {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return false;
     return !this.isBlockedByWifiOnly();
   }
 
