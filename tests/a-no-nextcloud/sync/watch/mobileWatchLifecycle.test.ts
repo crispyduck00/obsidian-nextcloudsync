@@ -17,7 +17,7 @@ function harness() {
   let enabled = true;
   let visible = true;
   let network = true;
-  const syncFile = jest.fn(async (_path: string) => undefined);
+  const syncFile = jest.fn(async (_path: string) => true);
   const recoverStructural = jest.fn(async () => true);
   const log = jest.fn();
 
@@ -109,10 +109,10 @@ describe('MobileWatchLifecycle', () => {
 
   it('re-queues a file that was in flight when Android hid the app', async () => {
     const h = harness();
-    const first = deferred<void>();
+    const first = deferred<boolean>();
     h.syncFile
       .mockImplementationOnce(() => first.promise)
-      .mockImplementation(async () => undefined);
+      .mockImplementation(async () => true);
 
     h.lifecycle.queueFile('in-flight.md');
     await h.lifecycle.flushFiles();
@@ -123,7 +123,7 @@ describe('MobileWatchLifecycle', () => {
     h.lifecycle.onHidden();
     expect(h.lifecycle.pendingFileCount()).toBe(1);
 
-    first.resolve();
+    first.resolve(true);
     await settle();
 
     h.setVisible(true);
@@ -172,6 +172,7 @@ describe('MobileWatchLifecycle', () => {
     h.lifecycle.queueFile('b.md');
     h.syncFile.mockImplementation(async () => {
       h.setNetwork(false);
+      return true;
     });
 
     await h.lifecycle.flushFiles();
@@ -301,6 +302,23 @@ describe('MobileWatchLifecycle', () => {
     h.lifecycle.onNetworkChanged();
     await settle();
     expect(h.lifecycle.isStructuralDirty()).toBe(false);
+  });
+
+  it('keeps a contained WatchOperations retry pending for an online/Wi-Fi reconnect', async () => {
+    const h = harness();
+    h.syncFile.mockResolvedValueOnce(false);
+    h.lifecycle.queueFile('network-retry.md');
+
+    await h.lifecycle.flushFiles();
+    await settle();
+
+    expect(h.lifecycle.pendingFileCount()).toBe(1);
+
+    h.lifecycle.onNetworkChanged();
+    await settle();
+
+    expect(h.syncFile).toHaveBeenCalledTimes(2);
+    expect(h.lifecycle.pendingFileCount()).toBe(0);
   });
 
   it('retains a file path when an unexpected sync rejection escapes the existing watch layer', async () => {
