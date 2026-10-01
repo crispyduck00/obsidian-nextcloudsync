@@ -132,6 +132,52 @@ describe('MobileWatchLifecycle', () => {
     expect(h.syncFile).toHaveBeenCalledTimes(2);
   });
 
+  it('does not abort an in-flight file when network becomes blocked, but retries it later', async () => {
+    const h = harness();
+    const first = deferred<boolean>();
+    h.syncFile
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementation(async () => true);
+
+    h.lifecycle.queueFile('network-drop.md');
+    await h.lifecycle.flushFiles();
+    await settle();
+    expect(h.syncFile).toHaveBeenCalledTimes(1);
+
+    h.setNetwork(false);
+    h.lifecycle.onNetworkChanged();
+    expect(h.lifecycle.pendingFileCount()).toBe(1);
+
+    first.resolve(true);
+    await settle();
+    expect(h.syncFile).toHaveBeenCalledTimes(1); // no abort/restart while blocked
+
+    h.setNetwork(true);
+    h.lifecycle.onNetworkChanged();
+    await settle();
+    expect(h.syncFile).toHaveBeenCalledTimes(2);
+  });
+
+  it('marks an in-flight structural operation uncertain when network becomes blocked', async () => {
+    const h = harness();
+    const op = deferred<void>();
+    const running = h.lifecycle.runStructural(() => op.promise);
+    await settle();
+
+    h.setNetwork(false);
+    h.lifecycle.onNetworkChanged();
+    expect(h.lifecycle.isStructuralDirty()).toBe(true);
+
+    op.resolve();
+    await running;
+    expect(h.recoverStructural).not.toHaveBeenCalled();
+
+    h.setNetwork(true);
+    h.lifecycle.onNetworkChanged();
+    await settle();
+    expect(h.recoverStructural).toHaveBeenCalledTimes(1);
+  });
+
   it('retains file edits while Wi-Fi-only blocks the network and drains them when the network becomes allowed', async () => {
     const h = harness();
     h.setNetwork(false);
