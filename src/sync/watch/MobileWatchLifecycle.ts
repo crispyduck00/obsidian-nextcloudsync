@@ -67,7 +67,7 @@ export class MobileWatchLifecycle {
    * Returning false means no network operation was started; the caller may still queue associated
    * file content (e.g. edit+rename), which stays blocked behind structural recovery.
    */
-  async runStructural(work: () => Promise<void>): Promise<boolean> {
+  async runStructural(work: () => Promise<boolean>): Promise<boolean> {
     if (!this.canStartStructural()) {
       this.markStructuralDirty('structural event deferred');
       return false;
@@ -75,7 +75,11 @@ export class MobileWatchLifecycle {
 
     this.structuralInFlight++;
     try {
-      await work();
+      const converged = await work();
+      if (!converged) {
+        this.markStructuralDirty('structural watch operation did not converge');
+        return false;
+      }
       return true;
     } catch (err) {
       this.markStructuralDirty('structural watch operation failed');
