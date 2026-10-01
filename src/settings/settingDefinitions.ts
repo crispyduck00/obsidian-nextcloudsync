@@ -97,6 +97,7 @@ export const UI_LESS_SETTING_KEYS: readonly (keyof DavSyncSettings)[] = [
   'logsFolder',          // fixed to the vault root (feature 032)
   'statusFilter',        // persisted UI state of the Sync Status dialog, not a preference
   'lastKnownServerVersion', // observed from the server, for the version-recommendation banner
+  'mobileWatchMigrationVersion', // one-time Android opt-in migration metadata, not a preference
   'configSync',          // container object; its categories bind through their own rows
 ];
 
