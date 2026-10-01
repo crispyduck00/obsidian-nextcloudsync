@@ -253,7 +253,7 @@ export default class ObsidianNextcloudsync extends Plugin {
             canUseNetwork: () => this.syncEngine?.canRunWatchSync() ?? false,
             syncFile: async (path) => {
               const engine = this.syncEngine;
-              if (engine) await engine.syncSingleFile(path);
+              return engine ? engine.syncSingleFileForMobileWatch(path) : false;
             },
             recoverStructural: async (requireFreshAfterCurrent) => {
               const engine = this.syncEngine;
