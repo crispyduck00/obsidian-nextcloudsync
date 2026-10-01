@@ -295,7 +295,14 @@ export default class ObsidianNextcloudsync extends Plugin {
         if (mobileWatch) {
           void mobileWatch.runStructural(async () => {
             const engine = this.syncEngine;
-            if (engine) await work(engine);
+            if (!engine) {
+              // The listeners are installed as layout becomes ready while engine initialization is
+              // asynchronous. Never silently "complete" a create/delete/folder operation in that
+              // narrow window; make the next foreground/network opportunity reconcile authoritatively.
+              mobileWatch.markStructuralDirty('structural event arrived before sync engine was ready');
+              return;
+            }
+            await work(engine);
           });
           return;
         }
