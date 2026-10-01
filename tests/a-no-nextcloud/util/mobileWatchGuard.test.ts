@@ -3,7 +3,7 @@ import { isWatchModeActive } from '../../../src/util/settingsMigration';
 // Android foreground watch is opt-in. Mobile first-run still defaults the persisted setting to false
 // (mobileFirstRunDefaults.test.ts); this runtime policy decides only whether an already-enabled
 // setting is allowed to fire on the current platform.
-describe('isWatchModeActive (mobile watch)', () => {
+describe('[SPEC:G7-2] isWatchModeActive (mobile watch)', () => {
   it('is active on desktop when the setting is on', () => {
     expect(isWatchModeActive(true, false, false)).toBe(true);
   });
