@@ -37,11 +37,18 @@ describe('SyncEngine.syncForWatchRecovery', () => {
       syncManualWithResult: () => Promise<boolean>;
     };
 
-    internals.currentRun = Promise.resolve(true);
+    let finishCurrent!: (value: boolean) => void;
+    const current = new Promise<boolean>((resolve) => { finishCurrent = resolve; });
+    internals.currentRun = current;
     const freshFullSync = jest.fn(async () => true);
     internals.syncManualWithResult = freshFullSync;
 
-    await expect(engine.syncForWatchRecovery(true)).resolves.toBe(true);
+    const recovery = engine.syncForWatchRecovery(true);
+    // Production syncManualWithResult clears currentRun in its finally when this run settles.
+    internals.currentRun = null;
+    finishCurrent(true);
+
+    await expect(recovery).resolves.toBe(true);
     expect(freshFullSync).toHaveBeenCalledTimes(1);
   });
 
