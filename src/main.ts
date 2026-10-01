@@ -379,11 +379,21 @@ export default class ObsidianNextcloudsync extends Plugin {
         }
 
         if (mobileWatch) {
+          if (engine.isSyncRunning()) {
+            mobileWatch.markStructuralDirty('rename arrived during full sync');
+            if (hadPendingUpload) mobileWatch.queueFile(newPath);
+            mobileWatch.onVisible(); // await the current full run, then reconcile the final structure
+            return;
+          }
+
           // Hidden/Wi-Fi-blocked renames become structural-dirty instead of replaying a blind MOVE.
           void mobileWatch.runStructural(() => engine.renameSingleFile(oldPath, newPath))
-            .then(() => {
-              if (!hadPendingUpload) return;
-              mobileWatch.queueFile(newPath);
+            .then((ran) => {
+              if (hadPendingUpload) mobileWatch.queueFile(newPath);
+              if (!ran) {
+                mobileWatch.onVisible();
+                return;
+              }
               void mobileWatch.flushFiles();
             });
           return;
