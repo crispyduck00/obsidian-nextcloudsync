@@ -1,10 +1,10 @@
 // [SPEC:RSY-1] [SPEC:RSY-2] [SPEC:RSY-3] Sync when the app comes back to the foreground (feature 079,
 // GitHub discussion #44).
 //
-// Mobile has no periodic sync and no watch mode — both are disabled there because the OS suspends
-// background timers — so an Obsidian left running in the background never syncs at all. Coming back
-// to the app is the one moment when the app is provably alive and the user is provably looking at it,
-// which makes it the only trigger that does not depend on background execution being reliable.
+// Mobile has no reliable periodic background sync. Android may opt into foreground-only Watch, but
+// that deliberately does not promise work while suspended and does not replace remote catch-up.
+// Coming back to the app is the one moment when the app is provably alive and the user is looking at
+// it, which makes Resume the authoritative lifecycle trigger that does not depend on background work.
 //
 // The whole risk of this feature is the second half: a trigger that fires on every app switch would
 // cost the user data and battery for nothing. So the cooldown is tested as hard as the trigger.
