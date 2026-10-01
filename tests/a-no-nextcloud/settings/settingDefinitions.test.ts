@@ -323,9 +323,18 @@ describe('[SPEC:DSD-5] predicates reflect platform and sign-in state', () => {
     expect(isDisabled(rowNamed(makeHost({ isIosApp: false }), 'Sync on Wi-Fi only'))).toBe(false);
   });
 
-  it('disables "Sync on file change" on every mobile platform', () => {
-    expect(isDisabled(rowNamed(makeHost({ isMobile: true }), 'Sync on file change'))).toBe(true);
-    expect(isDisabled(rowNamed(makeHost({ isMobile: false }), 'Sync on file change'))).toBe(false);
+  it('enables "Sync on file change" on Android but keeps it disabled on iOS', () => {
+    expect(isDisabled(rowNamed(makeHost({ isMobile: true, isIosApp: false }), 'Sync on file change'))).toBe(false);
+    expect(isDisabled(rowNamed(makeHost({ isMobile: true, isIosApp: true }), 'Sync on file change'))).toBe(true);
+    expect(isDisabled(rowNamed(makeHost({ isMobile: false, isIosApp: false }), 'Sync on file change'))).toBe(false);
+  });
+
+  it('describes Android watch as foreground, best-effort and Wi-Fi-only aware', () => {
+    const row = rowNamed(makeHost({ isMobile: true, isIosApp: false }), 'Sync on file change');
+    expect(row.desc).toContain('foreground');
+    expect(row.desc).toContain('best-effort');
+    expect(row.desc).toContain('Wi-Fi-only');
+    expect(row.desc).toContain('Off by default');
   });
 
   it('enables the Client Push URL override only while Client Push is enabled', () => {
