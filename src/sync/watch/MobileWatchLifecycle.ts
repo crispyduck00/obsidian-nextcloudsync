@@ -19,7 +19,7 @@ export interface MobileWatchLifecycleDeps {
   isVisible(): boolean;
   canUseNetwork(): boolean;
   syncFile(path: string): Promise<void>;
-  recoverStructural(): Promise<boolean>;
+  recoverStructural(requireFreshAfterCurrent: boolean): Promise<boolean>;
   log?(message: string): void;
 }
 
@@ -28,6 +28,8 @@ export class MobileWatchLifecycle {
   private readonly inFlightFiles = new Set<string>();
   private structuralInFlight = 0;
   private structuralDirty = false;
+  /** True when the structural event happened DURING a full sync that may already have scanned it. */
+  private freshRecoveryRequired = false;
   private structuralGeneration = 0;
   private hiddenFlushAttempted = false;
   private recovery: Promise<void> | null = null;
@@ -90,11 +92,14 @@ export class MobileWatchLifecycle {
    * The generation lets a recovery that was already running distinguish "I repaired the state I
    * knew about" from "another structural event happened while I was repairing it".
    */
-  markStructuralDirty(reason = 'structural state uncertain'): void {
+  markStructuralDirty(reason = 'structural state uncertain', requireFreshRecovery = false): void {
     if (!this.deps.isEnabled()) return;
     this.structuralDirty = true;
+    this.freshRecoveryRequired ||= requireFreshRecovery;
     this.structuralGeneration++;
-    this.deps.log?.(`mobile-watch: ${reason} → full reconciliation required`);
+    this.deps.log?.(
+      `mobile-watch: ${reason} → full reconciliation required${requireFreshRecovery ? ' after current sync' : ''}`,
+    );
   }
 
   /**
@@ -213,11 +218,18 @@ export class MobileWatchLifecycle {
       if (this.recovery !== null) return;
 
       const generation = this.structuralGeneration;
+      const requireFresh = this.freshRecoveryRequired;
       let completed = false;
       const run = (async () => {
-        completed = await this.deps.recoverStructural();
+        try {
+          completed = await this.deps.recoverStructural(requireFresh);
+        } catch (err) {
+          this.deps.log?.(`mobile-watch: structural recovery failed — ${this.errorMessage(err)}`);
+          completed = false;
+        }
         if (completed && generation === this.structuralGeneration) {
           this.structuralDirty = false;
+          this.freshRecoveryRequired = false;
         }
       })();
 
@@ -244,6 +256,7 @@ export class MobileWatchLifecycle {
   private resetQueuedState(): void {
     this.pendingFiles.clear();
     this.structuralDirty = false;
+    this.freshRecoveryRequired = false;
     this.structuralGeneration++;
     this.hiddenFlushAttempted = false;
   }
