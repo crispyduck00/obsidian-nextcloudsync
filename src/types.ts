@@ -104,7 +104,7 @@ export interface DavSyncSettings {
    * 0/absent = a persisted true may be a formerly-inert desktop/copied value and must not activate
    * automatically on Android; 1 = the Android user has crossed that migration boundary.
    */
-  mobileWatchMigrationVersion: number;
+  mobileWatchMigrationVersion?: number;
   /** Use Nextcloud Client Push (notify_push) as a best-effort remote-change trigger. */
   useClientPush: boolean;
   /** Optional WebSocket endpoint override. Empty = auto-detect from Nextcloud capabilities. */
