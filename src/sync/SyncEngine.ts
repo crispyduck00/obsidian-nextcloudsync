@@ -86,6 +86,12 @@ interface SyncEngineOptions {
    */
   cleanSideStore?: CleanSideStore;
   statusBar: IStatusBar;
+  /**
+   * Optional status surface for lightweight watch / targeted-push operations. Desktop normally
+   * reuses statusBar; mobile can inject a NullStatusBar so high-frequency automatic work stays
+   * silent while full/manual sync retains its existing NoticeStatusBar feedback.
+   */
+  watchStatusBar?: IStatusBar;
   /** Persisted per-file sync-history log for the status dialog. Optional (absent in some tests). */
   historyStore?: SyncHistoryStore;
   webdavFactory: WebDAVFactory;
@@ -300,7 +306,7 @@ export class SyncEngine {
       localAdapter: opts.localAdapter,
       stateDB: opts.stateDB,
       historyStore: opts.historyStore,
-      statusBar: opts.statusBar,
+      statusBar: opts.watchStatusBar ?? opts.statusBar,
       journal: this.journal,
       mergeBase: this.mergeBase,
       transfer: this.transfer,
@@ -388,6 +394,17 @@ export class SyncEngine {
     return isCellularBlocked(this.opts.settings.syncOnWifiOnly, Platform.isIosApp, conn?.type);
   }
 
+  /**
+   * Whether a new watch operation may use the current network.
+   *
+   * This is intentionally only a policy probe: it performs no network request and does not cancel
+   * work that already started. Mobile foreground-watch uses it before every new operation so the
+   * existing Wi-Fi-only setting applies to watch mode as well as full sync / Client Push.
+   */
+  canRunWatchSync(): boolean {
+    return !this.isBlockedByWifiOnly();
+  }
+
   /** True while a full-vault sync session is running. Used by external trigger schedulers. */
   isSyncRunning(): boolean {
     // `currentRun` stays non-null through the full session's final persistence, while `running` is
@@ -438,6 +455,26 @@ export class SyncEngine {
 
   /** Client Push fallback needs to know whether an authoritative full-sync attempt really completed. */
   async syncForClientPush(): Promise<boolean> {
+    return this.syncManualWithResult();
+  }
+
+  /**
+   * Mobile Watch structural recovery.
+   *
+   * If an ordinary full sync (resume/startup/push/manual) already started on the same foreground
+   * transition, await that authoritative run instead of racing it or showing an "already running"
+   * notice. Otherwise start the same ordinary full-sync path. Watch never gets separate merge or
+   * reconciliation semantics.
+   */
+  async syncForWatchRecovery(): Promise<boolean> {
+    const current = this.currentRun;
+    if (current) {
+      try {
+        return await current;
+      } catch {
+        return false;
+      }
+    }
     return this.syncManualWithResult();
   }
 
