@@ -292,6 +292,31 @@ describe('MobileWatchLifecycle', () => {
     expect(h.lifecycle.isStructuralDirty()).toBe(false);
   });
 
+  it('retains a file path when an unexpected sync rejection escapes the existing watch layer', async () => {
+    const h = harness();
+    h.syncFile.mockRejectedValueOnce(new Error('unexpected'));
+    h.lifecycle.queueFile('retry-me.md');
+
+    await h.lifecycle.flushFiles();
+    await settle();
+
+    expect(h.lifecycle.pendingFileCount()).toBe(1);
+    expect(h.log).toHaveBeenCalledWith(expect.stringContaining('retry-me.md'));
+  });
+
+  it('turns an unexpected structural rejection into authoritative recovery work', async () => {
+    const h = harness();
+
+    expect(await h.lifecycle.runStructural(async () => {
+      throw new Error('move exploded');
+    })).toBe(false);
+
+    expect(h.lifecycle.isStructuralDirty()).toBe(true);
+    h.lifecycle.onVisible();
+    await settle();
+    expect(h.recoverStructural).toHaveBeenCalledTimes(1);
+  });
+
   it('turning watch off drops queued automatic work but does not require cancelling in-flight requests', async () => {
     const h = harness();
     h.lifecycle.queueFile('queued.md');
