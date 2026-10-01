@@ -639,6 +639,19 @@ export class SyncEngine {
   }
 
   /**
+   * Android foreground-watch wrapper around the SAME upstream single-file operation.
+   *
+   * WatchOperations intentionally contains NetworkError and queues the path for the next ordinary
+   * sync. Mobile additionally wants to retry promptly when connectivity returns while the app stays
+   * open, so report whether this attempt added retry work without changing the classifier itself.
+   */
+  async syncSingleFileForMobileWatch(path: string): Promise<boolean> {
+    const retriesBefore = this.retryQueue.length;
+    await this.watch.syncSingleFile(path);
+    return this.retryQueue.length <= retriesBefore;
+  }
+
+  /**
    * Reconcile notify_push IDs without advancing the collection sync token. Only already-known files
    * take the targeted path; structural/unknown cases return `full-sync` to the scheduler.
    */
