@@ -294,7 +294,10 @@ export default class ObsidianNextcloudsync extends Plugin {
       const guard = (file: TAbstractFile): file is TFile =>
         watchOn() && file instanceof TFile;
 
-      const runStructural = (work: (engine: SyncEngine) => Promise<void>): void => {
+      const runStructural = (
+        desktopWork: (engine: SyncEngine) => Promise<void>,
+        mobileWork: (engine: SyncEngine) => Promise<boolean>,
+      ): void => {
         if (mobileWatch) {
           const engineAtEvent = this.syncEngine;
           if (engineAtEvent?.isSyncRunning()) {
@@ -313,18 +316,18 @@ export default class ObsidianNextcloudsync extends Plugin {
               // asynchronous. Never silently "complete" a create/delete/folder operation in that
               // narrow window; make the next foreground/network opportunity reconcile authoritatively.
               mobileWatch.markStructuralDirty('structural event arrived before sync engine was ready');
-              return;
+              return false;
             }
-            await work(engine);
+            return mobileWork(engine);
           }).then((ran) => {
             // Hidden/cellular cases simply no-op here because onVisible re-checks those guards.
-            // A propagated structural failure while still foregrounded starts recovery immediately.
+            // A failed/non-converged operation while still foregrounded starts recovery immediately.
             if (!ran) mobileWatch.onVisible();
           });
           return;
         }
         const engine = this.syncEngine;
-        if (engine) void work(engine);
+        if (engine) void desktopWork(engine);
       };
 
       this.registerEvent(this.app.vault.on('modify', (file: TAbstractFile) => {
@@ -336,7 +339,10 @@ export default class ObsidianNextcloudsync extends Plugin {
       this.registerEvent(this.app.vault.on('create', (file: TAbstractFile) => {
         if (!watchOn() || isOwnSyncEvent(file.path)) return;
         if (file instanceof TFolder) {
-          runStructural((engine) => engine.createSingleFolder(file.path));
+          runStructural(
+            (engine) => engine.createSingleFolder(file.path),
+            (engine) => engine.createSingleFolderForMobileWatch(file.path),
+          );
           return;
         }
         if (!(file instanceof TFile)) return;
@@ -348,10 +354,16 @@ export default class ObsidianNextcloudsync extends Plugin {
         takePendingUpload(file.path);
         if (isOwnSyncEvent(file.path)) return;
         if (file instanceof TFolder) {
-          runStructural((engine) => engine.deleteSingleFolder(file.path));
+          runStructural(
+            (engine) => engine.deleteSingleFolder(file.path),
+            (engine) => engine.deleteSingleFolderForMobileWatch(file.path),
+          );
           return;
         }
-        runStructural((engine) => engine.deleteSingleFile(file.path));
+        runStructural(
+          (engine) => engine.deleteSingleFile(file.path),
+          (engine) => engine.deleteSingleFileForMobileWatch(file.path),
+        );
       }));
 
       this.registerEvent(this.app.vault.on('rename', (file: TAbstractFile, oldPath: string) => {
@@ -360,7 +372,10 @@ export default class ObsidianNextcloudsync extends Plugin {
         if (isOwnSyncEvent(oldPath) || isOwnSyncEvent(file.path)) return;
 
         if (file instanceof TFolder) {
-          runStructural((engine) => engine.renameSingleFolder(oldPath, file.path));
+          runStructural(
+            (engine) => engine.renameSingleFolder(oldPath, file.path),
+            (engine) => engine.renameSingleFolderForMobileWatch(oldPath, file.path),
+          );
           return;
         }
         if (!(file instanceof TFile)) return;
@@ -390,7 +405,7 @@ export default class ObsidianNextcloudsync extends Plugin {
           }
 
           // Hidden/Wi-Fi-blocked renames become structural-dirty instead of replaying a blind MOVE.
-          void mobileWatch.runStructural(() => engine.renameSingleFile(oldPath, newPath))
+          void mobileWatch.runStructural(() => engine.renameSingleFileForMobileWatch(oldPath, newPath))
             .then((ran) => {
               if (hadPendingUpload) mobileWatch.queueFile(newPath);
               if (!ran) {
