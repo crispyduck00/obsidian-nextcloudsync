@@ -188,6 +188,17 @@ export class MobileWatchLifecycle {
       this.resetQueuedState();
       return;
     }
+
+    if (!this.deps.canUseNetwork()) {
+      // Policy/connectivity changed after these requests had already started. Do not abort them;
+      // merely remember that their outcome may be uncertain and verify again on an allowed network.
+      for (const path of this.inFlightFiles) this.pendingFiles.add(path);
+      if (this.structuralInFlight > 0) {
+        this.markStructuralDirty('network became unavailable during structural watch operation');
+      }
+      return;
+    }
+
     if (!this.deps.isVisible()) return; // never start new work merely because network changed hidden
     void this.recoverOrFlush();
   }
