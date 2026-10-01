@@ -17,7 +17,7 @@ import { isSyncTmpPath, LocalAdapter } from './data/LocalAdapter';
 import type { MergeBaseStore } from './data/MergeBaseStore';
 import { v4 as uuidv4 } from './util/uuid';
 import { hostToken, LogPlatform } from './util/hostToken';
-import { migrateConfigSyncCategories, migrateBookmarksToConfigSync, migrateStartupToggleToDelay, migrateConflictSettingsToStrategies, migrateFrontmatterScalarPolicyToStrategy, migrateMarkdownAutoMergeType, pruneObsoleteSettings, resetDebugIdentityFields, applyMobileFirstRunDefaults, isWatchModeActive } from './util/settingsMigration';
+import { migrateConfigSyncCategories, migrateBookmarksToConfigSync, migrateStartupToggleToDelay, migrateConflictSettingsToStrategies, migrateFrontmatterScalarPolicyToStrategy, migrateMarkdownAutoMergeType, pruneObsoleteSettings, resetDebugIdentityFields, applyMobileFirstRunDefaults, migrateAndroidWatchOptIn, isWatchModeActive } from './util/settingsMigration';
 import { debugLogPath, isActiveOwnLog } from './util/logPaths';
 import { autoNetworkConcurrency } from './util/platformDefaults';
 import { NextcloudPushClient } from './network/push/NextcloudPushClient';
@@ -698,9 +698,15 @@ export default class ObsidianNextcloudsync extends Plugin {
     this.settings.configSync = { ...DEFAULT_SETTINGS.configSync };
     migrateConfigSyncCategories(saved, this.settings);
     migrateBookmarksToConfigSync(saved, this.settings);
-    // Mobile first-run defaults: override before pruning so they are persisted immediately.
+    // Mobile first-run defaults plus the one-time Android Watch opt-in boundary. Before Android
+    // Watch existed, a copied desktop data.json could carry watchOnChangeEnabled=true while runtime
+    // still ignored it; never let that formerly inert value become live merely because of an update.
+    let mobileWatchMigrated = false;
     if (Platform.isMobile) {
       applyMobileFirstRunDefaults(saved, this.settings);
+      if (!Platform.isIosApp) {
+        mobileWatchMigrated = migrateAndroidWatchOptIn(saved, this.settings);
+      }
     }
     // networkConcurrency: derived from device RAM on first run (the persisted value is kept as-is).
     if (saved.networkConcurrency === undefined) {
@@ -734,7 +740,7 @@ export default class ObsidianNextcloudsync extends Plugin {
     // `logLevel` / `syncResults*` fields from an earlier 0.3.0-beta), then persist the cleaned
     // settings so data.json no longer carries them (or no longer carries a stale Debug identity).
     const removed = pruneObsoleteSettings(this.settings as unknown as Record<string, unknown>);
-    if (removed.length > 0 || debugReset) {
+    if (removed.length > 0 || debugReset || mobileWatchMigrated) {
       await this.saveSettings();
     }
   }
