@@ -77,6 +77,8 @@ export default class ObsidianNextcloudsync extends Plugin {
   private pushClient?: NextcloudPushClient;
   /** Coalesces best-effort push hints into ordinary reconciliations. */
   private pushSyncScheduler?: PushSyncScheduler;
+  /** Android-only trigger/lifecycle state for opt-in foreground Watch mode. */
+  private mobileWatch?: MobileWatchLifecycle;
   /** Desktop-only fixed-width Client Push indicator. Mobile stays quiet by design. */
   private pushStatusItem?: ClientPushStatusItem;
 
@@ -260,6 +262,7 @@ export default class ObsidianNextcloudsync extends Plugin {
             log: (message) => { void this.logger.log(message); },
           })
         : null;
+      this.mobileWatch = mobileWatch ?? undefined;
 
       const queuePendingUpload = (path: string): void => {
         if (mobileWatch) mobileWatch.queueFile(path);
@@ -455,6 +458,15 @@ export default class ObsidianNextcloudsync extends Plugin {
    * Run "Sync Now". On the very first sync (no recorded state), the engine performs a full scan and
    * applies the initial plan directly. Shared by the command and the settings button.
    */
+  /**
+   * Re-evaluate Android Watch after a live setting change. Used by the declarative settings layer
+   * for Wi-Fi-only / Watch toggles so pending work does not wait for an unrelated network or
+   * visibility event. The lifecycle itself re-checks enabled/visible/network policy before acting.
+   */
+  reevaluateMobileWatchPolicy(): void {
+    this.mobileWatch?.onNetworkChanged();
+  }
+
   async runSyncNow(): Promise<void> {
     void this.logger.log('sync: "Sync now" clicked');
     // Initialize lazily if credentials were entered after startup (e.g. first-time setup).
