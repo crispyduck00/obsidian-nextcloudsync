@@ -143,14 +143,23 @@ export default class ObsidianNextcloudsync extends Plugin {
       // Mobile WebViews may miss online/offline events while suspended. Refresh the network hint on
       // foreground and then force an immediate reconnect attempt when connectivity is available.
       const online = typeof navigator === 'undefined' || navigator.onLine !== false;
+      const hadPushSession = (this.pushClient?.getStatus().lastConnectedAt ?? null) !== null;
       this.pushClient?.setNetworkOnline(online);
-      if (online) void this.pushClient?.ensureConnected(true);
+      if (online) {
+        // The socket can remain logically OPEN while the WebView was actually suspended, so catch-up
+        // must not depend on seeing a reconnect transition. Only do this after at least one real push
+        // session; initial connection/startup semantics stay owned by the existing startup sync.
+        if (hadPushSession) this.pushSyncScheduler?.requestRemoteCatchUp('app became visible');
+        void this.pushClient?.ensureConnected(true);
+      }
     });
     this.registerDomEvent(window, 'offline', () => {
       this.pushClient?.setNetworkOnline(false);
     });
     this.registerDomEvent(window, 'online', () => {
+      const hadPushSession = (this.pushClient?.getStatus().lastConnectedAt ?? null) !== null;
       this.pushClient?.setNetworkOnline(true);
+      if (hadPushSession) this.pushSyncScheduler?.requestRemoteCatchUp('network returned');
     });
 
     // Ribbon entry point for the same manual sync (feature 060 / issue #19). One click on desktop,
@@ -707,8 +716,8 @@ export default class ObsidianNextcloudsync extends Plugin {
     });
 
     // Progressive enhancement: if the server advertises Nextcloud Client Push, keep a WebSocket
-    // open and turn remote file-change hints into ordinary full reconciliations. The existing sync
-    // engine remains the only authority for conflict detection, merge policy and transfers.
+    // open and use file IDs only to select an existing sync path. The vault-root scope gate filters
+    // unrelated account activity; ambiguous events still fall back to the ordinary full sync.
     this.initClientPush(password);
 
     // Periodic auto-sync is desktop-only (mobile OS suspends background timers).
@@ -735,13 +744,21 @@ export default class ObsidianNextcloudsync extends Plugin {
       isSyncRunning: () => this.syncEngine?.isSyncRunning() ?? false,
       shouldSync: async () => this.syncEngine?.shouldReconcileClientPush() ?? true,
       onReconciliationTriggered: () => this.pushStatusItem?.pulse(),
+      reconcileFileIds: async (batch) => {
+        const engine = this.syncEngine;
+        return engine ? engine.reconcileRemoteFileIds(batch) : 'full-sync';
+      },
       sync: async () => {
-        await this.syncEngine?.syncManual();
+        const engine = this.syncEngine;
+        if (!engine) return 'retry';
+        return (await engine.syncForClientPush()) ? 'completed' : 'retry';
       },
       log: (message) => { void this.logger.log(`client-push: ${message}`); },
     });
     this.pushSyncScheduler = scheduler;
 
+    let hadConnectedPushSession = false;
+    let previousPushState: string | null = null;
     const client = new NextcloudPushClient({
       serverUrl: this.settings.serverUrl,
       username: this.settings.username,
@@ -749,7 +766,20 @@ export default class ObsidianNextcloudsync extends Plugin {
       networkTimeoutMs: (this.settings.networkTimeoutSeconds ?? 0) * 1000,
       endpointOverride: this.settings.clientPushUrlOverride,
       onFileNotification: (notification) => scheduler.notify(notification),
-      onStatusChange: (status) => this.pushStatusItem?.setStatus(status),
+      onStatusChange: (status) => {
+        this.pushStatusItem?.setStatus(status);
+
+        // A reconnect closes another possible notification gap on BOTH desktop and mobile. The first
+        // successful connection is excluded so Client Push does not invent a second startup-sync path.
+        // Status is also emitted for ordinary notifications, so trigger only on an actual transition
+        // into the connected state, not merely whenever status.state happens to be "connected".
+        const enteredConnected = status.state === 'connected' && previousPushState !== 'connected';
+        if (enteredConnected) {
+          if (hadConnectedPushSession) scheduler.requestRemoteCatchUp('WebSocket reconnected');
+          hadConnectedPushSession = true;
+        }
+        previousPushState = status.state;
+      },
       log: (message) => { void this.logger.log(`client-push: ${message}`); },
     });
     this.pushClient = client;
