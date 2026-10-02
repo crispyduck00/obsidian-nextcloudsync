@@ -50,7 +50,7 @@ export type RemoteFileReconcileResult = 'done' | 'deferred' | 'busy' | 'full-syn
 
 export interface WatchDeps {
   localAdapter: Pick<LocalAdapter, 'stat' | 'readBinary'>;
-  stateDB: Pick<StateDB, 'getFile' | 'deleteFile' | 'getDir' | 'setDir' | 'deleteDir' | 'requestSave' | 'getLastSyncTime'>;
+  stateDB: Pick<StateDB, 'getFile' | 'deleteFile' | 'getDir' | 'setDir' | 'deleteDir' | 'requestSave' | 'getLastSyncTime' | 'rememberPendingRename' | 'clearPendingRename'>;
   historyStore?: Pick<SyncHistoryStore, 'save'>;
   statusBar: IStatusBar;
   journal: SyncJournal;
@@ -387,15 +387,28 @@ export class WatchOperations {
   }
 
   private async renameSingleFileLocked(oldPath: string, newPath: string): Promise<void> {
+    const pending = this.deps.stateDB.rememberPendingRename(oldPath, newPath, 'file');
+    this.deps.stateDB.requestSave();
+    if (!pending) return;
+
     return this.deps.runNonFullSyncOperation(async () => {
       await this.deps.connect();
       const rt = this.deps.renameTracker();
       this.begin();
       try {
-        await rt.applyLocalRename(oldPath, newPath);
+        await rt.applyLocalRename(pending.oldPath, pending.newPath);
+        if (
+          this.deps.stateDB.getFile(pending.oldPath) == null &&
+          this.deps.stateDB.getFile(pending.newPath) != null
+        ) {
+          this.deps.stateDB.clearPendingRename(pending.oldPath);
+        }
         this.deps.stateDB.requestSave(); // coalesced watch-mode save (P0-B)
       } catch (err) {
-        console.warn(`[SyncEngine] Single-file rename failed ${oldPath} → ${newPath}:`, err);
+        console.warn(`[SyncEngine] Single-file rename failed ${pending.oldPath} → ${pending.newPath}:`, err);
+        void this.deps.logger?.log(
+          `watch: rename deferred ${pending.oldPath} → ${pending.newPath} — ${(err as Error).message}`,
+        );
       } finally {
         this.end();
       }
@@ -471,17 +484,25 @@ export class WatchOperations {
    */
   async renameSingleFolder(oldPath: string, newPath: string): Promise<void> {
     if (this.deps.isSystemExcluded(oldPath) && this.deps.isSystemExcluded(newPath)) return;
+    const pending = this.deps.stateDB.rememberPendingRename(oldPath, newPath, 'folder');
+    this.deps.stateDB.requestSave();
+    if (!pending) return;
+
     return this.deps.runNonFullSyncOperation(async () => {
       const conn = await this.deps.connect();
       this.begin();
       try {
-        await conn.client.moveFile(oldPath, newPath); // MOVE works for collections too
-        this.deps.stateDB.deleteDir(oldPath);
-        this.deps.stateDB.setDir({ path: newPath, remoteFileId: null });
+        await conn.client.moveFile(pending.oldPath, pending.newPath); // MOVE works for collections too
+        this.deps.stateDB.deleteDir(pending.oldPath);
+        this.deps.stateDB.setDir({ path: pending.newPath, remoteFileId: null });
+        this.deps.stateDB.clearPendingRename(pending.oldPath);
         this.deps.stateDB.requestSave();
-        void this.deps.logger?.log(`watch: folder renamed → MOVE ${oldPath} → ${newPath}`);
+        void this.deps.logger?.log(`watch: folder renamed → MOVE ${pending.oldPath} → ${pending.newPath}`);
       } catch (err) {
-        console.warn(`[SyncEngine] Single-folder rename failed ${oldPath} → ${newPath}:`, err);
+        console.warn(`[SyncEngine] Single-folder rename failed ${pending.oldPath} → ${pending.newPath}:`, err);
+        void this.deps.logger?.log(
+          `watch: folder rename deferred ${pending.oldPath} → ${pending.newPath} — ${(err as Error).message}`,
+        );
       } finally {
         this.end();
       }
