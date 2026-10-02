@@ -39,12 +39,16 @@ export class MobileWatchLifecycle {
   /** Queue a local file create/modify for the existing debounced single-file path. */
   queueFile(path: string): void {
     if (!this.deps.isEnabled()) return;
+    const firstQueue = !this.pendingFiles.has(path);
     this.pendingFiles.add(path);
+    if (firstQueue) this.deps.log?.(`mobile-watch: queued file ${path}`);
   }
 
   /** Remove a queued old path (delete/rename); returns whether an edit was pending there. */
   takePendingFile(path: string): boolean {
-    return this.pendingFiles.delete(path);
+    const removed = this.pendingFiles.delete(path);
+    if (removed) this.deps.log?.(`mobile-watch: removed queued old path ${path}`);
+    return removed;
   }
 
   /**
@@ -67,23 +71,25 @@ export class MobileWatchLifecycle {
    * Returning false means no network operation was started; the caller may still queue associated
    * file content (e.g. edit+rename), which stays blocked behind structural recovery.
    */
-  async runStructural(work: () => Promise<boolean>): Promise<boolean> {
+  async runStructural(work: () => Promise<boolean>, description = 'structural operation'): Promise<boolean> {
     if (!this.canStartStructural()) {
-      this.markStructuralDirty('structural event deferred');
+      this.markStructuralDirty(`${description} deferred`);
       return false;
     }
 
+    this.deps.log?.(`mobile-watch: ${description} started`);
     this.structuralInFlight++;
     try {
       const converged = await work();
       if (!converged) {
-        this.markStructuralDirty('structural watch operation did not converge');
+        this.markStructuralDirty(`${description} did not converge`);
         return false;
       }
+      this.deps.log?.(`mobile-watch: ${description} complete`);
       return true;
     } catch (err) {
-      this.markStructuralDirty('structural watch operation failed');
-      this.deps.log?.(`mobile-watch: structural operation error — ${this.errorMessage(err)}`);
+      this.markStructuralDirty(`${description} failed`);
+      this.deps.log?.(`mobile-watch: ${description} error — ${this.errorMessage(err)}`);
       return false;
     } finally {
       this.structuralInFlight = Math.max(0, this.structuralInFlight - 1);
@@ -129,12 +135,32 @@ export class MobileWatchLifecycle {
       this.resetQueuedState();
       return;
     }
-    if (this.structuralDirty || this.recovery !== null || this.structuralInFlight > 0) return;
-    if (!this.deps.canUseNetwork()) return;
-    if (!allowHidden && !this.deps.isVisible()) return;
+    const pendingCount = this.pendingFiles.size;
+    if (this.structuralDirty || this.recovery !== null || this.structuralInFlight > 0) {
+      if (pendingCount > 0) {
+        this.deps.log?.(`mobile-watch: ${pendingCount} queued file(s) waiting for structural work/recovery`);
+      }
+      return;
+    }
+    if (!this.deps.canUseNetwork()) {
+      if (pendingCount > 0) {
+        this.deps.log?.(`mobile-watch: ${pendingCount} queued file(s) waiting for an allowed network`);
+      }
+      return;
+    }
+    if (!allowHidden && !this.deps.isVisible()) {
+      if (pendingCount > 0) {
+        this.deps.log?.(`mobile-watch: ${pendingCount} queued file(s) waiting for foreground`);
+      }
+      return;
+    }
 
     const paths = [...this.pendingFiles];
+    if (paths.length === 0) return;
     this.pendingFiles.clear();
+    this.deps.log?.(
+      `mobile-watch: flushing ${paths.length} file(s) (${allowHidden && !this.deps.isVisible() ? 'hidden best-effort' : 'foreground'})`,
+    );
 
     for (const path of paths) {
       // Re-check between paths: Wi-Fi can disappear while a batch is being drained. Already-started
@@ -169,6 +195,11 @@ export class MobileWatchLifecycle {
     }
 
     const inFlightAtHide = [...this.inFlightFiles];
+    if (this.pendingFiles.size > 0 || inFlightAtHide.length > 0 || this.structuralInFlight > 0 || this.structuralDirty) {
+      this.deps.log?.(
+        `mobile-watch: app hidden (queued=${this.pendingFiles.size}, in-flight=${inFlightAtHide.length}, structural=${this.structuralInFlight}, dirty=${this.structuralDirty})`,
+      );
+    }
     if (this.structuralInFlight > 0) {
       this.markStructuralDirty('app hidden during structural watch operation');
     }
@@ -193,6 +224,11 @@ export class MobileWatchLifecycle {
       this.resetQueuedState();
       return;
     }
+    if (this.pendingFiles.size > 0 || this.structuralDirty || this.recovery !== null) {
+      this.deps.log?.(
+        `mobile-watch: app visible (queued=${this.pendingFiles.size}, dirty=${this.structuralDirty}, recovering=${this.recovery !== null})`,
+      );
+    }
     void this.recoverOrFlush();
   }
 
@@ -204,6 +240,11 @@ export class MobileWatchLifecycle {
     }
 
     if (!this.deps.canUseNetwork()) {
+      if (this.pendingFiles.size > 0 || this.inFlightFiles.size > 0 || this.structuralInFlight > 0 || this.structuralDirty) {
+        this.deps.log?.(
+          `mobile-watch: network blocked (queued=${this.pendingFiles.size}, in-flight=${this.inFlightFiles.size}, structural=${this.structuralInFlight}, dirty=${this.structuralDirty})`,
+        );
+      }
       // Policy/connectivity changed after these requests had already started. Do not abort them;
       // merely remember that their outcome may be uncertain and verify again on an allowed network.
       for (const path of this.inFlightFiles) this.pendingFiles.add(path);
@@ -214,6 +255,11 @@ export class MobileWatchLifecycle {
     }
 
     if (!this.deps.isVisible()) return; // never start new work merely because network changed hidden
+    if (this.pendingFiles.size > 0 || this.structuralDirty) {
+      this.deps.log?.(
+        `mobile-watch: network allowed again (queued=${this.pendingFiles.size}, dirty=${this.structuralDirty})`,
+      );
+    }
     void this.recoverOrFlush();
   }
 
@@ -223,12 +269,16 @@ export class MobileWatchLifecycle {
 
   private async startFile(path: string): Promise<void> {
     this.inFlightFiles.add(path);
+    this.deps.log?.(`mobile-watch: file sync started ${path}`);
     try {
       const completed = await this.deps.syncFile(path);
       if (!completed && this.deps.isEnabled()) {
         // WatchOperations queued retry work (typically NetworkError). Keep the mobile trigger too so
         // an online/Wi-Fi transition can retry immediately without waiting for a later full sync.
         this.pendingFiles.add(path);
+        this.deps.log?.(`mobile-watch: file sync deferred for retry ${path}`);
+      } else if (completed) {
+        this.deps.log?.(`mobile-watch: file sync complete ${path}`);
       }
     } catch (err) {
       // The existing WatchOperations normally contains network/classifier failures itself. This is a
@@ -250,6 +300,9 @@ export class MobileWatchLifecycle {
       const generation = this.structuralGeneration;
       const requireFresh = this.freshRecoveryRequired;
       let completed = false;
+      this.deps.log?.(
+        `mobile-watch: structural recovery started${requireFresh ? ' (fresh pass required)' : ''}`,
+      );
       const run = (async () => {
         try {
           completed = await this.deps.recoverStructural(requireFresh);
@@ -260,6 +313,11 @@ export class MobileWatchLifecycle {
         if (completed && generation === this.structuralGeneration) {
           this.structuralDirty = false;
           this.freshRecoveryRequired = false;
+          this.deps.log?.('mobile-watch: structural recovery complete');
+        } else if (completed) {
+          this.deps.log?.('mobile-watch: structural recovery completed, but newer structural work requires another pass');
+        } else {
+          this.deps.log?.('mobile-watch: structural recovery did not complete; keeping dirty state');
         }
       })();
 
@@ -284,6 +342,11 @@ export class MobileWatchLifecycle {
   }
 
   private resetQueuedState(): void {
+    if (this.pendingFiles.size > 0 || this.structuralDirty) {
+      this.deps.log?.(
+        `mobile-watch: automatic watch disabled — dropping queued trigger state (queued=${this.pendingFiles.size}, dirty=${this.structuralDirty})`,
+      );
+    }
     this.pendingFiles.clear();
     this.structuralDirty = false;
     this.freshRecoveryRequired = false;
