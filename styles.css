@@ -483,12 +483,12 @@
  * Keep the visual icon small while retaining a comfortable mobile tap target.
  */
 .ncs-mobile-sync-status {
-  width: 32px;
-  min-width: 32px;
-  height: 32px;
-  min-height: 32px;
-  padding: 7px;
-  margin: 0;
+  width: 26px;
+  min-width: 26px;
+  height: 28px;
+  min-height: 28px;
+  padding: 5px;
+  margin: 0 -2px 0 0;
   border-radius: 50%;
   box-sizing: border-box;
   opacity: 0.38;
@@ -497,15 +497,15 @@
 
 .ncs-mobile-sync-status .ncs-mobile-sync-status-icon {
   display: inline-flex;
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   align-items: center;
   justify-content: center;
 }
 
 .ncs-mobile-sync-status .ncs-mobile-sync-status-icon > svg {
-  width: 16px;
-  height: 16px;
+  width: 15px;
+  height: 15px;
 }
 
 .ncs-mobile-sync-status.is-syncing,
@@ -516,6 +516,10 @@
 .ncs-mobile-sync-status.is-error,
 .ncs-mobile-sync-status.is-conflict {
   opacity: 1;
+}
+
+.ncs-mobile-sync-status.is-network-blocked {
+  opacity: 0.72;
 }
 
 .ncs-mobile-sync-status.is-syncing .ncs-mobile-sync-status-icon > svg {

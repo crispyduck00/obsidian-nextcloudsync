@@ -25,6 +25,7 @@ export class MobileSyncStatusItem implements IStatusBar {
   private errorCount = 0;
   private lastSyncTime: number | null = null;
   private realtimeState: MobileRealtimeState = 'inactive';
+  private networkAvailable = true;
   private successTimer: number | null = null;
   private realtimePulseTimer: number | null = null;
 
@@ -93,6 +94,17 @@ export class MobileSyncStatusItem implements IStatusBar {
     this.render();
   }
 
+  /**
+   * Environment hint for Android connectivity / Wi-Fi-only policy.
+   *
+   * This is deliberately outside IStatusBar: being offline is not a failed sync session. It only
+   * replaces the idle checkmark with cloud-off while no new sync can use the current network.
+   */
+  setNetworkAvailable(available: boolean): void {
+    this.networkAvailable = available;
+    this.render();
+  }
+
   /** Optional realtime transport hint (Client Push); does not alter sync semantics. */
   setRealtimeState(state: MobileRealtimeState): void {
     this.realtimeState = state;
@@ -123,29 +135,45 @@ export class MobileSyncStatusItem implements IStatusBar {
     const syncing = this.status === 'syncing';
     const conflicted = !syncing && (this.status === 'conflict' || this.conflictCount > 0);
     const errored = !syncing && !conflicted && (this.status === 'error' || this.errorCount > 0);
+    const networkBlocked = !syncing && !conflicted && !errored && !this.networkAvailable;
 
-    const icon = syncing ? 'refresh-cw' : conflicted ? 'triangle-alert' : errored ? 'circle-alert' : 'check';
+    const icon = syncing
+      ? 'refresh-cw'
+      : conflicted
+        ? 'triangle-alert'
+        : errored
+          ? 'circle-alert'
+          : networkBlocked
+            ? 'cloud-off'
+            : 'check';
     setIcon(this.iconEl, icon);
 
     this.el.classList.toggle('is-syncing', syncing);
     this.el.classList.toggle('is-conflict', conflicted);
     this.el.classList.toggle('is-error', errored);
-    this.el.classList.toggle('is-idle', !syncing && !conflicted && !errored);
+    this.el.classList.toggle('is-network-blocked', networkBlocked);
+    this.el.classList.toggle('is-idle', !syncing && !conflicted && !errored && !networkBlocked);
 
     this.el.classList.toggle('is-realtime-connected', this.realtimeState === 'connected');
     this.el.classList.toggle('is-realtime-connecting', this.realtimeState === 'connecting');
     this.el.classList.toggle('is-realtime-offline', this.realtimeState === 'offline');
 
-    const label = this.accessibleLabel(syncing, conflicted, errored);
+    const label = this.accessibleLabel(syncing, conflicted, errored, networkBlocked);
     this.el.setAttribute('aria-label', label);
     this.el.title = label;
   }
 
-  private accessibleLabel(syncing: boolean, conflicted: boolean, errored: boolean): string {
+  private accessibleLabel(
+    syncing: boolean,
+    conflicted: boolean,
+    errored: boolean,
+    networkBlocked: boolean,
+  ): string {
     let syncText = 'Nextcloud Sync';
     if (syncing) syncText = 'Nextcloud Sync: syncing';
     else if (conflicted) syncText = `Nextcloud Sync: ${this.conflictCount || 1} conflict(s)`;
     else if (errored) syncText = `Nextcloud Sync: ${this.errorCount || 1} error(s)`;
+    else if (networkBlocked) syncText = 'Nextcloud Sync: waiting for an allowed network';
     else if (this.lastSyncTime) {
       syncText = `Nextcloud Sync: last synced ${new Date(this.lastSyncTime).toLocaleTimeString()}`;
     } else {

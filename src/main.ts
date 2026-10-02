@@ -154,6 +154,7 @@ export default class ObsidianNextcloudsync extends Plugin {
       // Mobile WebViews may miss online/offline events while suspended. Refresh the network hint on
       // foreground and then force an immediate reconnect attempt when connectivity is available.
       const online = typeof navigator === 'undefined' || navigator.onLine !== false;
+      this.mobileSyncStatusItem?.setNetworkAvailable(this.syncEngine?.canRunWatchSync() ?? online);
       const hadPushSession = (this.pushClient?.getStatus().lastConnectedAt ?? null) !== null;
       this.pushClient?.setNetworkOnline(online);
       if (online) {
@@ -165,9 +166,11 @@ export default class ObsidianNextcloudsync extends Plugin {
       }
     });
     this.registerDomEvent(window, 'offline', () => {
+      this.mobileSyncStatusItem?.setNetworkAvailable(false);
       this.pushClient?.setNetworkOnline(false);
     });
     this.registerDomEvent(window, 'online', () => {
+      this.mobileSyncStatusItem?.setNetworkAvailable(this.syncEngine?.canRunWatchSync() ?? true);
       const hadPushSession = (this.pushClient?.getStatus().lastConnectedAt ?? null) !== null;
       this.pushClient?.setNetworkOnline(true);
       if (hadPushSession) this.pushSyncScheduler?.requestRemoteCatchUp('network returned');
@@ -467,7 +470,10 @@ export default class ObsidianNextcloudsync extends Plugin {
         this.registerDomEvent(window, 'offline', () => mobileWatch.onNetworkChanged());
         const connection = (navigator as Navigator & { connection?: EventTarget }).connection;
         if (connection) {
-          const onConnectionChange = (): void => mobileWatch.onNetworkChanged();
+          const onConnectionChange = (): void => {
+            mobileWatch.onNetworkChanged();
+            this.mobileSyncStatusItem?.setNetworkAvailable(this.syncEngine?.canRunWatchSync() ?? true);
+          };
           connection.addEventListener('change', onConnectionChange);
           this.register(() => connection.removeEventListener('change', onConnectionChange));
         }
@@ -499,6 +505,7 @@ export default class ObsidianNextcloudsync extends Plugin {
    */
   reevaluateMobileWatchPolicy(): void {
     this.mobileWatch?.onNetworkChanged();
+    this.mobileSyncStatusItem?.setNetworkAvailable(this.syncEngine?.canRunWatchSync() ?? true);
   }
 
   /**
@@ -927,6 +934,7 @@ export default class ObsidianNextcloudsync extends Plugin {
         }
       },
     });
+    androidStatus?.setNetworkAvailable(this.syncEngine.canRunWatchSync());
 
     // Progressive enhancement: if the server advertises Nextcloud Client Push, keep a WebSocket
     // open and use file IDs only to select an existing sync path. The vault-root scope gate filters
@@ -984,6 +992,18 @@ export default class ObsidianNextcloudsync extends Plugin {
       onFileNotification: (notification) => scheduler.notify(notification),
       onStatusChange: (status) => {
         this.pushStatusItem?.setStatus(status);
+        this.mobileSyncStatusItem?.setRealtimeState(
+          status.state === 'connected'
+            ? 'connected'
+            : (status.state === 'offline'
+              ? 'offline'
+              : (status.state === 'discovering'
+                || status.state === 'connecting'
+                || status.state === 'authenticating'
+                || status.state === 'reconnecting')
+                ? 'connecting'
+                : 'inactive'),
+        );
 
         // A reconnect closes another possible notification gap on BOTH desktop and mobile. The first
         // successful connection is excluded so Client Push does not invent a second startup-sync path.
