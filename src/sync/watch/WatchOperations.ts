@@ -47,7 +47,10 @@ export interface Connection {
 
 export interface WatchDeps {
   localAdapter: Pick<LocalAdapter, 'stat' | 'readBinary'>;
-  stateDB: Pick<StateDB, 'getFile' | 'deleteFile' | 'getDir' | 'setDir' | 'deleteDir' | 'requestSave' | 'getLastSyncTime'>;
+  stateDB: Pick<StateDB,
+    'getFile' | 'deleteFile' | 'getDir' | 'setDir' | 'deleteDir'
+    | 'rememberPendingRename' | 'removePendingRename' | 'requestSave' | 'save' | 'getLastSyncTime'
+  >;
   historyStore?: Pick<SyncHistoryStore, 'save'>;
   statusBar: IStatusBar;
   journal: SyncJournal;
@@ -295,16 +298,35 @@ export class WatchOperations {
   }
 
   private async renameSingleFileLocked(oldPath: string, newPath: string): Promise<void> {
-    await this.deps.connect();
-    const rt = this.deps.renameTracker();
-    this.begin();
+    // Only a tracked source can represent a remote MOVE. Persist the intent BEFORE connect so an
+    // offline rename survives the failed request / app restart instead of degrading to delete+upload.
+    const tracked = this.deps.stateDB.getFile(oldPath);
+    if (tracked) {
+      this.deps.stateDB.rememberPendingRename({ oldPath, newPath, kind: 'file', recordedAt: Date.now() });
+      await this.deps.stateDB.save();
+      if (this.deps.isSyncRunning()) {
+        void this.deps.logger?.log(`watch: full sync in progress → rename pending ${oldPath} → ${newPath}`);
+        return;
+      }
+    }
+
     try {
-      await rt.applyLocalRename(oldPath, newPath);
-      this.deps.stateDB.requestSave(); // coalesced watch-mode save (P0-B)
+      await this.deps.connect();
+      const rt = this.deps.renameTracker();
+      this.begin();
+      try {
+        await rt.applyLocalRename(oldPath, newPath);
+        if (tracked) this.deps.stateDB.removePendingRename(oldPath, newPath);
+        await this.deps.stateDB.save(); // MOVE + identity update + intent removal are one durable fact
+      } finally {
+        this.end();
+      }
     } catch (err) {
-      console.warn(`[SyncEngine] Single-file rename failed ${oldPath} → ${newPath}:`, err);
-    } finally {
-      this.end();
+      console.warn(`[SyncEngine] Single-file rename pending ${oldPath} → ${newPath}:`, err);
+      void this.deps.logger?.log(
+        `watch: rename pending ${oldPath} → ${newPath} — ${(err as Error).message}`,
+        'error',
+      );
     }
   }
 
@@ -373,18 +395,35 @@ export class WatchOperations {
    */
   async renameSingleFolder(oldPath: string, newPath: string): Promise<void> {
     if (this.deps.isSystemExcluded(oldPath) && this.deps.isSystemExcluded(newPath)) return;
-    const conn = await this.deps.connect();
-    this.begin();
+    const tracked = this.deps.stateDB.getDir(oldPath);
+    if (tracked) {
+      this.deps.stateDB.rememberPendingRename({ oldPath, newPath, kind: 'folder', recordedAt: Date.now() });
+      await this.deps.stateDB.save();
+      if (this.deps.isSyncRunning()) {
+        void this.deps.logger?.log(`watch: full sync in progress → folder rename pending ${oldPath} → ${newPath}`);
+        return;
+      }
+    }
+
     try {
-      await conn.client.moveFile(oldPath, newPath); // MOVE works for collections too
-      this.deps.stateDB.deleteDir(oldPath);
-      this.deps.stateDB.setDir({ path: newPath, remoteFileId: null });
-      this.deps.stateDB.requestSave();
-      void this.deps.logger?.log(`watch: folder renamed → MOVE ${oldPath} → ${newPath}`);
+      const conn = await this.deps.connect();
+      this.begin();
+      try {
+        await conn.client.moveFile(oldPath, newPath); // MOVE works for collections too
+        this.deps.stateDB.deleteDir(oldPath);
+        this.deps.stateDB.setDir({ path: newPath, remoteFileId: null });
+        if (tracked) this.deps.stateDB.removePendingRename(oldPath, newPath);
+        await this.deps.stateDB.save();
+        void this.deps.logger?.log(`watch: folder renamed → MOVE ${oldPath} → ${newPath}`);
+      } finally {
+        this.end();
+      }
     } catch (err) {
-      console.warn(`[SyncEngine] Single-folder rename failed ${oldPath} → ${newPath}:`, err);
-    } finally {
-      this.end();
+      console.warn(`[SyncEngine] Single-folder rename pending ${oldPath} → ${newPath}:`, err);
+      void this.deps.logger?.log(
+        `watch: folder rename pending ${oldPath} → ${newPath} — ${(err as Error).message}`,
+        'error',
+      );
     }
   }
 
