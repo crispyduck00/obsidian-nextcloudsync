@@ -180,6 +180,21 @@ export class StateDB {
   }
 
 
+  /** Remap tracked directory rows after one successful collection MOVE (files settle separately). */
+  moveDirSubtree(oldPath: string, newPath: string): void {
+    if (!this.state.directories) return;
+    const affected = Object.values(this.state.directories)
+      .filter((d) => d.path === oldPath || d.path.startsWith(`${oldPath}/`))
+      .sort((a, b) => a.path.length - b.path.length);
+    for (const dir of affected) delete this.state.directories[dir.path];
+    for (const dir of affected) {
+      const suffix = dir.path.slice(oldPath.length);
+      const path = `${newPath}${suffix}`;
+      this.state.directories[path] = { ...dir, path };
+    }
+  }
+
+
   // ── Pending local renames ────────────────────────────────────────────────
   getPendingRenames(): PendingRename[] {
     return [...(this.state.pendingRenames ?? [])];
