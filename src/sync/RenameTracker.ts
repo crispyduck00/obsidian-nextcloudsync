@@ -62,8 +62,28 @@ export class RenameTracker {
    * reinterpret it as "delete old + create new". Rename recovery keeps the intent pending instead.
    */
   async applyLocalRename(oldRemotePath: string, newRemotePath: string): Promise<void> {
-    await this.client.moveFile(oldRemotePath, newRemotePath);
     const file = this.stateDB.getFile(oldRemotePath);
+    try {
+      await this.client.moveFile(oldRemotePath, newRemotePath);
+    } catch (err) {
+      // A parent collection MOVE, or a crash after the server accepted this MOVE, can make a retry
+      // see the old path gone even though the operation already succeeded. Nextcloud's oc:fileid is
+      // stable across MOVE, so the SAME id at the destination is proof of success — not a heuristic.
+      if (file?.remoteFileId) {
+        try {
+          const destination = await this.client.statFile(newRemotePath);
+          if (destination?.fileId === file.remoteFileId) {
+            this.stateDB.deleteFile(oldRemotePath);
+            this.stateDB.setFile({ ...file, path: newRemotePath, remoteFileId: destination.fileId });
+            return;
+          }
+        } catch {
+          // Best-effort proof only; preserve the original MOVE error below.
+        }
+      }
+      throw err;
+    }
+
     if (file) {
       this.stateDB.deleteFile(oldRemotePath);
       this.stateDB.setFile({ ...file, path: newRemotePath });
