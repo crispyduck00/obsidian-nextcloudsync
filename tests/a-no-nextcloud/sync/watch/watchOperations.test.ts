@@ -48,6 +48,7 @@ interface Opts {
 }
 
 function build(o: Opts = {}, over: Partial<WatchDeps> = {}) {
+  let pendingRenames: Array<{ oldPath: string; newPath: string; kind: 'file' | 'folder'; recordedAt: number }> = [];
   const calls = {
     processed: [] as string[],
     uploaded: [] as string[],
@@ -106,10 +107,34 @@ function build(o: Opts = {}, over: Partial<WatchDeps> = {}) {
       setDir: (d: { path: string }) => { calls.setDir.push(d.path); },
       deleteDir: (p: string) => { calls.deleteDir.push(p); },
       moveDirSubtree: (a: string, b: string) => { calls.movedDirSubtrees.push([a, b]); },
-      rememberPendingRename: (r: { oldPath: string; newPath: string; kind: 'file' | 'folder' }) => {
+      getPendingRenames: () => [...pendingRenames],
+      rememberPendingRename: (r: { oldPath: string; newPath: string; kind: 'file' | 'folder'; recordedAt: number }) => {
         calls.rememberedRenames.push({ oldPath: r.oldPath, newPath: r.newPath, kind: r.kind });
+        const chain = pendingRenames.find((p) => p.kind === r.kind && p.newPath === r.oldPath);
+        if (chain) {
+          if (chain.oldPath === r.newPath) pendingRenames = pendingRenames.filter((p) => p !== chain);
+          else chain.newPath = r.newPath;
+          return;
+        }
+        const same = pendingRenames.find((p) => p.kind === r.kind && p.oldPath === r.oldPath);
+        if (same) { same.newPath = r.newPath; return; }
+        if (r.kind === 'file' && pendingRenames.some((p) =>
+          p.kind === 'folder'
+          && r.oldPath.startsWith(`${p.oldPath}/`)
+          && r.newPath === p.newPath + r.oldPath.slice(p.oldPath.length)
+        )) return;
+        if (r.kind === 'folder') {
+          pendingRenames = pendingRenames.filter((p) => !(
+            p.oldPath.startsWith(`${r.oldPath}/`)
+            && p.newPath === r.newPath + p.oldPath.slice(r.oldPath.length)
+          ));
+        }
+        pendingRenames.push({ ...r });
       },
-      removePendingRename: (a: string, b?: string) => { calls.removedRenames.push([a, b]); },
+      removePendingRename: (a: string, b?: string) => {
+        calls.removedRenames.push([a, b]);
+        pendingRenames = pendingRenames.filter((p) => !(p.oldPath === a && (b === undefined || p.newPath === b)));
+      },
       requestSave: () => { calls.saves++; },
       save: async () => { calls.durableSaves++; },
       getLastSyncTime: () => 0,
@@ -334,6 +359,26 @@ describe('WatchOperations — folder operations (feature 046)', () => {
     expect(calls.renames).toEqual([['a.md', 'b.md']]);
     expect(calls.removedRenames).toEqual([['a.md', 'b.md']]);
     expect(calls.durableSaves).toBe(2);
+  });
+
+  it('coalesces A→B then B→C into one remote A→C MOVE intent', async () => {
+    const base = tracked({ path: 'A.md' });
+    const h = build({ base, failRename: true });
+
+    await h.watch.renameSingleFile('A.md', 'B.md'); // stays pending
+    h.calls.renames.length = 0;
+
+    // The test harness exposes the original base for every getFile lookup, mirroring the identity
+    // that is still tracked at A while B is only the local filesystem path.
+    await h.watch.renameSingleFile('B.md', 'C.md');
+
+    expect(h.calls.rememberedRenames).toEqual([
+      { oldPath: 'A.md', newPath: 'B.md', kind: 'file' },
+      { oldPath: 'B.md', newPath: 'C.md', kind: 'file' },
+    ]);
+    // failRename means no successful remote call is recorded, but the second failure notice/log must
+    // refer to the effective original source, proving the chain was coalesced.
+    expect(h.calls.notices.at(-1)).toContain('A.md → C.md');
   });
 
   it('keeps a failed tracked MOVE pending and tells the user instead of pretending it converged', async () => {
