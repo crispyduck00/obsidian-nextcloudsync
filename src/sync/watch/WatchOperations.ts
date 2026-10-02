@@ -49,7 +49,8 @@ export interface WatchDeps {
   localAdapter: Pick<LocalAdapter, 'stat' | 'readBinary'>;
   stateDB: Pick<StateDB,
     'getFile' | 'deleteFile' | 'getDir' | 'setDir' | 'deleteDir' | 'moveDirSubtree'
-    | 'rememberPendingRename' | 'removePendingRename' | 'requestSave' | 'save' | 'getLastSyncTime'
+    | 'getPendingRenames' | 'rememberPendingRename' | 'removePendingRename'
+    | 'requestSave' | 'save' | 'getLastSyncTime'
   >;
   historyStore?: Pick<SyncHistoryStore, 'save'>;
   statusBar: IStatusBar;
@@ -292,20 +293,50 @@ export class WatchOperations {
   /** MOVE a single file on the remote when it was renamed/moved locally. */
   async renameSingleFile(oldPath: string, newPath: string): Promise<void> {
     if (this.deps.isSystemExcluded(oldPath) && this.deps.isSystemExcluded(newPath)) return;
-    // Both ends are locked: a rename moves state between two paths, so holding only one leaves the
-    // other open to a concurrent cycle acting on a half-applied move.
-    return this.withTwoPathLocks(oldPath, newPath, () => this.renameSingleFileLocked(oldPath, newPath));
+    // If A→B is already pending and the user now does B→C, the remote operation that still matters
+    // is A→C. Lock that original source together with the latest destination.
+    const chained = this.deps.stateDB.getPendingRenames()
+      .find((p) => p.kind === 'file' && p.newPath === oldPath);
+    const sourceForLock = chained?.oldPath ?? oldPath;
+    return this.withTwoPathLocks(sourceForLock, newPath, () => this.renameSingleFileLocked(oldPath, newPath));
   }
 
   private async renameSingleFileLocked(oldPath: string, newPath: string): Promise<void> {
-    // Only a tracked source can represent a remote MOVE. Persist the intent BEFORE connect so an
-    // offline rename survives the failed request / app restart instead of degrading to delete+upload.
-    const tracked = this.deps.stateDB.getFile(oldPath);
+    const pendingBefore = this.deps.stateDB.getPendingRenames();
+
+    // A pending parent collection MOVE already represents this exact child path transform. Do not
+    // split it into independent child MOVEs while the parent is blocked/offline.
+    const coveredByFolder = pendingBefore.some((p) =>
+      p.kind === 'folder'
+      && oldPath.startsWith(`${p.oldPath}/`)
+      && newPath === p.newPath + oldPath.slice(p.oldPath.length),
+    );
+    if (coveredByFolder) {
+      void this.deps.logger?.log(`watch: child rename covered by pending folder MOVE ${oldPath} → ${newPath}`);
+      return;
+    }
+
+    const chained = pendingBefore.find((p) => p.kind === 'file' && p.newPath === oldPath);
+    const sourcePath = chained?.oldPath ?? oldPath;
+    const tracked = this.deps.stateDB.getFile(sourcePath);
+    let effectiveOld = oldPath;
+    let effectiveNew = newPath;
+
     if (tracked) {
+      // Persist BEFORE connect. rememberPendingRename coalesces A→B + B→C into A→C (and cancels
+      // A→B + B→A), so a whole offline rename chain survives as one remote intent.
       this.deps.stateDB.rememberPendingRename({ oldPath, newPath, kind: 'file', recordedAt: Date.now() });
+      const effective = this.deps.stateDB.getPendingRenames()
+        .find((p) => p.kind === 'file' && p.oldPath === sourcePath);
       await this.deps.stateDB.save();
+
+      // Rename-back cancelled the pending intent: local and remote are already at the original path.
+      if (!effective) return;
+      effectiveOld = effective.oldPath;
+      effectiveNew = effective.newPath;
+
       if (this.deps.isSyncRunning()) {
-        void this.deps.logger?.log(`watch: full sync in progress → rename pending ${oldPath} → ${newPath}`);
+        void this.deps.logger?.log(`watch: full sync in progress → rename pending ${effectiveOld} → ${effectiveNew}`);
         return;
       }
     }
@@ -315,20 +346,20 @@ export class WatchOperations {
       const rt = this.deps.renameTracker();
       this.begin();
       try {
-        await rt.applyLocalRename(oldPath, newPath);
-        if (tracked) this.deps.stateDB.removePendingRename(oldPath, newPath);
+        await rt.applyLocalRename(effectiveOld, effectiveNew);
+        if (tracked) this.deps.stateDB.removePendingRename(effectiveOld, effectiveNew);
         await this.deps.stateDB.save(); // MOVE + identity update + intent removal are one durable fact
       } finally {
         this.end();
       }
     } catch (err) {
       if (tracked) {
-        console.warn(`[SyncEngine] Single-file rename pending ${oldPath} → ${newPath}:`, err);
+        console.warn(`[SyncEngine] Single-file rename pending ${effectiveOld} → ${effectiveNew}:`, err);
         void this.deps.logger?.log(
-          `watch: rename pending ${oldPath} → ${newPath} — ${(err as Error).message}`,
+          `watch: rename pending ${effectiveOld} → ${effectiveNew} — ${(err as Error).message}`,
           'error',
         );
-        this.notify(`⚠️ Move pending: ${oldPath} → ${newPath} — ${(err as Error).message}`, 8000);
+        this.notify(`⚠️ Move pending: ${effectiveOld} → ${effectiveNew} — ${(err as Error).message}`, 8000);
       } else {
         // Untracked child rename events can follow a successful parent-folder MOVE. They carry no
         // durable remote identity, so keep the pre-existing best-effort/silent semantics.
@@ -402,12 +433,35 @@ export class WatchOperations {
    */
   async renameSingleFolder(oldPath: string, newPath: string): Promise<void> {
     if (this.deps.isSystemExcluded(oldPath) && this.deps.isSystemExcluded(newPath)) return;
-    const tracked = this.deps.stateDB.getDir(oldPath);
+
+    const pendingBefore = this.deps.stateDB.getPendingRenames();
+    const coveredByFolder = pendingBefore.some((p) =>
+      p.kind === 'folder'
+      && oldPath.startsWith(`${p.oldPath}/`)
+      && newPath === p.newPath + oldPath.slice(p.oldPath.length),
+    );
+    if (coveredByFolder) {
+      void this.deps.logger?.log(`watch: child folder rename covered by pending MOVE ${oldPath} → ${newPath}`);
+      return;
+    }
+
+    const chained = pendingBefore.find((p) => p.kind === 'folder' && p.newPath === oldPath);
+    const sourcePath = chained?.oldPath ?? oldPath;
+    const tracked = this.deps.stateDB.getDir(sourcePath);
+    let effectiveOld = oldPath;
+    let effectiveNew = newPath;
+
     if (tracked) {
       this.deps.stateDB.rememberPendingRename({ oldPath, newPath, kind: 'folder', recordedAt: Date.now() });
+      const effective = this.deps.stateDB.getPendingRenames()
+        .find((p) => p.kind === 'folder' && p.oldPath === sourcePath);
       await this.deps.stateDB.save();
+      if (!effective) return; // rename-back cancelled the intent
+      effectiveOld = effective.oldPath;
+      effectiveNew = effective.newPath;
+
       if (this.deps.isSyncRunning()) {
-        void this.deps.logger?.log(`watch: full sync in progress → folder rename pending ${oldPath} → ${newPath}`);
+        void this.deps.logger?.log(`watch: full sync in progress → folder rename pending ${effectiveOld} → ${effectiveNew}`);
         return;
       }
     }
@@ -416,23 +470,23 @@ export class WatchOperations {
       const conn = await this.deps.connect();
       this.begin();
       try {
-        await conn.client.moveFile(oldPath, newPath); // MOVE works for collections too
-        if (tracked) this.deps.stateDB.moveDirSubtree(oldPath, newPath);
+        await conn.client.moveFile(effectiveOld, effectiveNew); // MOVE works for collections too
+        if (tracked) this.deps.stateDB.moveDirSubtree(effectiveOld, effectiveNew);
         else this.deps.stateDB.setDir({ path: newPath, remoteFileId: null });
-        if (tracked) this.deps.stateDB.removePendingRename(oldPath, newPath);
+        if (tracked) this.deps.stateDB.removePendingRename(effectiveOld, effectiveNew);
         await this.deps.stateDB.save();
-        void this.deps.logger?.log(`watch: folder renamed → MOVE ${oldPath} → ${newPath}`);
+        void this.deps.logger?.log(`watch: folder renamed → MOVE ${effectiveOld} → ${effectiveNew}`);
       } finally {
         this.end();
       }
     } catch (err) {
       if (tracked) {
-        console.warn(`[SyncEngine] Single-folder rename pending ${oldPath} → ${newPath}:`, err);
+        console.warn(`[SyncEngine] Single-folder rename pending ${effectiveOld} → ${effectiveNew}:`, err);
         void this.deps.logger?.log(
-          `watch: folder rename pending ${oldPath} → ${newPath} — ${(err as Error).message}`,
+          `watch: folder rename pending ${effectiveOld} → ${effectiveNew} — ${(err as Error).message}`,
           'error',
         );
-        this.notify(`⚠️ Folder move pending: ${oldPath} → ${newPath} — ${(err as Error).message}`, 8000);
+        this.notify(`⚠️ Folder move pending: ${effectiveOld} → ${effectiveNew} — ${(err as Error).message}`, 8000);
       } else {
         console.warn(`[SyncEngine] Single-folder rename failed ${oldPath} → ${newPath}:`, err);
       }
