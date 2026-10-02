@@ -294,6 +294,18 @@ export interface DirState {
   remoteFileId: string | null;
 }
 
+/**
+ * A local rename/move observed by the vault watcher but not yet confirmed on the remote.
+ *
+ * Persisting the intent prevents an offline/locked MOVE from degrading into an unrelated
+ * "delete old + upload new" on the next sync. Optional in SyncState for backward compatibility.
+ */
+export interface PendingRename {
+  oldPath: string;
+  newPath: string;
+  kind: 'file' | 'folder';
+}
+
 export interface SyncState {
   deviceId: string;
   lastSyncTime: number;
@@ -301,6 +313,11 @@ export interface SyncState {
   files: Record<string, FileState>;
   /** Tracked directories (optional for back-compat with pre-DP v1 state files → defaults to {}). */
   directories?: Record<string, DirState>;
+  /**
+   * Renames/moves observed locally but not yet confirmed remotely. Keyed by the original source path.
+   * Optional for backward compatibility; StateDB normalizes an absent value to {} on load.
+   */
+  pendingRenames?: Record<string, PendingRename>;
   /**
    * Root-ETag short-circuit (spec 023): the vault root collection's ETag captured at the end of the
    * last REAL full scan. Optional for back-compat (absent ⇒ next sync does a real full scan). A
