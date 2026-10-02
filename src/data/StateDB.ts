@@ -33,7 +33,7 @@ export class StateDB {
   ) {
     this.statePath = `${pluginDir}/state-${deviceId}.json`;
     this.tmpPath = this.statePath + STATEDB_TMP_SUFFIX;
-    this.state = { deviceId, lastSyncTime: 0, syncToken: null, files: {}, directories: {} };
+    this.state = { deviceId, lastSyncTime: 0, syncToken: null, files: {}, directories: {}, pendingRenames: [] };
   }
 
   async load(): Promise<void> {
