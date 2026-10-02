@@ -50,7 +50,7 @@ export type RemoteFileReconcileResult = 'done' | 'deferred' | 'busy' | 'full-syn
 
 export interface WatchDeps {
   localAdapter: Pick<LocalAdapter, 'stat' | 'readBinary'>;
-  stateDB: Pick<StateDB, 'getFile' | 'deleteFile' | 'getDir' | 'setDir' | 'deleteDir' | 'requestSave' | 'getLastSyncTime' | 'rememberPendingRename' | 'clearPendingRename'>;
+  stateDB: Pick<StateDB, 'getFile' | 'deleteFile' | 'getDir' | 'setDir' | 'deleteDir' | 'requestSave' | 'getLastSyncTime' | 'rememberPendingRename' | 'clearPendingRename' | 'moveTrackedSubtree'>;
   historyStore?: Pick<SyncHistoryStore, 'save'>;
   statusBar: IStatusBar;
   journal: SyncJournal;
@@ -493,9 +493,7 @@ export class WatchOperations {
       this.begin();
       try {
         await conn.client.moveFile(pending.oldPath, pending.newPath); // MOVE works for collections too
-        this.deps.stateDB.deleteDir(pending.oldPath);
-        this.deps.stateDB.setDir({ path: pending.newPath, remoteFileId: null });
-        this.deps.stateDB.clearPendingRename(pending.oldPath);
+        this.deps.stateDB.moveTrackedSubtree(pending.oldPath, pending.newPath);
         this.deps.stateDB.requestSave();
         void this.deps.logger?.log(`watch: folder renamed → MOVE ${pending.oldPath} → ${pending.newPath}`);
       } catch (err) {
