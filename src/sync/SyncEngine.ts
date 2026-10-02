@@ -1205,6 +1205,9 @@ export class SyncEngine {
   }
 
   private async processRemoteFile(remote: RemoteFileInfo, summary: SyncSessionSummary): Promise<void> {
+    // A rename event can arrive after this full sync built its eligible list. Re-check dynamically
+    // before interpreting the old endpoint as a deletion or the new endpoint as a remote change.
+    if (this.isPendingRenamePath(remote.path)) return;
     const base = this.opts.stateDB.getFile(remote.path);
     const localStat = await this.opts.localAdapter.stat(remote.path);
     const { remoteId, idType } = remoteIdOf(remote);
@@ -1478,6 +1481,8 @@ export class SyncEngine {
       ([path]) => path,
       ([, st]) => st.size,
       async ([path, st]) => {
+        // The pending set can change after uploadCandidates was built (rename during this full sync).
+        if (this.isPendingRenamePath(path)) return;
         const base = this.opts.stateDB.getFile(path);
         const data = await this.opts.localAdapter.readBinary(path);
         const localHash = await sha256(data);
@@ -1545,6 +1550,7 @@ export class SyncEngine {
     // proof path every other deletion goes through. Watch mode shares this method, so a delete
     // decides identically whether it comes from a scan or from a single vault event.
     for (const path of missingPaths) {
+      if (this.isPendingRenamePath(path)) continue; // may have been recorded after the list was built
       if (localRenames.has(path)) continue; // handled as rename above
       const fileState = this.opts.stateDB.getFile(path);
       if (!fileState) continue;
@@ -1610,6 +1616,7 @@ export class SyncEngine {
       // 3) Re-verify each candidate is really gone (targeted PROPFIND 404), so a file merely missing
       //    from the bulk listing is never deleted locally on a false negative.
       for (const path of candidates) {
+        if (this.isPendingRenamePath(path)) continue;
         let goneOnServer = false;
         try { goneOnServer = !(await this.client!.remoteExists(path)); } catch { goneOnServer = false; }
         if (!goneOnServer) {
