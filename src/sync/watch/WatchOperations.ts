@@ -322,12 +322,18 @@ export class WatchOperations {
         this.end();
       }
     } catch (err) {
-      console.warn(`[SyncEngine] Single-file rename pending ${oldPath} → ${newPath}:`, err);
-      void this.deps.logger?.log(
-        `watch: rename pending ${oldPath} → ${newPath} — ${(err as Error).message}`,
-        'error',
-      );
-      this.notify(`⚠️ Move pending: ${oldPath} → ${newPath} — ${(err as Error).message}`, 8000);
+      if (tracked) {
+        console.warn(`[SyncEngine] Single-file rename pending ${oldPath} → ${newPath}:`, err);
+        void this.deps.logger?.log(
+          `watch: rename pending ${oldPath} → ${newPath} — ${(err as Error).message}`,
+          'error',
+        );
+        this.notify(`⚠️ Move pending: ${oldPath} → ${newPath} — ${(err as Error).message}`, 8000);
+      } else {
+        // Untracked child rename events can follow a successful parent-folder MOVE. They carry no
+        // durable remote identity, so keep the pre-existing best-effort/silent semantics.
+        console.warn(`[SyncEngine] Single-file rename failed ${oldPath} → ${newPath}:`, err);
+      }
     }
   }
 
@@ -420,12 +426,16 @@ export class WatchOperations {
         this.end();
       }
     } catch (err) {
-      console.warn(`[SyncEngine] Single-folder rename pending ${oldPath} → ${newPath}:`, err);
-      void this.deps.logger?.log(
-        `watch: folder rename pending ${oldPath} → ${newPath} — ${(err as Error).message}`,
-        'error',
-      );
-      this.notify(`⚠️ Folder move pending: ${oldPath} → ${newPath} — ${(err as Error).message}`, 8000);
+      if (tracked) {
+        console.warn(`[SyncEngine] Single-folder rename pending ${oldPath} → ${newPath}:`, err);
+        void this.deps.logger?.log(
+          `watch: folder rename pending ${oldPath} → ${newPath} — ${(err as Error).message}`,
+          'error',
+        );
+        this.notify(`⚠️ Folder move pending: ${oldPath} → ${newPath} — ${(err as Error).message}`, 8000);
+      } else {
+        console.warn(`[SyncEngine] Single-folder rename failed ${oldPath} → ${newPath}:`, err);
+      }
     }
   }
 
