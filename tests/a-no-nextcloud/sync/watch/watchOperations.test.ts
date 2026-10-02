@@ -63,6 +63,10 @@ function build(o: Opts = {}, over: Partial<WatchDeps> = {}) {
     status: [] as string[],
     notices: [] as string[],
     saves: 0,
+    durableSaves: 0,
+    rememberedRenames: [] as Array<{ oldPath: string; newPath: string; kind: 'file' | 'folder' }>,
+    removedRenames: [] as Array<[string, string | undefined]>,
+    movedDirSubtrees: [] as Array<[string, string]>,
     createDirectory: [] as string[],
     deleteCollection: [] as string[],
     move: [] as Array<[string, string]>,
@@ -101,7 +105,13 @@ function build(o: Opts = {}, over: Partial<WatchDeps> = {}) {
       getDir: (p: string) => (o.trackedDirs?.includes(p) ? { path: p, remoteFileId: null } : undefined),
       setDir: (d: { path: string }) => { calls.setDir.push(d.path); },
       deleteDir: (p: string) => { calls.deleteDir.push(p); },
+      moveDirSubtree: (a: string, b: string) => { calls.movedDirSubtrees.push([a, b]); },
+      rememberPendingRename: (r: { oldPath: string; newPath: string; kind: 'file' | 'folder' }) => {
+        calls.rememberedRenames.push({ oldPath: r.oldPath, newPath: r.newPath, kind: r.kind });
+      },
+      removePendingRename: (a: string, b?: string) => { calls.removedRenames.push([a, b]); },
       requestSave: () => { calls.saves++; },
+      save: async () => { calls.durableSaves++; },
       getLastSyncTime: () => 0,
     } as unknown as WatchDeps['stateDB'],
     historyStore: { save: async () => { /* noop */ } } as unknown as WatchDeps['historyStore'],
@@ -305,24 +315,52 @@ describe('WatchOperations — folder operations (feature 046)', () => {
     expect(calls.deleteDir).toEqual([]);
   });
 
-  it('moves a folder and re-tracks it under the new path', async () => {
-    const { watch, calls } = build();
+  it('persists a tracked folder MOVE before the request and clears it only after success', async () => {
+    const { watch, calls } = build({ trackedDirs: ['Old'] });
     await watch.renameSingleFolder('Old', 'New');
+
+    expect(calls.rememberedRenames).toEqual([{ oldPath: 'Old', newPath: 'New', kind: 'folder' }]);
     expect(calls.move).toEqual([['Old', 'New']]);
-    expect(calls.deleteDir).toEqual(['Old']);
-    expect(calls.setDir).toEqual(['New']);
+    expect(calls.movedDirSubtrees).toEqual([['Old', 'New']]);
+    expect(calls.removedRenames).toEqual([['Old', 'New']]);
+    expect(calls.durableSaves).toBe(2); // intent first, then successful MOVE + state
   });
 
-  it('renames a file through the rename tracker', async () => {
+  it('persists a tracked file MOVE before the rename tracker and clears it after success', async () => {
+    const { watch, calls } = build({ base: tracked({ path: 'a.md' }) });
+    await watch.renameSingleFile('a.md', 'b.md');
+
+    expect(calls.rememberedRenames).toEqual([{ oldPath: 'a.md', newPath: 'b.md', kind: 'file' }]);
+    expect(calls.renames).toEqual([['a.md', 'b.md']]);
+    expect(calls.removedRenames).toEqual([['a.md', 'b.md']]);
+    expect(calls.durableSaves).toBe(2);
+  });
+
+  it('keeps a failed tracked MOVE pending and tells the user instead of pretending it converged', async () => {
+    const { watch, calls } = build({ base: tracked({ path: 'a.md' }), failRename: true });
+    await expect(watch.renameSingleFile('a.md', 'b.md')).resolves.toBeUndefined();
+
+    expect(calls.rememberedRenames).toEqual([{ oldPath: 'a.md', newPath: 'b.md', kind: 'file' }]);
+    expect(calls.removedRenames).toEqual([]);
+    expect(calls.durableSaves).toBe(1);
+    expect(calls.notices[0]).toContain('Move pending');
+  });
+
+  it('records a tracked rename even when a full sync is already running, without starting MOVE', async () => {
+    const { watch, calls } = build({ base: tracked({ path: 'a.md' }), running: true });
+    await watch.renameSingleFile('a.md', 'b.md');
+
+    expect(calls.rememberedRenames).toEqual([{ oldPath: 'a.md', newPath: 'b.md', kind: 'file' }]);
+    expect(calls.renames).toEqual([]);
+    expect(calls.durableSaves).toBe(1);
+  });
+
+  it('keeps the old best-effort behavior for an untracked rename', async () => {
     const { watch, calls } = build();
     await watch.renameSingleFile('a.md', 'b.md');
-    expect(calls.renames).toEqual([['a.md', 'b.md']]);
-  });
 
-  it('swallows a rename failure rather than surfacing it — the next sync converges', async () => {
-    const { watch, calls } = build({ failRename: true });
-    await expect(watch.renameSingleFile('a.md', 'b.md')).resolves.toBeUndefined();
-    expect(calls.renames).toEqual([]);
+    expect(calls.rememberedRenames).toEqual([]);
+    expect(calls.renames).toEqual([['a.md', 'b.md']]);
   });
 
   it('skips a folder operation only when BOTH sides of a rename are excluded', async () => {
