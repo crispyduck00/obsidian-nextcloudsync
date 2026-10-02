@@ -1,5 +1,5 @@
 import { DataAdapter } from 'obsidian';
-import { DirState, FileState, SyncState } from '../types';
+import { DirState, FileState, PendingRename, SyncState } from '../types';
 import { AsyncMutex } from '../util/AsyncMutex';
 
 const STATEDB_TMP_SUFFIX = '.tmp';
@@ -33,7 +33,7 @@ export class StateDB {
   ) {
     this.statePath = `${pluginDir}/state-${deviceId}.json`;
     this.tmpPath = this.statePath + STATEDB_TMP_SUFFIX;
-    this.state = { deviceId, lastSyncTime: 0, syncToken: null, files: {}, directories: {} };
+    this.state = { deviceId, lastSyncTime: 0, syncToken: null, files: {}, directories: {}, pendingRenames: {} };
   }
 
   async load(): Promise<void> {
@@ -53,6 +53,7 @@ export class StateDB {
       const parsed = JSON.parse(raw) as SyncState;
       this.state = parsed;
       if (!this.state.directories) this.state.directories = {}; // pre-DP v1 state file
+      if (!this.state.pendingRenames) this.state.pendingRenames = {}; // pre-rename-recovery state
       // Root-ETag short-circuit (spec 023): pre-023 state has neither field. Absent remoteRootEtag
       // ⇒ next sync does a real full scan; skip count defaults to 0.
       if (this.state.fullScanSkipCount == null) this.state.fullScanSkipCount = 0;
@@ -184,6 +185,42 @@ export class StateDB {
     return this.state.directories ? Object.values(this.state.directories) : [];
   }
 
+
+  // ── Pending local renames/moves ────────────────────────────────────────────
+  getPendingRenames(): PendingRename[] {
+    return this.state.pendingRenames ? Object.values(this.state.pendingRenames) : [];
+  }
+
+  /**
+   * Remember (or extend) a local rename chain. A→B followed by B→C collapses to A→C.
+   * A→B followed by B→A cancels the intent because the local tree returned to its original path.
+   */
+  rememberPendingRename(oldPath: string, newPath: string, kind: PendingRename['kind']): PendingRename | null {
+    if (!this.state.pendingRenames) this.state.pendingRenames = {};
+
+    let origin = oldPath;
+    for (const [key, pending] of Object.entries(this.state.pendingRenames)) {
+      if (pending.kind === kind && pending.newPath === oldPath) {
+        origin = pending.oldPath;
+        delete this.state.pendingRenames[key];
+        break;
+      }
+    }
+
+    if (origin === newPath) {
+      delete this.state.pendingRenames[origin];
+      return null;
+    }
+
+    const pending: PendingRename = { oldPath: origin, newPath, kind };
+    this.state.pendingRenames[origin] = pending;
+    return pending;
+  }
+
+  clearPendingRename(oldPath: string): void {
+    if (this.state.pendingRenames) delete this.state.pendingRenames[oldPath];
+  }
+
   getSyncToken(): string | null {
     return this.state.syncToken;
   }
@@ -245,7 +282,7 @@ export class StateDB {
       window.clearTimeout(this.saveTimer);
       this.saveTimer = null;
     }
-    this.state = { deviceId: this.state.deviceId, lastSyncTime: 0, syncToken: null, files: {} };
+    this.state = { deviceId: this.state.deviceId, lastSyncTime: 0, syncToken: null, files: {}, directories: {}, pendingRenames: {} };
     this.fileIdIndex.clear();
     await this.save();
   }
@@ -258,7 +295,7 @@ export class StateDB {
   static async resetFile(adapter: DataAdapter, pluginDir: string, deviceId: string): Promise<void> {
     const statePath = `${pluginDir}/state-${deviceId}.json`;
     const tmpPath = statePath + STATEDB_TMP_SUFFIX;
-    const initial: SyncState = { deviceId, lastSyncTime: 0, syncToken: null, files: {} };
+    const initial: SyncState = { deviceId, lastSyncTime: 0, syncToken: null, files: {}, directories: {}, pendingRenames: {} };
     await adapter.write(tmpPath, JSON.stringify(initial));
     if (await adapter.exists(statePath)) {
       await adapter.remove(statePath);
