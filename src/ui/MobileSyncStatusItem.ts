@@ -29,11 +29,11 @@ export class MobileSyncStatusItem implements IStatusBar {
   private realtimePulseTimer: number | null = null;
 
   constructor(private readonly onClick?: () => void) {
-    this.el = document.createElement('button');
+    this.el = createEl('button');
     this.el.type = 'button';
     this.el.classList.add('clickable-icon', 'ncs-mobile-sync-status');
 
-    this.iconEl = document.createElement('span');
+    this.iconEl = createSpan();
     this.iconEl.classList.add('ncs-mobile-sync-status-icon');
     this.el.appendChild(this.iconEl);
 
