@@ -79,8 +79,10 @@ export default class ObsidianNextcloudsync extends Plugin {
   private pushSyncScheduler?: PushSyncScheduler;
   /** Android-only trigger/lifecycle state for opt-in foreground Watch mode. */
   private mobileWatch?: MobileWatchLifecycle;
-  /** Desktop-only fixed-width Client Push indicator. Mobile stays quiet by design. */
+  /** Desktop-only fixed-width Client Push indicator. */
   private pushStatusItem?: ClientPushStatusItem;
+  /** Compact Android sync-status item, shared by full sync and lightweight Watch/Push work. */
+  private mobileSyncStatusItem?: import('./ui/MobileSyncStatusItem').MobileSyncStatusItem;
 
   async onload(): Promise<void> {
     // Obsidian version check
@@ -138,6 +140,12 @@ export default class ObsidianNextcloudsync extends Plugin {
         new Notice(this.clientPushStatusText(), 10_000);
       },
     });
+
+    // Android's compact sync indicator lives in the active view action strip; move the same element
+    // when the active leaf changes instead of creating one per pane.
+    this.registerEvent(this.app.workspace.on('active-leaf-change', () => {
+      this.mobileSyncStatusItem?.refreshHost();
+    }));
 
     // Client Push sockets can be suspended while a mobile WebView is in the background. Reconnect
     // immediately when Obsidian becomes visible again or the browser reports network recovery.
@@ -751,6 +759,8 @@ export default class ObsidianNextcloudsync extends Plugin {
     void this.baseStore?.flush();
     void this.cleanSideStore?.flush();
     this.localAdapter?.dispose();
+    this.mobileSyncStatusItem?.destroy();
+    this.mobileSyncStatusItem = undefined;
     this.statusBarEl?.remove();
     this.statusBarEl = undefined;
   }
@@ -845,6 +855,7 @@ export default class ObsidianNextcloudsync extends Plugin {
     const { StatusBarItem } = await import('./ui/StatusBarItem');
     const { NoticeStatusBar } = await import('./ui/NoticeStatusBar');
     const { NullStatusBar } = await import('./ui/NullStatusBar');
+    const { MobileSyncStatusItem } = await import('./ui/MobileSyncStatusItem');
     const { WebDAVFactory } = await import('./network/WebDAVFactory');
     const { loadAppPassword } = await import('./settings/SettingTab');
 
@@ -866,16 +877,18 @@ export default class ObsidianNextcloudsync extends Plugin {
     const historyStore = new SyncHistoryStore(this.app.vault.adapter, pluginDir);
     await historyStore.load();
 
-    // Mobile has no visible status bar (addStatusBarItem is unavailable there), so feedback is
-    // surfaced as a single reused Notice toast via NoticeStatusBar. Both implement IStatusBar, so
-    // the sync engine needs no platform branching.
-    // On desktop, clicking the status bar opens the sync-status dialog (conflicts / retries).
-    // The raw element is kept on `this.statusBarEl` (G7-1) so a later re-init can remove it instead
-    // of leaking a second status-bar item into the DOM alongside this one.
+    // Desktop keeps its native status bar. Android gets a compact, clickable indicator in the
+    // active view action strip; iOS keeps the established Notice surface until the Android UI has
+    // been validated there. All implement the same IStatusBar port, so SyncEngine stays platform-free.
     let statusBarEl: HTMLElement | undefined;
-    const statusBar = Platform.isMobile
-      ? new NoticeStatusBar()
-      : new StatusBarItem(statusBarEl = this.addStatusBarItem(), () => this.openSyncStatus());
+    const androidStatus = Platform.isMobile && !Platform.isIosApp
+      ? new MobileSyncStatusItem(() => this.openSyncStatus())
+      : undefined;
+    this.mobileSyncStatusItem = androidStatus;
+    const statusBar = androidStatus
+      ?? (Platform.isMobile
+        ? new NoticeStatusBar()
+        : new StatusBarItem(statusBarEl = this.addStatusBarItem(), () => this.openSyncStatus()));
     this.statusBarEl = statusBarEl;
     const password = loadAppPassword(this.app, this.settings.passwordSecretId);
     const webdavFactory = new WebDAVFactory(this.app, this.settings, password, (m) => void this.logger.log(`net: ${m}`));
@@ -888,10 +901,9 @@ export default class ObsidianNextcloudsync extends Plugin {
       baseStore,
       cleanSideStore,
       statusBar,
-      // Local Watch and targeted Client Push share WatchOperations' single-path machinery. Keep
-      // those frequent lightweight operations quiet on mobile; authoritative full/manual sync still
-      // owns NoticeStatusBar. A later mobile-status UX can replace this surface without touching sync logic.
-      lightweightStatusBar: Platform.isMobile ? new NullStatusBar() : statusBar,
+      // Android uses the SAME compact surface for full/manual and lightweight Watch/targeted Push
+      // operations. iOS keeps lightweight work silent for now; desktop reuses its normal status bar.
+      lightweightStatusBar: androidStatus ?? (Platform.isMobile ? new NullStatusBar() : statusBar),
       historyStore,
       webdavFactory,
       pluginDir,
@@ -944,7 +956,10 @@ export default class ObsidianNextcloudsync extends Plugin {
     const scheduler = new PushSyncScheduler({
       isSyncRunning: () => this.syncEngine?.isSyncRunning() ?? false,
       shouldSync: async () => this.syncEngine?.shouldReconcileClientPush() ?? true,
-      onReconciliationTriggered: () => this.pushStatusItem?.pulse(),
+      onReconciliationTriggered: () => {
+        this.pushStatusItem?.pulse();
+        this.mobileSyncStatusItem?.pulseRealtime();
+      },
       reconcileFileIds: async (batch) => {
         const engine = this.syncEngine;
         return engine ? engine.reconcileRemoteFileIds(batch) : 'full-sync';
@@ -984,7 +999,20 @@ export default class ObsidianNextcloudsync extends Plugin {
       log: (message) => { void this.logger.log(`client-push: ${message}`); },
     });
     this.pushClient = client;
-    this.pushStatusItem?.setStatus(client.getStatus());
+    const initialPushStatus = client.getStatus();
+    this.pushStatusItem?.setStatus(initialPushStatus);
+    this.mobileSyncStatusItem?.setRealtimeState(
+      initialPushStatus.state === 'connected'
+        ? 'connected'
+        : (initialPushStatus.state === 'offline'
+          ? 'offline'
+          : (initialPushStatus.state === 'discovering'
+            || initialPushStatus.state === 'connecting'
+            || initialPushStatus.state === 'authenticating'
+            || initialPushStatus.state === 'reconnecting')
+            ? 'connecting'
+            : 'inactive'),
+    );
     void client.start();
   }
 
@@ -993,6 +1021,7 @@ export default class ObsidianNextcloudsync extends Plugin {
     this.pushSyncScheduler = undefined;
     this.pushClient?.stop();
     this.pushClient = undefined;
+    this.mobileSyncStatusItem?.setRealtimeState('inactive');
     this.pushStatusItem?.destroy();
     this.pushStatusItem = undefined;
   }
