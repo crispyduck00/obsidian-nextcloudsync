@@ -1207,12 +1207,22 @@ export class SyncEngine {
       return;
     }
 
+    // Replay watcher-observed renames BEFORE ordinary remote processing. Otherwise a failed/offline
+    // MOVE is misread as "old path deleted locally + new path created locally", which can create a
+    // duplicate when the old remote path is locked or not removable.
+    const renameRecovery = await this.replayPendingRenames(summary);
+
     // Retry queue files
     const retried = this.retryQueue.splice(0);
     summary.retriedFiles = retried;
 
-    // Process each remote file
-    const eligible = remoteFiles.filter(f => !this.isSystemExcluded(f.path));
+    const underAny = (path: string, prefixes: Set<string>): boolean =>
+      [...prefixes].some(prefix => path === prefix || path.startsWith(prefix + '/'));
+
+    // Process each remote file, except source paths whose rename is being retried/deferred this run.
+    const eligible = remoteFiles.filter(
+      f => !this.isSystemExcluded(f.path) && !underAny(f.path, renameRecovery.skipRemotePrefixes),
+    );
     this.syncProgress = { processed: 0, total: eligible.length };
     if (eligible.length > 0) this.opts.statusBar.setProgress(0, eligible.length);
     // Bounded-parallel (P1-A): each remote file is processed by one worker; uploads to the same
@@ -1226,7 +1236,11 @@ export class SyncEngine {
     );
 
     // Process local modifications (files in stateDB not covered by remote changes)
-    await this.processLocalModifications(remoteFiles, summary, isFullScan);
+    await this.processLocalModifications(
+      remoteFiles, summary, isFullScan,
+      renameRecovery.skipUploadPrefixes,
+      renameRecovery.skipRemotePrefixes,
+    );
 
     // Reconcile directory create/delete only from a COMPLETE listing (full scan). The token path's
     // remoteFiles is a partial diff, from which directory absence cannot be read as a deletion.
@@ -1590,8 +1604,130 @@ export class SyncEngine {
     return this.deletion.processRemoteDeletion(path, summary);
   }
 
+  /**
+   * Retry persisted local MOVE intents before the sync can reinterpret them as delete+create.
+   *
+   * Transient failures (offline, 423 lock, timeout/5xx, etc.) keep the intent and suppress both
+   * source processing and destination upload for this run. The next ordinary sync retries the MOVE.
+   *
+   * A file MOVE rejected permanently by 403/405 cannot converge as a move. In that one case we
+   * deliberately degrade to COPY semantics: forget the old local tracking so the authoritative
+   * remote source is restored locally, and allow the destination to upload as a new file. The user
+   * therefore ends with two explicit copies rather than a silent half-move. Folder permission
+   * failures stay pending because recreating an arbitrary subtree as a copy is too destructive to
+   * infer automatically.
+   */
+  private async replayPendingRenames(
+    summary: SyncSessionSummary,
+  ): Promise<{ skipRemotePrefixes: Set<string>; skipUploadPrefixes: Set<string> }> {
+    const skipRemotePrefixes = new Set<string>();
+    const skipUploadPrefixes = new Set<string>();
+    const rt = this.getOrCreateRenameTracker();
+
+    for (const pending of this.opts.stateDB.getPendingRenames()) {
+      if (this.isSystemExcluded(pending.oldPath) && this.isSystemExcluded(pending.newPath)) {
+        this.opts.stateDB.clearPendingRename(pending.oldPath);
+        continue;
+      }
+
+      const [oldStat, newStat] = await Promise.all([
+        this.opts.localAdapter.stat(pending.oldPath),
+        this.opts.localAdapter.stat(pending.newPath),
+      ]);
+
+      // The local tree no longer represents this rename (reverted, copied, or destination deleted).
+      // Drop stale intent and let normal reconciliation classify the current state.
+      if (oldStat || !newStat) {
+        this.opts.stateDB.clearPendingRename(pending.oldPath);
+        void this.opts.logger?.log(
+          `rename-recovery: dropped stale intent ${pending.oldPath} → ${pending.newPath}`,
+        );
+        continue;
+      }
+
+      const tracked = pending.kind === 'file'
+        ? this.opts.stateDB.getFile(pending.oldPath)
+        : this.opts.stateDB.getDir(pending.oldPath);
+      if (!tracked) {
+        // A never-synced local item has no remote identity to MOVE. Treat the destination as a normal
+        // new local item instead of inventing a remote source.
+        this.opts.stateDB.clearPendingRename(pending.oldPath);
+        continue;
+      }
+
+      try {
+        if (pending.kind === 'folder') {
+          await this.client!.moveFile(pending.oldPath, pending.newPath);
+          this.opts.stateDB.moveTrackedSubtree(pending.oldPath, pending.newPath);
+        } else {
+          await rt.applyLocalRename(pending.oldPath, pending.newPath);
+          const moved =
+            this.opts.stateDB.getFile(pending.oldPath) == null &&
+            this.opts.stateDB.getFile(pending.newPath) != null;
+          if (!moved) {
+            // RenameTracker deliberately contains a 412 destination conflict. Keep the intent and
+            // suppress delete/upload so the next sync cannot turn that unresolved MOVE into a copy.
+            skipRemotePrefixes.add(pending.oldPath);
+            skipUploadPrefixes.add(pending.newPath);
+            this.recordError(
+              summary, pending.newPath,
+              new Error(`Remote rename conflict: ${pending.oldPath} → ${pending.newPath}`),
+            );
+            continue;
+          }
+          this.opts.stateDB.clearPendingRename(pending.oldPath);
+        }
+
+        skipRemotePrefixes.add(pending.oldPath); // the listing was captured before MOVE and is stale
+        void this.opts.logger?.log(
+          `rename-recovery: MOVE complete ${pending.oldPath} → ${pending.newPath}`,
+        );
+      } catch (err) {
+        const status = err instanceof NetworkError ? err.status : null;
+
+        if (pending.kind === 'file' && (status === 403 || status === 405)) {
+          // A true permission/method denial is not transient. Convert the user's MOVE into an
+          // explicit COPY: the old server object remains authoritative and will be downloaded again,
+          // while the local destination is allowed to upload as a new file later in this same run.
+          this.opts.stateDB.clearPendingRename(pending.oldPath);
+          this.opts.stateDB.deleteFile(pending.oldPath);
+          this.dropMergeBase(pending.oldPath);
+          this.dropCleanSnapshot(pending.oldPath);
+          this.opts.stateDB.setRemoteRootEtag(null);
+          void this.opts.logger?.log(
+            `rename-recovery: MOVE denied (HTTP ${status}); degrading to copy ${pending.oldPath} → ${pending.newPath}`,
+            'error',
+          );
+          new Notice(
+            `⚠️ Remote move not permitted. Kept the source and will sync the destination as a copy: ${pending.newPath}`,
+            10000,
+          );
+          continue;
+        }
+
+        // Offline/transport, 423 lock (including stale server locks), 5xx, auth failures and unknown
+        // errors remain a pending MOVE. Never upload the destination or delete/restore the source as
+        // an unrelated file while that intent is unresolved.
+        skipRemotePrefixes.add(pending.oldPath);
+        skipUploadPrefixes.add(pending.newPath);
+        this.recordError(summary, pending.newPath, err);
+        void this.opts.logger?.log(
+          `rename-recovery: MOVE deferred ${pending.oldPath} → ${pending.newPath} — ${(err as Error).message}`,
+          'error',
+        );
+      }
+    }
+
+    if (this.opts.stateDB.getPendingRenames().length === 0) {
+      this.opts.stateDB.requestSave();
+    }
+    return { skipRemotePrefixes, skipUploadPrefixes };
+  }
+
   private async processLocalModifications(
     remoteFiles: RemoteFileInfo[], summary: SyncSessionSummary, isFullScan = false,
+    skipUploadPrefixes: Set<string> = new Set(),
+    skipRenameSourcePrefixes: Set<string> = new Set(),
   ): Promise<void> {
     const remotePathSet = new Set(remoteFiles.map(f => f.path));
 
@@ -1608,7 +1744,11 @@ export class SyncEngine {
     // Pre-filter with the cheap, synchronous checks (already handled remotely; signature fast-path),
     // then upload the survivors with bounded concurrency (P1-A). The content-unchanged hash check
     // stays inside the worker (it requires reading the file).
+    const underAnyPrefix = (path: string, prefixes: Set<string>): boolean =>
+      [...prefixes].some(prefix => path === prefix || path.startsWith(prefix + '/'));
+
     const uploadCandidates = [...localStats.entries()].filter(([path, st]) => {
+      if (underAnyPrefix(path, skipUploadPrefixes)) return false;
       if (remotePathSet.has(path)) return false; // already handled in the remote-changes loop
       const base = this.opts.stateDB.getFile(path);
       // Fast-path (P0-A): skip known files whose post-write stat signature is unchanged — no read,
@@ -1660,7 +1800,12 @@ export class SyncEngine {
 
     const missingPaths = this.opts.stateDB.getAllFiles()
       .map(f => f.path)
-      .filter(p => !this.isSystemExcluded(p) && !localStats.has(p) && !remotePathSet.has(p));
+      .filter(
+        p => !this.isSystemExcluded(p) &&
+          !localStats.has(p) &&
+          !remotePathSet.has(p) &&
+          !underAnyPrefix(p, skipRenameSourcePrefixes),
+      );
 
     const localRenames = rt.detectLocalRenamesByHash(missingPaths, newLocalFiles);
 
