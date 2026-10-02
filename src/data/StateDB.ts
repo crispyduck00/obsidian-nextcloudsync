@@ -221,6 +221,46 @@ export class StateDB {
     if (this.state.pendingRenames) delete this.state.pendingRenames[oldPath];
   }
 
+
+  /**
+   * Apply a confirmed remote folder MOVE to all tracked identities under that subtree.
+   * This makes folder rename recovery independent of Obsidian emitting one rename event per child.
+   */
+  moveTrackedSubtree(oldPath: string, newPath: string): void {
+    const prefix = oldPath + '/';
+    const remap = (path: string): string | null => {
+      if (path === oldPath) return newPath;
+      if (path.startsWith(prefix)) return newPath + path.slice(oldPath.length);
+      return null;
+    };
+
+    for (const [path, file] of Object.entries({ ...this.state.files })) {
+      const next = remap(path);
+      if (!next) continue;
+      this.deleteFile(path);
+      this.setFile({ ...file, path: next });
+    }
+
+    if (!this.state.directories) this.state.directories = {};
+    for (const [path, dir] of Object.entries({ ...this.state.directories })) {
+      const next = remap(path);
+      if (!next) continue;
+      delete this.state.directories[path];
+      this.state.directories[next] = { ...dir, path: next };
+    }
+
+    if (this.state.pendingRenames) {
+      for (const [key, pending] of Object.entries({ ...this.state.pendingRenames })) {
+        if (
+          pending.oldPath === oldPath || pending.oldPath.startsWith(prefix) ||
+          pending.newPath === newPath || pending.newPath.startsWith(newPath + '/')
+        ) {
+          delete this.state.pendingRenames[key];
+        }
+      }
+    }
+  }
+
   getSyncToken(): string | null {
     return this.state.syncToken;
   }
