@@ -105,6 +105,7 @@ export class DirectoryReconciler {
     // CREATE remote (parents before children).
     for (const p of mkcolRemote.sort(shallowFirst)) {
       if (this.deps.isCancelled()) break;
+      if (this.deps.isSystemExcluded(p)) continue;
       try {
         await client.createDirectory(p);
         this.deps.stateDB.setDir({ path: p, remoteFileId: remoteDirs.get(p)?.fileId ?? null });
@@ -117,6 +118,7 @@ export class DirectoryReconciler {
     // CREATE local (parents before children).
     for (const p of mkdirLocal.sort(shallowFirst)) {
       if (this.deps.isCancelled()) break;
+      if (this.deps.isSystemExcluded(p)) continue;
       try {
         await this.deps.app.vault.adapter.mkdir(normalizePath(p));
         this.deps.stateDB.setDir({ path: p, remoteFileId: remoteDirs.get(p)?.fileId ?? null });
@@ -129,6 +131,7 @@ export class DirectoryReconciler {
     // DELETE remote (children before parents; probe + optional lock).
     for (const p of deleteRemote.sort(deepFirst)) {
       if (this.deps.isCancelled()) break;
+      if (this.deps.isSystemExcluded(p)) continue;
       let token: string | null = null;
       try {
         token = await this.deps.transfer.acquireLock(client, p);
@@ -150,6 +153,7 @@ export class DirectoryReconciler {
     // TRASH local (children before parents).
     for (const p of trashLocal.sort(deepFirst)) {
       if (this.deps.isCancelled()) break;
+      if (this.deps.isSystemExcluded(p)) continue;
       // Feature 081 (issue #46): a folder absent from the listing is a reason to look, not a reason to
       // delete. Files already refuse to delete without proof (applyLocalDeletion needs a checksum
       // match); folders had no such guard, and one missing folder is one deletion — below anything
@@ -175,8 +179,12 @@ export class DirectoryReconciler {
         summary.errors.push({ path: p, message: `dir delete (local) failed: ${(err as Error).message}` });
       }
     }
-    for (const d of ensureTracked) this.deps.stateDB.setDir(d);
-    for (const p of dropTracked) this.deps.stateDB.deleteDir(p);
+    for (const d of ensureTracked) {
+      if (!this.deps.isSystemExcluded(d.path)) this.deps.stateDB.setDir(d);
+    }
+    for (const p of dropTracked) {
+      if (!this.deps.isSystemExcluded(p)) this.deps.stateDB.deleteDir(p);
+    }
   }
 
   /**
