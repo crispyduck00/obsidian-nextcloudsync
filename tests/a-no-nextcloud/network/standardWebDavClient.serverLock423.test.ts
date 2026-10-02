@@ -155,4 +155,38 @@ describe('StandardWebDAVClient — 423 lockdiscovery PROPFIND (feature 090)', ()
       expect(mockRequestUrl).toHaveBeenCalledTimes(1);
     });
   });
+
+  describe('moveFile (MOVE)', () => {
+    it('MOVE 423 uses lockdiscovery and preserves the lock owner', async () => {
+      mockRequestUrl.mockImplementation((params: { method?: string }) => {
+        if (params.method === 'MKCOL') return res(201);
+        if (params.method === 'MOVE') return res(423);
+        if (params.method === 'PROPFIND') return res(207, LOCKDISCOVERY_WITH_OWNER);
+        throw new Error(`unexpected method ${params.method}`);
+      });
+
+      const err = await client().moveFile('Notes/a.md', 'Notes/b.md').catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(NetworkError);
+      expect(err).toBeInstanceOf(ServerLockedError);
+      expect((err as Error).message).toContain('HTTP 423 (MOVE)');
+      expect((err as Error).message).toContain(LOCK_OWNER);
+    });
+
+    it('MOVE 423 without an owner remains a plain NetworkError', async () => {
+      mockRequestUrl.mockImplementation((params: { method?: string }) => {
+        if (params.method === 'MKCOL') return res(201);
+        if (params.method === 'MOVE') return res(423);
+        if (params.method === 'PROPFIND') return res(207, LOCKDISCOVERY_NO_OWNER);
+        throw new Error(`unexpected method ${params.method}`);
+      });
+
+      const err = await client().moveFile('Notes/a.md', 'Notes/b.md').catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(NetworkError);
+      expect(err).not.toBeInstanceOf(ServerLockedError);
+      expect((err as Error).message).toBe('HTTP 423 (MOVE)');
+    });
+  });
+
 });
