@@ -440,4 +440,44 @@ describe('MobileWatchLifecycle', () => {
     expect(h.lifecycle.takePendingFile('old.md')).toBe(false);
     expect(h.lifecycle.pendingFileCount()).toBe(0);
   });
+
+  it('logs the lifecycle of one debounced file sync without logging every duplicate queue', async () => {
+    const h = harness();
+
+    h.lifecycle.queueFile('logged.md');
+    h.lifecycle.queueFile('logged.md');
+    await h.lifecycle.flushFiles();
+    await settle();
+
+    const messages = h.log.mock.calls.map(([message]) => String(message));
+    expect(messages.filter((m) => m === 'mobile-watch: queued file logged.md')).toHaveLength(1);
+    expect(messages).toContain('mobile-watch: flushing 1 file(s) (foreground)');
+    expect(messages).toContain('mobile-watch: file sync started logged.md');
+    expect(messages).toContain('mobile-watch: file sync complete logged.md');
+  });
+
+  it('logs named structural work and its convergence outcome', async () => {
+    const h = harness();
+
+    await expect(
+      h.lifecycle.runStructural(async () => true, 'rename folder A → B'),
+    ).resolves.toBe(true);
+
+    const messages = h.log.mock.calls.map(([message]) => String(message));
+    expect(messages).toContain('mobile-watch: rename folder A → B started');
+    expect(messages).toContain('mobile-watch: rename folder A → B complete');
+  });
+
+  it('logs why queued files are not started while the network is blocked', async () => {
+    const h = harness();
+    h.setNetwork(false);
+    h.lifecycle.queueFile('offline.md');
+
+    await h.lifecycle.flushFiles();
+
+    expect(h.log).toHaveBeenCalledWith(
+      'mobile-watch: 1 queued file(s) waiting for an allowed network',
+    );
+  });
+
 });
