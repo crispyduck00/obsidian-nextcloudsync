@@ -1,6 +1,11 @@
 import { Notice, Platform } from 'obsidian';
-import { SyncEngine } from '../../../src/sync/SyncEngine';
-import { DEFAULT_SETTINGS } from '../../../src/types';
+import { SyncEngine } from '../../../../src/sync/SyncEngine';
+import { DEFAULT_SETTINGS } from '../../../../src/types';
+
+// Jest's Obsidian double records constructed Notices; the real Obsidian type does not expose this.
+const NoticeMock = Notice as unknown as {
+  instances: Array<{ message: string; timeout?: number; hidden: boolean }>;
+};
 
 function makeEngine(overrides: Partial<typeof DEFAULT_SETTINGS> = {}): SyncEngine {
   return new SyncEngine({
@@ -24,14 +29,14 @@ describe('Client Push automatic mobile feedback', () => {
     previousNavigator = globalRecord.navigator;
     previousMobile = Platform.isMobile;
     Platform.isMobile = true;
-    Notice.instances.length = 0;
+    NoticeMock.instances.length = 0;
     globalRecord.navigator = { onLine: true, connection: { type: 'wifi' } };
   });
 
   afterEach(() => {
     globalRecord.navigator = previousNavigator;
     Platform.isMobile = previousMobile;
-    Notice.instances.length = 0;
+    NoticeMock.instances.length = 0;
   });
 
   it('defers a push full-reconciliation race silently when another full sync is already running', async () => {
@@ -40,7 +45,7 @@ describe('Client Push automatic mobile feedback', () => {
 
     await expect(engine.syncForClientPush()).resolves.toBe(false);
 
-    expect(Notice.instances).toHaveLength(0);
+    expect(NoticeMock.instances).toHaveLength(0);
   });
 
   it('defers push silently when Wi-Fi-only blocks the current network', async () => {
@@ -49,7 +54,7 @@ describe('Client Push automatic mobile feedback', () => {
 
     await expect(engine.syncForClientPush()).resolves.toBe(false);
 
-    expect(Notice.instances).toHaveLength(0);
+    expect(NoticeMock.instances).toHaveLength(0);
   });
 
   it('does not change the ordinary manual busy guidance', async () => {
@@ -58,7 +63,7 @@ describe('Client Push automatic mobile feedback', () => {
 
     await engine.syncManual({ manual: true });
 
-    expect(Notice.instances).toHaveLength(1);
-    expect(Notice.instances[0].message).toMatch(/already in progress/i);
+    expect(NoticeMock.instances).toHaveLength(1);
+    expect(NoticeMock.instances[0].message).toMatch(/already in progress/i);
   });
 });
