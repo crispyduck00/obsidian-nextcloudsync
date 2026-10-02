@@ -381,6 +381,20 @@ describe('WatchOperations — folder operations (feature 046)', () => {
     expect(h.calls.notices.at(-1)).toContain('A.md → C.md');
   });
 
+  it('persists the MOVE intent before connect, so an offline rename survives', async () => {
+    const h = build(
+      { base: tracked({ path: 'a.md' }) },
+      { connect: async () => { throw new Error('offline'); } },
+    );
+
+    await expect(h.watch.renameSingleFile('a.md', 'b.md')).resolves.toBeUndefined();
+
+    expect(h.calls.rememberedRenames).toEqual([{ oldPath: 'a.md', newPath: 'b.md', kind: 'file' }]);
+    expect(h.calls.durableSaves).toBe(1);
+    expect(h.calls.removedRenames).toEqual([]);
+    expect(h.calls.notices[0]).toContain('Move pending');
+  });
+
   it('keeps a failed tracked MOVE pending and tells the user instead of pretending it converged', async () => {
     const { watch, calls } = build({ base: tracked({ path: 'a.md' }), failRename: true });
     await expect(watch.renameSingleFile('a.md', 'b.md')).resolves.toBeUndefined();
