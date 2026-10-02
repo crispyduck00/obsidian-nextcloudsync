@@ -1,5 +1,5 @@
 import { DataAdapter } from 'obsidian';
-import { DirState, FileState, SyncState } from '../types';
+import { DirState, FileState, PendingRename, SyncState } from '../types';
 import { AsyncMutex } from '../util/AsyncMutex';
 
 const STATEDB_TMP_SUFFIX = '.tmp';
@@ -53,6 +53,7 @@ export class StateDB {
       const parsed = JSON.parse(raw) as SyncState;
       this.state = parsed;
       if (!this.state.directories) this.state.directories = {}; // pre-DP v1 state file
+      if (!this.state.pendingRenames) this.state.pendingRenames = []; // pre-rename-recovery state file
       // Root-ETag short-circuit (spec 023): pre-023 state has neither field. Absent remoteRootEtag
       // ⇒ next sync does a real full scan; skip count defaults to 0.
       if (this.state.fullScanSkipCount == null) this.state.fullScanSkipCount = 0;
@@ -178,6 +179,75 @@ export class StateDB {
     return this.state.directories ? Object.values(this.state.directories) : [];
   }
 
+
+  // ── Pending local renames ────────────────────────────────────────────────
+  getPendingRenames(): PendingRename[] {
+    return [...(this.state.pendingRenames ?? [])];
+  }
+
+  /**
+   * Remember one local MOVE before any network request starts.
+   *
+   * Consecutive offline renames are coalesced (A→B then B→C becomes A→C). A rename back to the
+   * original path cancels the intent. Folder intents subsume matching child rename events, which
+   * Obsidian may emit alongside the folder rename.
+   */
+  rememberPendingRename(next: PendingRename): void {
+    const list = this.state.pendingRenames ?? (this.state.pendingRenames = []);
+
+    // A child event covered by an already-pending folder MOVE carries no additional information.
+    const coveredByFolder = list.some((p) =>
+      p.kind === 'folder'
+      && next.oldPath.startsWith(`${p.oldPath}/`)
+      && next.newPath === p.newPath + next.oldPath.slice(p.oldPath.length),
+    );
+    if (coveredByFolder) return;
+
+    const chained = list.find((p) => p.kind === next.kind && p.newPath === next.oldPath);
+    if (chained) {
+      if (chained.oldPath === next.newPath) {
+        this.state.pendingRenames = list.filter((p) => p !== chained);
+      } else {
+        chained.newPath = next.newPath;
+      }
+      return;
+    }
+
+    const sameSource = list.find((p) => p.kind === next.kind && p.oldPath === next.oldPath);
+    if (sameSource) {
+      sameSource.newPath = next.newPath;
+      return;
+    }
+
+    // If the folder event arrives after its child events, collapse those redundant child intents.
+    if (next.kind === 'folder') {
+      this.state.pendingRenames = list.filter((p) => !(
+        p.oldPath.startsWith(`${next.oldPath}/`)
+        && p.newPath === next.newPath + p.oldPath.slice(next.oldPath.length)
+      ));
+      this.state.pendingRenames.push(next);
+      return;
+    }
+
+    list.push(next);
+  }
+
+  removePendingRename(oldPath: string, newPath?: string): void {
+    const list = this.state.pendingRenames ?? [];
+    this.state.pendingRenames = list.filter(
+      (p) => !(p.oldPath === oldPath && (newPath === undefined || p.newPath === newPath)),
+    );
+  }
+
+  /** True when a path is either endpoint (or inside either endpoint for a folder MOVE). */
+  isPendingRenamePath(path: string): boolean {
+    return (this.state.pendingRenames ?? []).some((p) => {
+      if (path === p.oldPath || path === p.newPath) return true;
+      if (p.kind !== 'folder') return false;
+      return path.startsWith(`${p.oldPath}/`) || path.startsWith(`${p.newPath}/`);
+    });
+  }
+
   getSyncToken(): string | null {
     return this.state.syncToken;
   }
@@ -239,7 +309,7 @@ export class StateDB {
       window.clearTimeout(this.saveTimer);
       this.saveTimer = null;
     }
-    this.state = { deviceId: this.state.deviceId, lastSyncTime: 0, syncToken: null, files: {} };
+    this.state = { deviceId: this.state.deviceId, lastSyncTime: 0, syncToken: null, files: {}, pendingRenames: [] };
     this.fileIdIndex.clear();
     await this.save();
   }
@@ -252,7 +322,7 @@ export class StateDB {
   static async resetFile(adapter: DataAdapter, pluginDir: string, deviceId: string): Promise<void> {
     const statePath = `${pluginDir}/state-${deviceId}.json`;
     const tmpPath = statePath + STATEDB_TMP_SUFFIX;
-    const initial: SyncState = { deviceId, lastSyncTime: 0, syncToken: null, files: {} };
+    const initial: SyncState = { deviceId, lastSyncTime: 0, syncToken: null, files: {}, pendingRenames: [] };
     await adapter.write(tmpPath, JSON.stringify(initial));
     if (await adapter.exists(statePath)) {
       await adapter.remove(statePath);
