@@ -1,4 +1,4 @@
-import { RemoteFileInfo, ConflictError } from '../types';
+import { RemoteFileInfo } from '../types';
 import { StateDB } from '../data/StateDB';
 import { IWebDAVClient } from '../network/IWebDAVClient';
 
@@ -54,21 +54,19 @@ export class RenameTracker {
     this.stateDB.setFile({ ...file, path: newPath });
   }
 
-  /** Issue a WebDAV MOVE for a locally-renamed file. Falls back to conflict on 412. */
+  /**
+   * Issue a WebDAV MOVE for a locally-renamed file and move its tracked identity only after success.
+   *
+   * MOVE failures deliberately propagate to the caller. A local rename has already happened by the
+   * time this runs; swallowing 412/423/network failures loses that intent and lets the next full sync
+   * reinterpret it as "delete old + create new". Rename recovery keeps the intent pending instead.
+   */
   async applyLocalRename(oldRemotePath: string, newRemotePath: string): Promise<void> {
-    try {
-      await this.client.moveFile(oldRemotePath, newRemotePath);
-      const file = this.stateDB.getFile(oldRemotePath);
-      if (file) {
-        this.stateDB.deleteFile(oldRemotePath);
-        this.stateDB.setFile({ ...file, path: newRemotePath });
-      }
-    } catch (err) {
-      if (err instanceof ConflictError) {
-        console.warn(`[RenameTracker] Rename conflict: ${newRemotePath} already exists on server (skipped).`);
-      } else {
-        throw err;
-      }
+    await this.client.moveFile(oldRemotePath, newRemotePath);
+    const file = this.stateDB.getFile(oldRemotePath);
+    if (file) {
+      this.stateDB.deleteFile(oldRemotePath);
+      this.stateDB.setFile({ ...file, path: newRemotePath });
     }
   }
 }
