@@ -281,6 +281,20 @@ export interface DirState {
   remoteFileId: string | null;
 }
 
+/**
+ * A local rename/move whose WebDAV MOVE has not yet been proven successful.
+ *
+ * Persisted in StateDB because the local filesystem has already changed by the time Obsidian emits
+ * the rename event. Losing this intent across an offline period/restart makes the next full sync see
+ * "old path deleted + new path created" and can turn a transient MOVE failure into DELETE + upload.
+ */
+export interface PendingRename {
+  oldPath: string;
+  newPath: string;
+  kind: 'file' | 'folder';
+  recordedAt: number;
+}
+
 export interface SyncState {
   deviceId: string;
   lastSyncTime: number;
@@ -288,6 +302,8 @@ export interface SyncState {
   files: Record<string, FileState>;
   /** Tracked directories (optional for back-compat with pre-DP v1 state files → defaults to {}). */
   directories?: Record<string, DirState>;
+  /** Pending local MOVE intents. Optional for backward compatibility with existing state files. */
+  pendingRenames?: PendingRename[];
   /**
    * Root-ETag short-circuit (spec 023): the vault root collection's ETag captured at the end of the
    * last REAL full scan. Optional for back-compat (absent ⇒ next sync does a real full scan). A
