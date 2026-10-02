@@ -503,12 +503,21 @@ export class SyncEngine {
     // Prevent concurrent runs (avoid clashing with watch mode or scheduled sync).
     if (this.isSyncRunning()) {
       void this.opts.logger?.log('sync: skipped — already running');
-      if (Platform.isMobile) new Notice('⏳ A sync is already in progress.');
+      // Automatic triggers (startup / resume / Client Push / Watch recovery) are best-effort and may
+      // legitimately overlap. They must stay silent when the existing running-guard declines them.
+      // Only an explicit user action ("Sync now") gets guidance here.
+      if (Platform.isMobile && opts.manual === true) {
+        new Notice('⏳ A sync is already in progress.');
+      }
       return false;
     }
     if (this.isBlockedByWifiOnly()) { // "Wi-Fi only" enabled and on cellular
       void this.opts.logger?.log('sync: skipped — Wi-Fi-only and on cellular');
-      if (Platform.isMobile) new Notice('Sync skipped — you are on cellular and Wi-Fi only sync is on.', 6000);
+      // Same UX rule as the busy guard: automatic work simply remains pending/retryable; a manual
+      // request explains why nothing happened.
+      if (Platform.isMobile && opts.manual === true) {
+        new Notice('Sync skipped — you are on cellular and Wi-Fi only sync is on.', 6000);
+      }
       return false;
     }
     // Set the balking flag synchronously (before any await) so a concurrent call still balks, then
