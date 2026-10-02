@@ -306,7 +306,13 @@ export class StandardWebDAVClient implements IWebDAVClient {
       res = await move();
     }
     if (res.status === 412) throw new ConflictError(newPath);
-    if (res.status < 200 || res.status >= 300) throw dirError ?? new NetworkError(res.status, res.text, 'MOVE');
+    if (res.status < 200 || res.status >= 300) {
+      if (res.status === 423) {
+        const owner = await this.readLockOwnerOn423(oldPath);
+        if (owner) throw new ServerLockedError(oldPath, 'MOVE', owner);
+      }
+      throw dirError ?? new NetworkError(res.status, res.text, 'MOVE');
+    }
   }
 
   async deleteFile(path: string, _expectedRemoteId: string): Promise<void> {
