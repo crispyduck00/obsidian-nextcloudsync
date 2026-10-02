@@ -24,11 +24,47 @@ function makeEngine(opts: { tracked?: DirState[]; settings?: DavSyncSettings } =
   };
   const features = { isNextcloud: true, version: '30', hasChecksums: true, hasFilesLocking: false, hasBulkUpload: false, syncToken: null };
   const statusBar = { setStatus: jest.fn(), setProgress: jest.fn(), setSyncComplete: jest.fn(), setErrorCount: jest.fn() };
+  const pendingRenames = new Map<string, { oldPath: string; newPath: string; kind: 'file' | 'folder' }>();
   const stateDB = {
     getDir: (p: string) => dirs.get(p),
     setDir: (d: DirState) => { dirs.set(d.path, d); },
     deleteDir: (p: string) => { dirs.delete(p); },
     getAllDirs: () => [...dirs.values()],
+    rememberPendingRename: (oldPath: string, newPath: string, kind: 'file' | 'folder') => {
+      let origin = oldPath;
+      for (const [key, pending] of pendingRenames) {
+        if (pending.kind === kind && pending.newPath === oldPath) {
+          origin = pending.oldPath;
+          pendingRenames.delete(key);
+          break;
+        }
+      }
+      if (origin === newPath) {
+        pendingRenames.delete(origin);
+        return null;
+      }
+      const pending = { oldPath: origin, newPath, kind };
+      pendingRenames.set(origin, pending);
+      return pending;
+    },
+    clearPendingRename: (oldPath: string) => { pendingRenames.delete(oldPath); },
+    moveTrackedSubtree: (oldPath: string, newPath: string) => {
+      const prefix = oldPath + '/';
+      for (const [path, dir] of [...dirs.entries()]) {
+        if (path !== oldPath && !path.startsWith(prefix)) continue;
+        const next = path === oldPath ? newPath : newPath + path.slice(oldPath.length);
+        dirs.delete(path);
+        dirs.set(next, { ...dir, path: next });
+      }
+      for (const [key, pending] of [...pendingRenames.entries()]) {
+        if (
+          pending.oldPath === oldPath || pending.oldPath.startsWith(prefix) ||
+          pending.newPath === newPath || pending.newPath.startsWith(newPath + '/')
+        ) {
+          pendingRenames.delete(key);
+        }
+      }
+    },
     requestSave: jest.fn(),
   };
   const engine = new SyncEngine({
