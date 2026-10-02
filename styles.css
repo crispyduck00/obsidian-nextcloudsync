@@ -474,3 +474,90 @@
   0%, 100% { opacity: 0.35; }
   50% { opacity: 0.75; }
 }
+
+
+/* ── Compact Android sync status ─────────────────────────────────────────── */
+/*
+ * One small, persistent entry point in the active view's native action strip.
+ * The foreground icon is sync state; the subtle circular background is Client Push transport state.
+ * Keep the visual icon small while retaining a comfortable mobile tap target.
+ */
+.ncs-mobile-sync-status {
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 7px;
+  margin: 0;
+  border-radius: 50%;
+  box-sizing: border-box;
+  opacity: 0.38;
+  transition: opacity 140ms ease, background-color 180ms ease, box-shadow 180ms ease;
+}
+
+.ncs-mobile-sync-status .ncs-mobile-sync-status-icon {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+}
+
+.ncs-mobile-sync-status .ncs-mobile-sync-status-icon > svg {
+  width: 16px;
+  height: 16px;
+}
+
+.ncs-mobile-sync-status.is-syncing,
+.ncs-mobile-sync-status.is-recent-success {
+  opacity: 0.9;
+}
+
+.ncs-mobile-sync-status.is-error,
+.ncs-mobile-sync-status.is-conflict {
+  opacity: 1;
+}
+
+.ncs-mobile-sync-status.is-syncing .ncs-mobile-sync-status-icon > svg {
+  animation: ncs-mobile-sync-spin 1.15s linear infinite;
+}
+
+/* Client Push connected: deliberately subtle, never competing with error/conflict signalling. */
+.ncs-mobile-sync-status.is-realtime-connected {
+  background-color: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+}
+
+/* Discovery / connect / reconnect only pulses the background, not the sync icon. */
+.ncs-mobile-sync-status.is-realtime-connecting {
+  animation: ncs-mobile-realtime-connect 1.8s ease-in-out infinite;
+}
+
+.ncs-mobile-sync-status.is-realtime-offline {
+  background-color: color-mix(in srgb, var(--text-muted) 7%, transparent);
+}
+
+/* A received push gets one very small background acknowledgement; no second icon is introduced. */
+.ncs-mobile-sync-status.is-realtime-activity {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+}
+
+@keyframes ncs-mobile-sync-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes ncs-mobile-realtime-connect {
+  0%, 100% {
+    background-color: color-mix(in srgb, var(--interactive-accent) 4%, transparent);
+  }
+  50% {
+    background-color: color-mix(in srgb, var(--interactive-accent) 14%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ncs-mobile-sync-status,
+  .ncs-mobile-sync-status .ncs-mobile-sync-status-icon > svg {
+    animation: none !important;
+    transition: none !important;
+  }
+}
