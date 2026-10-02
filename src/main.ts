@@ -241,7 +241,13 @@ export default class ObsidianNextcloudsync extends Plugin {
       // Vault events caused by the plugin itself (downloads / conflict writes use atomic
       // tmp-write → rename) must not be propagated back to the server.
       const isOwnSyncEvent = (path: string): boolean =>
-        isSyncTmpPath(path) || (this.localAdapter?.shouldIgnore(path) ?? false);
+        isSyncTmpPath(path)
+        || isActiveOwnLog(path, {
+          logsFolder: this.settings.logsFolder,
+          host: this.hostToken(),
+          loggingEnabled: this.settings.loggingEnabled,
+        })
+        || (this.localAdapter?.shouldIgnore(path) ?? false);
 
       // Desktop's original pending set stays untouched. Android keeps its pending set inside the
       // lifecycle coordinator so hidden/Wi-Fi-blocked changes survive until a safe foreground.
