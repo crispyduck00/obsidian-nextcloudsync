@@ -87,11 +87,11 @@ interface SyncEngineOptions {
   cleanSideStore?: CleanSideStore;
   statusBar: IStatusBar;
   /**
-   * Optional status surface for lightweight watch / targeted-push operations. Desktop normally
-   * reuses statusBar; mobile can inject a NullStatusBar so high-frequency automatic work stays
-   * silent while full/manual sync retains its existing NoticeStatusBar feedback.
+   * Optional status surface for lightweight single-path operations (local Watch and targeted
+   * Client Push). Desktop normally reuses statusBar; mobile can inject a NullStatusBar so frequent
+   * automatic path work stays silent while authoritative full/manual sync keeps its normal feedback.
    */
-  watchStatusBar?: IStatusBar;
+  lightweightStatusBar?: IStatusBar;
   /** Persisted per-file sync-history log for the status dialog. Optional (absent in some tests). */
   historyStore?: SyncHistoryStore;
   webdavFactory: WebDAVFactory;
@@ -306,7 +306,7 @@ export class SyncEngine {
       localAdapter: opts.localAdapter,
       stateDB: opts.stateDB,
       historyStore: opts.historyStore,
-      statusBar: opts.watchStatusBar ?? opts.statusBar,
+      statusBar: opts.lightweightStatusBar ?? opts.statusBar,
       journal: this.journal,
       mergeBase: this.mergeBase,
       transfer: this.transfer,
@@ -455,8 +455,23 @@ export class SyncEngine {
     await this.syncManualWithResult(opts);
   }
 
-  /** Client Push fallback needs to know whether an authoritative full-sync attempt really completed. */
+  /**
+   * Client Push fallback needs to know whether an authoritative full-sync attempt really completed.
+   *
+   * Push is an automatic hint, not a user action. Do the two cheap guards here before entering the
+   * ordinary sync entry point so a race with startup/resume cannot emit user-facing "already in
+   * progress" / Wi-Fi-only guidance. Returning false is intentional: PushSyncScheduler keeps the
+   * reconciliation request pending and probes again after the blocker clears.
+   */
   async syncForClientPush(): Promise<boolean> {
+    if (this.isSyncRunning()) {
+      void this.opts.logger?.log('client-push: full reconciliation deferred — full sync already running');
+      return false;
+    }
+    if (this.isBlockedByWifiOnly()) {
+      void this.opts.logger?.log('client-push: full reconciliation deferred — Wi-Fi-only blocks current network');
+      return false;
+    }
     return this.syncManualWithResult();
   }
 
@@ -503,21 +518,12 @@ export class SyncEngine {
     // Prevent concurrent runs (avoid clashing with watch mode or scheduled sync).
     if (this.isSyncRunning()) {
       void this.opts.logger?.log('sync: skipped — already running');
-      // Automatic triggers (startup / resume / Client Push / Watch recovery) are best-effort and may
-      // legitimately overlap. They must stay silent when the existing running-guard declines them.
-      // Only an explicit user action ("Sync now") gets guidance here.
-      if (Platform.isMobile && opts.manual === true) {
-        new Notice('⏳ A sync is already in progress.');
-      }
+      if (Platform.isMobile) new Notice('⏳ A sync is already in progress.');
       return false;
     }
     if (this.isBlockedByWifiOnly()) { // "Wi-Fi only" enabled and on cellular
       void this.opts.logger?.log('sync: skipped — Wi-Fi-only and on cellular');
-      // Same UX rule as the busy guard: automatic work simply remains pending/retryable; a manual
-      // request explains why nothing happened.
-      if (Platform.isMobile && opts.manual === true) {
-        new Notice('Sync skipped — you are on cellular and Wi-Fi only sync is on.', 6000);
-      }
+      if (Platform.isMobile) new Notice('Sync skipped — you are on cellular and Wi-Fi only sync is on.', 6000);
       return false;
     }
     // Set the balking flag synchronously (before any await) so a concurrent call still balks, then
