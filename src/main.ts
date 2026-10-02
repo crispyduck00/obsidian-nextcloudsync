@@ -295,6 +295,7 @@ export default class ObsidianNextcloudsync extends Plugin {
         watchOn() && file instanceof TFile;
 
       const runStructural = (
+        description: string,
         desktopWork: (engine: SyncEngine) => Promise<void>,
         mobileWork: (engine: SyncEngine) => Promise<boolean>,
       ): void => {
@@ -315,11 +316,11 @@ export default class ObsidianNextcloudsync extends Plugin {
               // The listeners are installed as layout becomes ready while engine initialization is
               // asynchronous. Never silently "complete" a create/delete/folder operation in that
               // narrow window; make the next foreground/network opportunity reconcile authoritatively.
-              mobileWatch.markStructuralDirty('structural event arrived before sync engine was ready');
+              mobileWatch.markStructuralDirty(`${description} arrived before sync engine was ready`);
               return false;
             }
             return mobileWork(engine);
-          }).then((ran) => {
+          }, description).then((ran) => {
             // Hidden/cellular cases simply no-op here because onVisible re-checks those guards.
             // A failed/non-converged operation while still foregrounded starts recovery immediately.
             if (!ran) mobileWatch.onVisible();
@@ -340,6 +341,7 @@ export default class ObsidianNextcloudsync extends Plugin {
         if (!watchOn() || isOwnSyncEvent(file.path)) return;
         if (file instanceof TFolder) {
           runStructural(
+            `create folder ${file.path}`,
             (engine) => engine.createSingleFolder(file.path),
             (engine) => engine.createSingleFolderForMobileWatch(file.path),
           );
@@ -355,12 +357,14 @@ export default class ObsidianNextcloudsync extends Plugin {
         if (isOwnSyncEvent(file.path)) return;
         if (file instanceof TFolder) {
           runStructural(
+            `delete folder ${file.path}`,
             (engine) => engine.deleteSingleFolder(file.path),
             (engine) => engine.deleteSingleFolderForMobileWatch(file.path),
           );
           return;
         }
         runStructural(
+          `delete file ${file.path}`,
           (engine) => engine.deleteSingleFile(file.path),
           (engine) => engine.deleteSingleFileForMobileWatch(file.path),
         );
@@ -373,6 +377,7 @@ export default class ObsidianNextcloudsync extends Plugin {
 
         if (file instanceof TFolder) {
           runStructural(
+            `rename folder ${oldPath} → ${file.path}`,
             (engine) => engine.renameSingleFolder(oldPath, file.path),
             (engine) => engine.renameSingleFolderForMobileWatch(oldPath, file.path),
           );
@@ -405,8 +410,10 @@ export default class ObsidianNextcloudsync extends Plugin {
           }
 
           // Hidden/Wi-Fi-blocked renames become structural-dirty instead of replaying a blind MOVE.
-          void mobileWatch.runStructural(() => engine.renameSingleFileForMobileWatch(oldPath, newPath))
-            .then((ran) => {
+          void mobileWatch.runStructural(
+            () => engine.renameSingleFileForMobileWatch(oldPath, newPath),
+            `rename file ${oldPath} → ${newPath}`,
+          ).then((ran) => {
               if (hadPendingUpload) mobileWatch.queueFile(newPath);
               if (!ran) {
                 mobileWatch.onVisible();
