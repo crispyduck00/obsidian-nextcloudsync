@@ -875,9 +875,10 @@ export default class ObsidianNextcloudsync extends Plugin {
       baseStore,
       cleanSideStore,
       statusBar,
-      // Watch/targeted-push operations are intentionally quiet on mobile. Full/manual sync keeps
-      // NoticeStatusBar; high-frequency lightweight work uses a no-op status surface.
-      watchStatusBar: Platform.isMobile ? new NullStatusBar() : statusBar,
+      // Local Watch and targeted Client Push share WatchOperations' single-path machinery. Keep
+      // those frequent lightweight operations quiet on mobile; authoritative full/manual sync still
+      // owns NoticeStatusBar. A later mobile-status UX can replace this surface without touching sync logic.
+      lightweightStatusBar: Platform.isMobile ? new NullStatusBar() : statusBar,
       historyStore,
       webdavFactory,
       pluginDir,
