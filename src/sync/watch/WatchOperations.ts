@@ -48,7 +48,7 @@ export interface Connection {
 export interface WatchDeps {
   localAdapter: Pick<LocalAdapter, 'stat' | 'readBinary'>;
   stateDB: Pick<StateDB,
-    'getFile' | 'deleteFile' | 'getDir' | 'setDir' | 'deleteDir'
+    'getFile' | 'deleteFile' | 'getDir' | 'setDir' | 'deleteDir' | 'moveDirSubtree'
     | 'rememberPendingRename' | 'removePendingRename' | 'requestSave' | 'save' | 'getLastSyncTime'
   >;
   historyStore?: Pick<SyncHistoryStore, 'save'>;
@@ -327,6 +327,7 @@ export class WatchOperations {
         `watch: rename pending ${oldPath} → ${newPath} — ${(err as Error).message}`,
         'error',
       );
+      this.notify(`⚠️ Move pending: ${oldPath} → ${newPath} — ${(err as Error).message}`, 8000);
     }
   }
 
@@ -410,8 +411,8 @@ export class WatchOperations {
       this.begin();
       try {
         await conn.client.moveFile(oldPath, newPath); // MOVE works for collections too
-        this.deps.stateDB.deleteDir(oldPath);
-        this.deps.stateDB.setDir({ path: newPath, remoteFileId: null });
+        if (tracked) this.deps.stateDB.moveDirSubtree(oldPath, newPath);
+        else this.deps.stateDB.setDir({ path: newPath, remoteFileId: null });
         if (tracked) this.deps.stateDB.removePendingRename(oldPath, newPath);
         await this.deps.stateDB.save();
         void this.deps.logger?.log(`watch: folder renamed → MOVE ${oldPath} → ${newPath}`);
@@ -424,6 +425,7 @@ export class WatchOperations {
         `watch: folder rename pending ${oldPath} → ${newPath} — ${(err as Error).message}`,
         'error',
       );
+      this.notify(`⚠️ Folder move pending: ${oldPath} → ${newPath} — ${(err as Error).message}`, 8000);
     }
   }
 
