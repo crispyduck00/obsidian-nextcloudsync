@@ -695,7 +695,7 @@ export class RemoteDirCreateError extends NetworkError {
 export class ServerLockedError extends NetworkError {
   constructor(
     public readonly path: string,
-    method: 'PUT' | 'DELETE',
+    method: 'PUT' | 'DELETE' | 'MOVE',
     public readonly lockOwner: string | null,
   ) {
     super(423, '', method);
