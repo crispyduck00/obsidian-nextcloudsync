@@ -393,36 +393,13 @@ export class SyncEngine {
           await rt.applyLocalRename(move.oldPath, move.newPath);
         } else {
           await client.moveFile(move.oldPath, move.newPath);
-          this.opts.stateDB.deleteDir(move.oldPath);
-          this.opts.stateDB.setDir({ path: move.newPath, remoteFileId: trackedDir?.remoteFileId ?? null });
+          this.opts.stateDB.moveDirSubtree(move.oldPath, move.newPath);
         }
 
         this.opts.stateDB.removePendingRename(move.oldPath, move.newPath);
         await this.opts.stateDB.save();
         void this.opts.logger?.log(`rename-recovery: MOVE complete ${move.oldPath} → ${move.newPath}`);
       } catch (err) {
-        // Crash window: the server may have completed a file MOVE just before this device died, while
-        // StateDB still carries oldPath + pending intent. A retry then sees oldPath missing. Nextcloud's
-        // oc:fileid is stable across MOVE, so matching it at the destination proves the prior MOVE
-        // succeeded without guessing from name/mtime/content.
-        if (move.kind === 'file' && trackedFile?.remoteFileId) {
-          try {
-            const destination = await client.statFile(move.newPath);
-            if (destination?.fileId === trackedFile.remoteFileId) {
-              this.opts.stateDB.deleteFile(move.oldPath);
-              this.opts.stateDB.setFile({ ...trackedFile, path: move.newPath, remoteFileId: destination.fileId });
-              this.opts.stateDB.removePendingRename(move.oldPath, move.newPath);
-              await this.opts.stateDB.save();
-              void this.opts.logger?.log(
-                `rename-recovery: destination has original file-id; prior MOVE already completed ${move.oldPath} → ${move.newPath}`,
-              );
-              continue;
-            }
-          } catch {
-            // Best-effort proof only. The original MOVE error below remains authoritative.
-          }
-        }
-
         void this.opts.logger?.log(
           `rename-recovery: MOVE still pending ${move.oldPath} → ${move.newPath} — ${(err as Error).message}`,
           'error',
@@ -523,7 +500,10 @@ export class SyncEngine {
       // from its two endpoints. Retry it first; unresolved endpoints are protected below.
       await this.retryPendingRenames(summary);
 
-      const isFirstSync = !this.opts.stateDB.getSyncToken() && this.opts.stateDB.getAllFiles().length === 0;
+      const isFirstSync =
+        !this.opts.stateDB.getSyncToken()
+        && this.opts.stateDB.getAllFiles().length === 0
+        && this.opts.stateDB.getPendingRenames().length === 0;
 
       if (isFirstSync) {
         await this.initialSync(summary);
