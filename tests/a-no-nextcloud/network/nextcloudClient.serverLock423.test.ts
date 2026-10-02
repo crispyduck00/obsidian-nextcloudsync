@@ -179,4 +179,38 @@ describe('NextcloudClient — 423 lockdiscovery lookup (feature 090)', () => {
       expect(mockRequestUrl).toHaveBeenCalledTimes(1); // no extra lockdiscovery PROPFIND for non-423
     });
   });
+
+  describe('moveFile (MOVE)', () => {
+    it('423 uses the same lockdiscovery owner lookup and reports MOVE', async () => {
+      mockRequestUrl.mockImplementation((params: { method?: string }) => {
+        if (params.method === 'MKCOL') return res(201);
+        if (params.method === 'MOVE') return res(423, { text: 'Locked' });
+        if (params.method === 'PROPFIND') return res(207, { text: LOCKDISCOVERY_WITH_OWNER });
+        throw new Error(`unexpected method ${params.method}`);
+      });
+
+      const err: unknown = await makeClient().moveFile('Notes/a.md', 'Notes/b.md').catch((e) => e);
+
+      expect(err).toBeInstanceOf(ServerLockedError);
+      expect(err).toBeInstanceOf(NetworkError);
+      expect((err as Error).message).toContain('HTTP 423 (MOVE)');
+      expect((err as Error).message).toContain(OWNER);
+    });
+
+    it('423 with no readable owner remains a plain MOVE NetworkError', async () => {
+      mockRequestUrl.mockImplementation((params: { method?: string }) => {
+        if (params.method === 'MKCOL') return res(201);
+        if (params.method === 'MOVE') return res(423, { text: 'Locked' });
+        if (params.method === 'PROPFIND') return res(207, { text: LOCKDISCOVERY_NO_OWNER });
+        throw new Error(`unexpected method ${params.method}`);
+      });
+
+      const err: unknown = await makeClient().moveFile('Notes/a.md', 'Notes/b.md').catch((e) => e);
+
+      expect(err).toBeInstanceOf(NetworkError);
+      expect(err).not.toBeInstanceOf(ServerLockedError);
+      expect((err as Error).message).toBe('HTTP 423 (MOVE)');
+    });
+  });
+
 });
