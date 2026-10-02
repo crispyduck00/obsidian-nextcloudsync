@@ -284,7 +284,9 @@ export class SyncEngine {
       mergeBase: this.mergeBase,
       dropCleanSnapshot: (p) => this.resolution.dropCleanSnapshot(p),
       markOwnEvent: (p) => this.opts.localAdapter.ignore(p),
-      isSystemExcluded: (p) => this.isSystemExcluded(p),
+      // A pending folder MOVE is neither a create nor a delete. Keep both endpoints/subtrees out
+      // of directory three-way reconciliation until the MOVE itself succeeds.
+      isSystemExcluded: (p) => this.isSystemExcluded(p) || this.opts.stateDB.isPendingRenamePath(p),
       massDeleteLimit: () => this.opts.settings.massDeleteLimit,
       isCancelled: () => this.cancelled,
       logger: opts.logger,
@@ -341,6 +343,93 @@ export class SyncEngine {
       this.renameTracker = new RenameTracker(this.opts.stateDB, this.client!);
     }
     return this.renameTracker;
+  }
+
+
+  /** A path protected by an unfinished local MOVE must not be reinterpreted as create/delete. */
+  private isPendingRenamePath(path: string): boolean {
+    return this.opts.stateDB.isPendingRenamePath(path);
+  }
+
+  /**
+   * Retry durable local MOVE intents before ordinary reconciliation.
+   *
+   * The local filesystem already contains the destination path. Until MOVE succeeds, generic sync
+   * must not upload that destination as a new file or delete the old remote path. Failures are
+   * recorded in this session but the intent remains durable for the next sync.
+   */
+  private async retryPendingRenames(summary: SyncSessionSummary): Promise<void> {
+    const pending = this.opts.stateDB.getPendingRenames();
+    if (pending.length === 0) return;
+
+    const client = this.client!;
+    const rt = this.getOrCreateRenameTracker();
+    void this.opts.logger?.log(`rename-recovery: retrying ${pending.length} pending MOVE(s)`);
+
+    for (const move of pending) {
+      if (this.cancelled) break;
+
+      const trackedFile = move.kind === 'file' ? this.opts.stateDB.getFile(move.oldPath) : undefined;
+      const trackedDir = move.kind === 'folder' ? this.opts.stateDB.getDir(move.oldPath) : undefined;
+
+      // The tracked identity may already have moved before a crash, while the intent save lagged
+      // behind. If the destination is already the tracked endpoint, the intent is stale and safe to
+      // clear. If neither endpoint is tracked any more, let ordinary reconciliation own the paths.
+      if ((!trackedFile && move.kind === 'file') || (!trackedDir && move.kind === 'folder')) {
+        const targetAlreadyTracked = move.kind === 'file'
+          ? this.opts.stateDB.getFile(move.newPath) != null
+          : this.opts.stateDB.getDir(move.newPath) != null;
+        this.opts.stateDB.removePendingRename(move.oldPath, move.newPath);
+        await this.opts.stateDB.save();
+        void this.opts.logger?.log(
+          `rename-recovery: dropped stale intent ${move.oldPath} → ${move.newPath}` +
+          (targetAlreadyTracked ? ' (destination already tracked)' : ' (source no longer tracked)'),
+        );
+        continue;
+      }
+
+      try {
+        if (move.kind === 'file') {
+          await rt.applyLocalRename(move.oldPath, move.newPath);
+        } else {
+          await client.moveFile(move.oldPath, move.newPath);
+          this.opts.stateDB.deleteDir(move.oldPath);
+          this.opts.stateDB.setDir({ path: move.newPath, remoteFileId: trackedDir?.remoteFileId ?? null });
+        }
+
+        this.opts.stateDB.removePendingRename(move.oldPath, move.newPath);
+        await this.opts.stateDB.save();
+        void this.opts.logger?.log(`rename-recovery: MOVE complete ${move.oldPath} → ${move.newPath}`);
+      } catch (err) {
+        // Crash window: the server may have completed a file MOVE just before this device died, while
+        // StateDB still carries oldPath + pending intent. A retry then sees oldPath missing. Nextcloud's
+        // oc:fileid is stable across MOVE, so matching it at the destination proves the prior MOVE
+        // succeeded without guessing from name/mtime/content.
+        if (move.kind === 'file' && trackedFile?.remoteFileId) {
+          try {
+            const destination = await client.statFile(move.newPath);
+            if (destination?.fileId === trackedFile.remoteFileId) {
+              this.opts.stateDB.deleteFile(move.oldPath);
+              this.opts.stateDB.setFile({ ...trackedFile, path: move.newPath, remoteFileId: destination.fileId });
+              this.opts.stateDB.removePendingRename(move.oldPath, move.newPath);
+              await this.opts.stateDB.save();
+              void this.opts.logger?.log(
+                `rename-recovery: destination has original file-id; prior MOVE already completed ${move.oldPath} → ${move.newPath}`,
+              );
+              continue;
+            }
+          } catch {
+            // Best-effort proof only. The original MOVE error below remains authoritative.
+          }
+        }
+
+        void this.opts.logger?.log(
+          `rename-recovery: MOVE still pending ${move.oldPath} → ${move.newPath} — ${(err as Error).message}`,
+          'error',
+        );
+        this.recordError(summary, move.newPath, err);
+      }
+    }
   }
 
   /**
@@ -429,6 +518,10 @@ export class SyncEngine {
       await this.ensureClient();
       this.syncProgress = { processed: 0, total: 0 };
       this.opts.statusBar.setStatus('syncing');
+
+      // A pending local rename is a stronger fact than the create/delete shapes a scan would infer
+      // from its two endpoints. Retry it first; unresolved endpoints are protected below.
+      await this.retryPendingRenames(summary);
 
       const isFirstSync = !this.opts.stateDB.getSyncToken() && this.opts.stateDB.getAllFiles().length === 0;
 
@@ -1001,7 +1094,9 @@ export class SyncEngine {
     summary.retriedFiles = retried;
 
     // Process each remote file
-    const eligible = remoteFiles.filter(f => !this.isSystemExcluded(f.path));
+    const eligible = remoteFiles.filter(
+      f => !this.isSystemExcluded(f.path) && !this.isPendingRenamePath(f.path),
+    );
     this.syncProgress = { processed: 0, total: eligible.length };
     if (eligible.length > 0) this.opts.statusBar.setProgress(0, eligible.length);
     // Bounded-parallel (P1-A): each remote file is processed by one worker; uploads to the same
@@ -1391,6 +1486,7 @@ export class SyncEngine {
     // stays inside the worker (it requires reading the file).
     const uploadCandidates = [...localStats.entries()].filter(([path, st]) => {
       if (remotePathSet.has(path)) return false; // already handled in the remote-changes loop
+      if (this.isPendingRenamePath(path)) return false; // destination of unfinished MOVE is not a new upload
       const base = this.opts.stateDB.getFile(path);
       // Fast-path (P0-A): skip known files whose post-write stat signature is unchanged — no read,
       // no hash. Replaces the old `st.mtime <= base.mtime` filter, which was always false on mobile
@@ -1432,7 +1528,7 @@ export class SyncEngine {
     // Build a map of new (unsynced) local files for hash-based rename detection.
     const newLocalFiles = new Map<string, { hash: string; size: number }>();
     for (const [path, st] of localStats) {
-      if (!this.opts.stateDB.getFile(path)) {
+      if (!this.opts.stateDB.getFile(path) && !this.isPendingRenamePath(path)) {
         const data = await this.opts.localAdapter.readBinary(path);
         const hash = await sha256(data);
         newLocalFiles.set(path, { hash, size: st.size });
@@ -1441,7 +1537,12 @@ export class SyncEngine {
 
     const missingPaths = this.opts.stateDB.getAllFiles()
       .map(f => f.path)
-      .filter(p => !this.isSystemExcluded(p) && !localStats.has(p) && !remotePathSet.has(p));
+      .filter(p =>
+        !this.isSystemExcluded(p)
+        && !this.isPendingRenamePath(p)
+        && !localStats.has(p)
+        && !remotePathSet.has(p)
+      );
 
     const localRenames = rt.detectLocalRenamesByHash(missingPaths, newLocalFiles);
 
@@ -1502,7 +1603,7 @@ export class SyncEngine {
       const candidates: string[] = [];
       for (const fileState of this.opts.stateDB.getAllFiles()) {
         const path = fileState.path;
-        if (this.isSystemExcluded(path) || remotePathSet.has(path)) continue;
+        if (this.isSystemExcluded(path) || this.isPendingRenamePath(path) || remotePathSet.has(path)) continue;
         if (!localStats.has(path)) continue; // absent locally too — handled by the missing-paths loop
         const data = await this.opts.localAdapter.readBinary(path);
         if (await sha256(data) !== fileState.localHash) continue; // modified locally → preserve & re-upload
