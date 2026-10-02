@@ -419,7 +419,7 @@ export class NextcloudClient implements IWebDAVClient {
    * before, because the lookup exists to add information to the original 423, never to replace or
    * hide it (FR-004).
    */
-  private async errorFor423(path: string, method: 'PUT' | 'DELETE', originalText: string): Promise<never> {
+  private async errorFor423(path: string, method: 'PUT' | 'DELETE' | 'MOVE', originalText: string): Promise<never> {
     try {
       const res = await this.reqReadonly({
         url: this.remoteUrl(path),
@@ -523,6 +523,11 @@ export class NextcloudClient implements IWebDAVClient {
       res = await move();
     }
     if (res.status === 412) throw new ConflictError(newPath);
+    if (res.status === 423) {
+      // Preserve Nextcloud's lock owner diagnostics for MOVE just like PUT/DELETE. The rename-recovery
+      // layer keeps the MOVE pending instead of degrading a temporary/stale lock into a duplicate.
+      await this.errorFor423(oldPath, 'MOVE', res.text);
+    }
     if (res.status < 200 || res.status >= 300) throw dirError ?? new NetworkError(res.status, res.text, 'MOVE');
   }
 
