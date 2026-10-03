@@ -55,6 +55,8 @@ export default class ObsidianNextcloudsync extends Plugin {
   cleanSideStore?: import('./data/CleanSideStore').CleanSideStore;
   /** Diagnostic file logger: writes this device's single log file while logging is enabled. */
   logger!: FileLogger;
+  /** Compact Android sync-status item in the active view action strip. */
+  private mobileSyncStatusItem?: import('./ui/MobileSyncStatusItem').MobileSyncStatusItem;
   /**
    * Status filter for the Sync Status dialog. Held here (not on the modal, which is recreated per
    * open) so the selection persists across reopens. Hydrated from settings on load and saved on every
@@ -110,6 +112,13 @@ export default class ObsidianNextcloudsync extends Plugin {
     void this.logSettingsSnapshot();
 
     this.addSettingTab(new NextcloudSyncSettingTab(this.app, this));
+
+    // Keep the one compact Android status control attached to the currently active leaf.
+    this.registerEvent(this.app.workspace.on('active-leaf-change', () => {
+      this.mobileSyncStatusItem?.refreshHost();
+    }));
+    this.registerDomEvent(window, 'offline', () => this.mobileSyncStatusItem?.setNetworkAvailable(false));
+    this.registerDomEvent(window, 'online', () => this.mobileSyncStatusItem?.setNetworkAvailable(true));
 
     this.addCommand({
       id: 'sync-now',
@@ -334,6 +343,8 @@ export default class ObsidianNextcloudsync extends Plugin {
           await applyForceResolution(this.syncEngine!, path, choice);
         } catch (err) {
           new Notice(`Could not resolve "${path}": ${(err as Error).message}`);
+        } finally {
+          this.refreshMobileConflictStatus();
         }
       },
       // Feature 042: force-resolve every currently-listed conflict with one chosen action. The
@@ -351,6 +362,7 @@ export default class ObsidianNextcloudsync extends Plugin {
         });
         if (!ok) return;
         const { resolved, noop, failed } = await applyBulkForceResolution(this.syncEngine!, paths, choice);
+        this.refreshMobileConflictStatus();
         new Notice(`Resolved ${resolved} of ${n} conflicts`
           + (noop ? `; ${noop} unchanged` : '') + (failed ? `; ${failed} failed` : ''));
       },
@@ -517,6 +529,8 @@ export default class ObsidianNextcloudsync extends Plugin {
     void this.baseStore?.flush();
     void this.cleanSideStore?.flush();
     this.localAdapter?.dispose();
+    this.mobileSyncStatusItem?.destroy();
+    this.mobileSyncStatusItem = undefined;
     this.statusBarEl?.remove();
     this.statusBarEl = undefined;
   }
@@ -604,6 +618,7 @@ export default class ObsidianNextcloudsync extends Plugin {
     const { SyncHistoryStore } = await import('./data/SyncHistoryStore');
     const { StatusBarItem } = await import('./ui/StatusBarItem');
     const { NoticeStatusBar } = await import('./ui/NoticeStatusBar');
+    const { MobileSyncStatusItem } = await import('./ui/MobileSyncStatusItem');
     const { WebDAVFactory } = await import('./network/WebDAVFactory');
     const { loadAppPassword } = await import('./settings/SettingTab');
 
@@ -625,16 +640,17 @@ export default class ObsidianNextcloudsync extends Plugin {
     const historyStore = new SyncHistoryStore(this.app.vault.adapter, pluginDir);
     await historyStore.load();
 
-    // Mobile has no visible status bar (addStatusBarItem is unavailable there), so feedback is
-    // surfaced as a single reused Notice toast via NoticeStatusBar. Both implement IStatusBar, so
-    // the sync engine needs no platform branching.
-    // On desktop, clicking the status bar opens the sync-status dialog (conflicts / retries).
-    // The raw element is kept on `this.statusBarEl` (G7-1) so a later re-init can remove it instead
-    // of leaking a second status-bar item into the DOM alongside this one.
+    // Desktop keeps its native status bar. Android gets a compact clickable indicator in the
+    // active view action strip; iOS retains the established Notice surface.
     let statusBarEl: HTMLElement | undefined;
-    const statusBar = Platform.isMobile
-      ? new NoticeStatusBar()
-      : new StatusBarItem(statusBarEl = this.addStatusBarItem(), () => this.openSyncStatus());
+    const androidStatus = Platform.isMobile && !Platform.isIosApp
+      ? new MobileSyncStatusItem(() => this.openSyncStatus())
+      : undefined;
+    this.mobileSyncStatusItem = androidStatus;
+    const statusBar = androidStatus
+      ?? (Platform.isMobile
+        ? new NoticeStatusBar()
+        : new StatusBarItem(statusBarEl = this.addStatusBarItem(), () => this.openSyncStatus()));
     this.statusBarEl = statusBarEl;
     const password = loadAppPassword(this.app, this.settings.passwordSecretId);
     const webdavFactory = new WebDAVFactory(this.app, this.settings, password, (m) => void this.logger.log(`net: ${m}`));
@@ -670,6 +686,8 @@ export default class ObsidianNextcloudsync extends Plugin {
         }
       },
     });
+    androidStatus?.setNetworkAvailable(typeof navigator === 'undefined' || navigator.onLine !== false);
+    this.refreshMobileConflictStatus();
 
     // Periodic auto-sync is desktop-only (mobile OS suspends background timers).
     this.applyAutoSyncInterval();
@@ -680,6 +698,14 @@ export default class ObsidianNextcloudsync extends Plugin {
       const delayMs = this.settings.startupSyncDelaySeconds * 1000;
       window.setTimeout(() => { void this.syncEngine?.syncManual(); }, delayMs);
     }
+  }
+
+  /** Refresh the Android indicator from the engine's existing read-only conflict snapshot. */
+  private refreshMobileConflictStatus(): void {
+    const item = this.mobileSyncStatusItem;
+    const engine = this.syncEngine;
+    if (!item || !engine) return;
+    item.setConflictCount(engine.getStatusReport().conflictedFiles.length);
   }
 
   private compareVersions(a: string, b: string): number {
