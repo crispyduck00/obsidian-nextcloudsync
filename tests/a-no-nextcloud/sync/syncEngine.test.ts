@@ -1,4 +1,4 @@
-import { Notice, Platform } from 'obsidian';
+import { Notice, Platform } from '../support/obsidian';
 import { StateDB } from '../../../src/data/StateDB';
 import { DavSyncSettings, DEFAULT_SETTINGS, FileState, RemoteFileInfo, SyncSessionSummary } from '../../../src/types';
 import { SyncEngine } from '../../../src/sync/SyncEngine';
