@@ -322,6 +322,7 @@ export class SyncEngine {
       queueRetry: (p) => { this.retryQueue.push(p); },
       retryQueueLength: () => this.retryQueue.length,
       conflictEncounters: () => this.conflictEncounters,
+      activeConflictCount: () => this.opts.stateDB.countConflicted(),
       logger: opts.logger,
     });
     this.remotePush = new RemotePushReconciler({

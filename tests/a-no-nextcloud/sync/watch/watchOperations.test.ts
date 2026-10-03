@@ -61,6 +61,7 @@ function build(o: Opts = {}, over: Partial<WatchDeps> = {}) {
     history: [] as string[],
     retries: [] as string[],
     status: [] as string[],
+    conflictCounts: [] as number[],
     notices: [] as string[],
     saves: 0,
     createDirectory: [] as string[],
@@ -105,7 +106,10 @@ function build(o: Opts = {}, over: Partial<WatchDeps> = {}) {
       getLastSyncTime: () => 0,
     } as unknown as WatchDeps['stateDB'],
     historyStore: { save: async () => { /* noop */ } } as unknown as WatchDeps['historyStore'],
-    statusBar: { setStatus: (s: string) => { calls.status.push(s); } } as unknown as WatchDeps['statusBar'],
+    statusBar: {
+      setStatus: (s: string) => { calls.status.push(s); },
+      setConflictCount: (n: number) => { calls.conflictCounts.push(n); },
+    } as unknown as WatchDeps['statusBar'],
     journal: Object.assign(new SyncJournal({}), {
       recordHistory: (p: string, op: string) => { calls.history.push(`${op}:${p}`); },
     }) as unknown as SyncJournal,
@@ -145,12 +149,40 @@ function build(o: Opts = {}, over: Partial<WatchDeps> = {}) {
     queueRetry: (p: string) => { calls.retries.push(p); },
     retryQueueLength: () => calls.retries.length,
     conflictEncounters: o.conflicts ?? (() => 0),
+    activeConflictCount: () => 0,
     notify: (m: string) => { calls.notices.push(m); },
     ...over,
   };
 
   return { watch: new WatchOperations(deps), calls };
 }
+
+describe('WatchOperations status feedback', () => {
+  it('publishes the current unresolved conflict count after a watch reconciliation', async () => {
+    const { watch, calls } = build(
+      {
+        localContent: 'changed',
+        base: tracked({ localHash: 'old', localMtime: 999, localSize: 3 }),
+        processFile: async (_r, s) => { s.conflictedCount = 1; },
+      },
+      { activeConflictCount: () => 1 },
+    );
+    await watch.syncSingleFile('note.md');
+    expect(calls.conflictCounts).toContain(1);
+  });
+
+  it('clears the conflict count when a later watch reconciliation has resolved all conflicts', async () => {
+    const { watch, calls } = build(
+      {
+        localContent: 'changed',
+        base: tracked({ localHash: 'old', localMtime: 999, localSize: 3 }),
+      },
+      { activeConflictCount: () => 0 },
+    );
+    await watch.syncSingleFile('note.md');
+    expect(calls.conflictCounts).toContain(0);
+  });
+});
 
 describe('WatchOperations.syncSingleFile — never alongside a full sync', () => {
   it('defers the path instead of racing the running scan', async () => {
