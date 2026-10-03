@@ -126,6 +126,17 @@ describe('ResolutionService.compareWithRemote', () => {
     expect(r.remoteText).toBe('remote body');
   });
 
+  it('keeps the markdown line diff when md is intentionally absent from Auto Merge File types', async () => {
+    const { service, client } = build(
+      { localContent: 'local body', remoteBody: 'remote body' },
+      { autoMergeFileTypes: () => ['txt', 'json'] },
+    );
+    const r = await service.compareWithRemote(client, 'note.md');
+    expect(r).toMatchObject({ state: 'ok', diffAvailable: true });
+    expect(r.localText).toBe('local body');
+    expect(r.remoteText).toBe('remote body');
+  });
+
   it('omits the text for a file type that is not auto-merge eligible', async () => {
     const { service, client } = build({ localContent: 'bytes' }, { autoMergeFileTypes: () => ['md'] });
     const r = await service.compareWithRemote(client, 'image.png');

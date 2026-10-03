@@ -75,7 +75,12 @@ describe('isTextEligible', () => {
     expect(isTextEligible('.gitignore', types)).toBe(false);
   });
 
-  it('accepts nothing when the configured list is empty', () => {
-    expect(isTextEligible('notes/a.md', [])).toBe(false);
+  it('keeps markdown text-eligible even when md is absent from the configured list', () => {
+    expect(isTextEligible('notes/a.md', ['txt', 'json'])).toBe(true);
+    expect(isTextEligible('notes/A.MD', [])).toBe(true);
+  });
+
+  it('accepts no non-markdown types when the configured list is empty', () => {
+    expect(isTextEligible('notes/a.txt', [])).toBe(false);
   });
 });

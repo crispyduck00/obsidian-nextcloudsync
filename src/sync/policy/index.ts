@@ -17,6 +17,7 @@ import { SIGNATURE_SAFETY_WINDOW_MS } from '../../util/limits';
 import { isUnderExcludedFolder, HARD_EXCLUDED_FOLDERS } from '../../util/excludedFolders';
 import { isSyncTmpPath } from '../../data/LocalAdapter';
 import { DIR_BREAKER_REPORT_FILENAME, FILE_BREAKER_REPORT_FILENAME } from '../../ui/breakerReport';
+import { isMarkdown } from '../../util/mergeableExtensions';
 
 /** Parent-directory key of a vault-relative path ('' for a root-level file). */
 export function parentDir(path: string): string {
@@ -77,8 +78,15 @@ export function isLocallyUnchanged(
   return true;
 }
 
-/** True when `path`'s extension is an Auto Merge File type (used for Compare's text-diff eligibility). */
+/**
+ * True when Compare may safely decode a file as text.
+ *
+ * Markdown is always text-eligible even though feature 048 intentionally removed `md` from
+ * `autoMergeFileTypes`: markdown has its own frontmatter/body merge rules and must not lose the
+ * Compare line diff merely because it no longer participates in that extension classification.
+ */
 export function isTextEligible(path: string, autoMergeFileTypes: readonly string[]): boolean {
+  if (isMarkdown(path)) return true;
   const dot = path.lastIndexOf('.');
   if (dot < 0) return false;
   const ext = path.slice(dot + 1).toLowerCase();
