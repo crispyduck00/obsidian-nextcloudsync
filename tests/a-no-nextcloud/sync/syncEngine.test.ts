@@ -1,3 +1,4 @@
+import { Notice, Platform } from 'obsidian';
 import { StateDB } from '../../../src/data/StateDB';
 import { DavSyncSettings, DEFAULT_SETTINGS, FileState, RemoteFileInfo, SyncSessionSummary } from '../../../src/types';
 import { SyncEngine } from '../../../src/sync/SyncEngine';
@@ -521,5 +522,36 @@ describe('SyncEngine.processRemoteFile — divergent (corrupt) baseline detectio
     }).processRemoteFile(remoteConverged, makeSummary());
 
     expect(handleConflict).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('SyncEngine concurrent full-sync guidance', () => {
+  function runningEngine(): SyncEngine {
+    const engine = new SyncEngine({
+      app: {}, settings: DEFAULT_SETTINGS, localAdapter: {}, stateDB: {},
+      statusBar: {}, webdavFactory: {}, pluginDir: '', configDir: '.obsidian',
+    } as never);
+    (engine as unknown as { running: boolean }).running = true;
+    return engine;
+  }
+
+  beforeEach(() => {
+    Notice.instances.length = 0;
+    Platform.isMobile = true;
+  });
+
+  afterEach(() => {
+    Platform.isMobile = false;
+  });
+
+  it('silently skips an automatic sync when another full sync is already running', async () => {
+    await runningEngine().syncManual();
+    expect(Notice.instances).toHaveLength(0);
+  });
+
+  it('still tells the user when a manual Sync now collides with a running sync', async () => {
+    await runningEngine().syncManual({ manual: true });
+    expect(Notice.instances.map(n => n.message)).toContain('⏳ A sync is already in progress.');
   });
 });

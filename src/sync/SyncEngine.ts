@@ -382,7 +382,10 @@ export class SyncEngine {
     // Prevent concurrent runs (avoid clashing with watch mode or scheduled sync).
     if (this.running) {
       void this.opts.logger?.log('sync: skipped — already running');
-      if (Platform.isMobile) new Notice('⏳ A sync is already in progress.');
+      // Automatic triggers (startup / interval / resume) may legitimately race another full sync.
+      // That is a normal no-op, not something that should interrupt a mobile user with a toast.
+      // Keep the guidance only for an explicit user-initiated "Sync now" action.
+      if (Platform.isMobile && opts.manual === true) new Notice('⏳ A sync is already in progress.');
       return;
     }
     if (this.isBlockedByWifiOnly()) { // "Wi-Fi only" enabled and on cellular
