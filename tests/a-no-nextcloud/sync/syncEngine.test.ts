@@ -1,3 +1,4 @@
+import { Notice, Platform } from '../support/obsidian';
 import { StateDB } from '../../../src/data/StateDB';
 import { DavSyncSettings, DEFAULT_SETTINGS, FileState, RemoteFileInfo, SyncSessionSummary } from '../../../src/types';
 import { SyncEngine } from '../../../src/sync/SyncEngine';
@@ -394,12 +395,21 @@ describe('SyncEngine.processRemoteFile — stale conflict-flag clearing', () => 
     size: 12, lastModified: 1000,
   };
 
-  function buildHarness(base: FileState) {
+  function buildHarness(
+    base: FileState,
+    remoteInfo: RemoteFileInfo = remote,
+    content = 'resolved content',
+    readError?: Error,
+  ) {
     const setFile = jest.fn();
     const localAdapter = {
       // The stat signature matches base.localMtime/localSize so the fast-path treats the file as
       // unchanged and does NOT recompute the hash → localChanged stays false.
       stat: jest.fn(async () => ({ size: base.size, mtime: base.mtime })),
+      read: jest.fn(async () => {
+        if (readError) throw readError;
+        return content;
+      }),
       readBinary: jest.fn(async () => new ArrayBuffer(0)),
     };
     const stateDB = { getFile: jest.fn(() => base), setFile, getLastSyncTime: jest.fn(() => 0) };
@@ -411,7 +421,7 @@ describe('SyncEngine.processRemoteFile — stale conflict-flag clearing', () => 
     const invoke = (summary: SyncSessionSummary) =>
       (engine as unknown as {
         processRemoteFile(r: RemoteFileInfo, s: SyncSessionSummary): Promise<void>;
-      }).processRemoteFile(remote, summary);
+      }).processRemoteFile(remoteInfo, summary);
     return { invoke, setFile };
   }
 
@@ -429,6 +439,61 @@ describe('SyncEngine.processRemoteFile — stale conflict-flag clearing', () => 
     }));
   });
 
+  it('keeps an unchanged marker-bearing file conflicted after the marker content has synced', async () => {
+    const base: FileState = {
+      path: 'note.md', localHash: 'lh', remoteId: 'same-checksum', idType: 'sha256',
+      size: 12, mtime: 1000, remoteFileId: 'fid-1', isConflicted: true,
+      localMtime: 1000, localSize: 12,
+    };
+    const markerContent = [
+      '<<<<<<< LOCAL device-a',
+      'local edit',
+      '=======',
+      'remote edit',
+      '>>>>>>> REMOTE device-b',
+    ].join('\n');
+    const h = buildHarness(base, remote, markerContent);
+    await h.invoke(makeSummary());
+    expect(h.setFile).toHaveBeenCalledWith(expect.objectContaining({
+      path: 'note.md', isConflicted: true,
+    }));
+  });
+
+  it('keeps the conflict flag when marker verification cannot read the local file', async () => {
+    const base: FileState = {
+      path: 'note.md', localHash: 'lh', remoteId: 'same-checksum', idType: 'sha256',
+      size: 12, mtime: 1000, remoteFileId: 'fid-1', isConflicted: true,
+      localMtime: 1000, localSize: 12,
+    };
+    const h = buildHarness(base, remote, '', new Error('read failed'));
+    await h.invoke(makeSummary());
+    expect(h.setFile).toHaveBeenCalledWith(expect.objectContaining({
+      path: 'note.md', isConflicted: true,
+    }));
+  });
+
+  it('refreshes remoteFileId without clearing an unresolved marker conflict', async () => {
+    const base: FileState = {
+      path: 'note.md', localHash: 'lh', remoteId: 'same-checksum', idType: 'sha256',
+      size: 12, mtime: 1000, remoteFileId: 'old-fid', isConflicted: true,
+      localMtime: 1000, localSize: 12,
+    };
+    const markerContent = [
+      '<<<<<<< LOCAL device-a',
+      'local edit',
+      '=======',
+      'remote edit',
+      '>>>>>>> REMOTE device-b',
+    ].join('\n');
+    const h = buildHarness(base, remote, markerContent);
+    await h.invoke(makeSummary());
+    expect(h.setFile).toHaveBeenCalledWith(expect.objectContaining({
+      path: 'note.md',
+      remoteFileId: 'fid-1',
+      isConflicted: true,
+    }));
+  });
+
   it('does not write when an unchanged file was never conflicted', async () => {
     const base: FileState = {
       path: 'note.md', localHash: 'lh', remoteId: 'same-checksum', idType: 'sha256',
@@ -439,6 +504,55 @@ describe('SyncEngine.processRemoteFile — stale conflict-flag clearing', () => 
     await h.invoke(makeSummary());
     expect(h.setFile).not.toHaveBeenCalled();
   });
+
+  it('refreshes a missing remoteFileId when an unchanged file has converged', async () => {
+  const base: FileState = {
+    path: 'note.md', localHash: 'lh', remoteId: 'same-checksum', idType: 'sha256',
+    size: 12, mtime: 1000, remoteFileId: null, isConflicted: false,
+    localMtime: 1000, localSize: 12,
+  };
+
+  const h = buildHarness(base);
+  await h.invoke(makeSummary());
+
+  expect(h.setFile).toHaveBeenCalledTimes(1);
+  expect(h.setFile).toHaveBeenCalledWith(expect.objectContaining({
+    path: 'note.md',
+    remoteFileId: 'fid-1',
+    isConflicted: false,
+  }));
+});
+
+it('refreshes a stale remoteFileId when an unchanged file has converged', async () => {
+  const base: FileState = {
+    path: 'note.md', localHash: 'lh', remoteId: 'same-checksum', idType: 'sha256',
+    size: 12, mtime: 1000, remoteFileId: 'old-fid', isConflicted: false,
+    localMtime: 1000, localSize: 12,
+  };
+
+  const h = buildHarness(base);
+  await h.invoke(makeSummary());
+
+  expect(h.setFile).toHaveBeenCalledTimes(1);
+  expect(h.setFile).toHaveBeenCalledWith(expect.objectContaining({
+    path: 'note.md',
+    remoteFileId: 'fid-1',
+    isConflicted: false,
+  }));
+});
+
+it('does not discard a known remoteFileId when the current remote reports none', async () => {
+  const base: FileState = {
+    path: 'note.md', localHash: 'lh', remoteId: 'same-checksum', idType: 'sha256',
+    size: 12, mtime: 1000, remoteFileId: 'fid-1', isConflicted: false,
+    localMtime: 1000, localSize: 12,
+  };
+
+  const h = buildHarness(base, { ...remote, fileId: null });
+  await h.invoke(makeSummary());
+
+  expect(h.setFile).not.toHaveBeenCalled();
+});
 });
 
 describe('SyncEngine.processRemoteFile — divergent (corrupt) baseline detection', () => {
@@ -521,5 +635,36 @@ describe('SyncEngine.processRemoteFile — divergent (corrupt) baseline detectio
     }).processRemoteFile(remoteConverged, makeSummary());
 
     expect(handleConflict).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('SyncEngine concurrent full-sync guidance', () => {
+  function runningEngine(): SyncEngine {
+    const engine = new SyncEngine({
+      app: {}, settings: DEFAULT_SETTINGS, localAdapter: {}, stateDB: {},
+      statusBar: {}, webdavFactory: {}, pluginDir: '', configDir: '.obsidian',
+    } as never);
+    (engine as unknown as { running: boolean }).running = true;
+    return engine;
+  }
+
+  beforeEach(() => {
+    Notice.instances.length = 0;
+    Platform.isMobile = true;
+  });
+
+  afterEach(() => {
+    Platform.isMobile = false;
+  });
+
+  it('silently skips an automatic sync when another full sync is already running', async () => {
+    await runningEngine().syncManual();
+    expect(Notice.instances).toHaveLength(0);
+  });
+
+  it('still tells the user when a manual Sync now collides with a running sync', async () => {
+    await runningEngine().syncManual({ manual: true });
+    expect(Notice.instances.map(n => n.message)).toContain('⏳ A sync is already in progress.');
   });
 });

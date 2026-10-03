@@ -18,7 +18,7 @@ import {
   VaultRootOutcome,
   ServerLockedError,
 } from '../types';
-import { IWebDAVClient } from './IWebDAVClient';
+import { IWebDAVClient, type RemoteRootInfo } from './IWebDAVClient';
 import { DavSyncSettings } from '../types';
 import { toRemotePath, hrefToRelative, encodeRemoteUrl, encodeServerUrl, ensureRemoteDir, mkcolStrict, prepareMissingParentRetry, isTransportFailure } from './remotePath';
 import { RemoteDirCache } from './RemoteDirCache';
@@ -255,14 +255,11 @@ export class NextcloudClient implements IWebDAVClient {
     return entries[0] ?? null;
   }
 
-  async getRootEtag(): Promise<string | null> {
+  async getRootInfo(): Promise<RemoteRootInfo> {
     // Root-ETag short-circuit (spec 023): a single Depth:0 PROPFIND on the vault root. Nextcloud
-    // propagates any descendant change up to the root collection's ETag, so a matching value means
-    // the remote tree is unchanged since the last full scan. Never throws — any non-207 (incl. 404
-    // before the folder exists), unreadable body, or other error yields null so the caller falls
-    // back to a real full scan (feature 087: the fall-back was always correct here, this just makes
-    // an unreadable body go through the same validated reader as every other call instead of its own
-    // unchecked DOMParser).
+    // returns oc:fileid in the same response, which lets Client Push recognise root-folder ETag
+    // propagation without a second request. Never throws: every ambiguous outcome returns nulls so
+    // callers conservatively use the ordinary full reconciliation path.
     try {
       const res = await this.reqReadonly({
         url: this.remoteUrl(''),
@@ -271,14 +268,22 @@ export class NextcloudClient implements IWebDAVClient {
         body: PROPFIND_BODY,
         throw: false,
       });
-      if (res.status !== 207) return null;
-      const responses = readMultistatus(res.text, { op: 'getRootEtag', path: '', status: res.status, method: 'PROPFIND' });
-      const etag = readProp(responses[0])
-        ?.getElementsByTagNameNS('DAV:', 'getetag')[0]?.textContent?.replace(/"/g, '') ?? null;
-      return etag && etag.length > 0 ? etag : null;
+      if (res.status !== 207) return { etag: null, fileId: null };
+      const responses = readMultistatus(res.text, { op: 'getRootInfo', path: '', status: res.status, method: 'PROPFIND' });
+      const prop = readProp(responses[0]);
+      if (!prop) return { etag: null, fileId: null };
+
+      const etagRaw = prop.getElementsByTagNameNS('DAV:', 'getetag')[0]?.textContent?.replace(/"/g, '') ?? null;
+      const etag = etagRaw && etagRaw.length > 0 ? etagRaw : null;
+      const rootFileId = readOwncloudProps(prop).fileId?.trim() || null;
+      return { etag, fileId: rootFileId };
     } catch {
-      return null;
+      return { etag: null, fileId: null };
     }
+  }
+
+  async getRootEtag(): Promise<string | null> {
+    return (await this.getRootInfo()).etag;
   }
 
   async getDirectories(path: string): Promise<RemoteDirInfo[]> {

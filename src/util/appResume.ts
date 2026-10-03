@@ -1,10 +1,11 @@
 /**
  * Syncing when the app comes back to the foreground (feature 079, GitHub discussion #44).
  *
- * Mobile has neither periodic sync nor watch mode — both are switched off there because the OS
- * suspends background timers, so neither can be relied on. That leaves an Obsidian left running in
- * the background with no way to notice that another device changed a note: nothing happens until the
- * user syncs by hand or restarts the app.
+ * Mobile has no reliable periodic background sync. Android may now opt into foreground-only watch,
+ * but that accelerates local changes while the app is alive; it deliberately does not promise
+ * background execution and cannot replace an authoritative catch-up after a suspension. Without
+ * Client Push, an Obsidian left in the background still needs this trigger to notice another
+ * device's remote changes.
  *
  * Coming back to the foreground is the one moment when the app is provably running and the user is
  * provably looking at it, which makes it the only trigger that does not depend on background

@@ -1,5 +1,12 @@
 import { NextcloudFeatures, RemoteFileInfo, RemoteDirInfo, SyncChanges, FileVersion, VaultRootOutcome } from '../types';
 
+export interface RemoteRootInfo {
+  /** Vault-root collection ETag, or null when unavailable. */
+  etag: string | null;
+  /** Nextcloud oc:fileid for the vault-root collection, or null when unavailable/unsupported. */
+  fileId: string | null;
+}
+
 export interface IWebDAVClient {
   connect(): Promise<NextcloudFeatures>;
   /**
@@ -48,6 +55,12 @@ export interface IWebDAVClient {
    * An unreadable body (feature 087) is one such failure — it still resolves to null, unchanged.
    */
   getRootEtag(): Promise<string | null>;
+  /**
+   * Optional richer variant of {@link getRootEtag}. Nextcloud returns the root ETag and oc:fileid
+   * from the same Depth:0 PROPFIND so Client Push can identify root-folder propagation without an
+   * extra request. Standard WebDAV clients may omit this method. Implementations must not throw.
+   */
+  getRootInfo?(): Promise<RemoteRootInfo>;
   /**
    * List the directories (WebDAV collections) beneath `path` (recursive). Surfaced
    * separately from {@link getFiles} so directories are first-class entities the engine

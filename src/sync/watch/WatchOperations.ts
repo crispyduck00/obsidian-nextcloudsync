@@ -45,6 +45,9 @@ export interface Connection {
   uploadStrategy: IUploadStrategy;
 }
 
+/** Result of one remote-triggered single-file reconciliation. */
+export type RemoteFileReconcileResult = 'done' | 'deferred' | 'busy' | 'full-sync';
+
 export interface WatchDeps {
   localAdapter: Pick<LocalAdapter, 'stat' | 'readBinary'>;
   stateDB: Pick<StateDB, 'getFile' | 'deleteFile' | 'getDir' | 'setDir' | 'deleteDir' | 'requestSave' | 'getLastSyncTime'>;
@@ -65,6 +68,11 @@ export interface WatchDeps {
   /** Whether a full sync is running right now. */
   isSyncRunning(): boolean;
   /**
+   * Run one lightweight path operation under the engine's shared activity gate. Different paths may
+   * overlap, but a full-vault sync is exclusive and has priority once requested.
+   */
+  runNonFullSyncOperation<T>(fn: () => Promise<T>): Promise<T>;
+  /**
    * The full sync's per-file classifier. Injected as a port rather than imported: feature 064 (C-3)
    * settled that watch mode and "Sync now" must reach identical results, which means watch mode runs
    * the same decision code instead of a second copy of it.
@@ -72,6 +80,8 @@ export interface WatchDeps {
   processFile(remote: RemoteFileInfo, summary: SyncSessionSummary): Promise<void>;
   /** Outbound port: this path needs another attempt on the next sync. */
   queueRetry(path: string): void;
+  /** Number of paths currently waiting for an ordinary-sync retry. */
+  retryQueueLength?(): number;
   /** How many conflicts the engine has encountered so far (see notifyWatchOutcome). */
   conflictEncounters(): number;
   logger?: Pick<FileLogger, 'log'>;
@@ -175,15 +185,93 @@ export class WatchOperations {
   }
 
   private async syncSingleFileLocked(path: string): Promise<void> {
-    // C-5: never run alongside a full sync. The multi-step resolve below (stat → compare → write →
-    // push) must not interleave with the full sync's writes to the same file, so defer the path and
-    // re-evaluate it once the run finishes — deferring rather than dropping keeps the edit from being
-    // missed when the full sync had already passed this file.
+    // C-5: never run alongside a full sync. Check immediately before entering the shared activity
+    // gate: if the full sync requested exclusivity first, defer; if this operation acquires shared
+    // access first, the full sync waits for it to finish. There is no await between the check and
+    // the gate request, so the two orderings cannot interleave.
     if (this.deps.isSyncRunning()) {
       this.pendingPaths.add(path);
       void this.deps.logger?.log(`watch: full sync in progress → deferred ${path}`);
       return;
     }
+    return this.deps.runNonFullSyncOperation(() => this.syncSingleFileActive(path));
+  }
+
+  /**
+   * Reconcile ONE file named by Nextcloud Client Push. Unlike syncSingleFile, this intentionally does
+   * not use the local-unchanged fast path: the trigger itself says the REMOTE side may have changed.
+   * The path lock is shared with local watch operations so a local edit and a remote push for the
+   * same note cannot classify against half-written state.
+   */
+  async reconcileRemoteFile(path: string, expectedRemoteFileId: string): Promise<RemoteFileReconcileResult> {
+    if (this.deps.isSystemExcluded(path)) return 'done';
+    return this.withPathLock(path, () => this.reconcileRemoteFileLocked(path, expectedRemoteFileId));
+  }
+
+  private async reconcileRemoteFileLocked(
+    path: string,
+    expectedRemoteFileId: string,
+  ): Promise<RemoteFileReconcileResult> {
+    // If the full sync requested exclusivity first, let the push scheduler retain this ID and retry
+    // afterwards. If we acquire shared activity first, the full sync gate waits for us.
+    if (this.deps.isSyncRunning()) return 'busy';
+    return this.deps.runNonFullSyncOperation(() => this.reconcileRemoteFileActive(path, expectedRemoteFileId));
+  }
+
+  private async reconcileRemoteFileActive(
+    path: string,
+    expectedRemoteFileId: string,
+  ): Promise<RemoteFileReconcileResult> {
+    const summary = this.deps.journal.newSummary();
+    const conflictsBefore = this.deps.conflictEncounters();
+    const retriesBefore = this.deps.retryQueueLength?.() ?? 0;
+    let result: RemoteFileReconcileResult = 'done';
+    this.begin();
+    try {
+      const conn = await this.deps.connect();
+      const remote = await conn.client.statFile(path);
+      if (!remote) {
+        // A known file disappeared at its old path: delete vs rename/move is ambiguous from one
+        // file-ID notification alone. The ordinary full sync already has safe deletion/rename logic.
+        void this.deps.logger?.log(`client-push: ${path} no longer exists at tracked path → full reconciliation`);
+        result = 'full-sync';
+      } else if (remote.fileId !== expectedRemoteFileId) {
+        // The old path may have been re-used after a rename. Never classify a different Nextcloud
+        // object under stale StateDB identity; let the full scan/rename tracker repair the mapping.
+        void this.deps.logger?.log(
+          `client-push: file id mismatch at ${path} (expected ${expectedRemoteFileId}, got ${remote.fileId ?? 'none'}) → full reconciliation`,
+        );
+        result = 'full-sync';
+      } else {
+        void this.deps.logger?.log(`client-push: remote state fetched → classifying ${path}`);
+        await this.deps.processFile(remote, summary);
+        this.deps.stateDB.requestSave();
+        await this.deps.historyStore?.save();
+
+        // processFileWithRetry intentionally contains many failures instead of throwing, and a
+        // remote->local write can also be deferred while the user is typing. Neither outcome may
+        // certify the push root ETag as fully processed. The ordinary sync/retry queue remains the
+        // authority for that unresolved work.
+        if (summary.errorCount > 0 || summary.conflictedCount > 0 || (this.deps.retryQueueLength?.() ?? retriesBefore) > retriesBefore) {
+          result = 'deferred';
+        }
+      }
+    } catch (err) {
+      // Match watch-mode failure semantics: keep the path for the next ordinary sync on transport
+      // failure, record the error, and never bypass the established classifier with an ad-hoc write.
+      console.warn(`[SyncEngine] Remote push reconcile failed for ${path}:`, err);
+      void this.deps.logger?.log(`client-push: FAILED ${path} — ${(err as Error).message}`, 'error');
+      this.deps.journal.recordError(summary, path, err);
+      if (err instanceof NetworkError) this.deps.queueRetry(path);
+      result = 'deferred';
+    } finally {
+      this.end();
+    }
+    this.notifyWatchOutcome(path, summary, conflictsBefore);
+    return result;
+  }
+
+  private async syncSingleFileActive(path: string): Promise<void> {
     const stat = await this.deps.localAdapter.stat(path);
     if (!stat) return; // already deleted before the debounce fired
     const base = this.deps.stateDB.getFile(path);
@@ -254,8 +342,6 @@ export class WatchOperations {
   }
 
   private async deleteSingleFileLocked(path: string): Promise<void> {
-    const base = this.deps.stateDB.getFile(path);
-    if (!base) return; // not tracked — nothing to do on remote
     // C-2 row 1: during a full sync, do nothing — and do NOT defer either. The running scan detects a
     // tracked path that is gone locally and propagates the deletion itself, so queuing it here would
     // only risk a second delete against a path the scan already handled.
@@ -263,6 +349,12 @@ export class WatchOperations {
       void this.deps.logger?.log(`watch: full sync in progress → deletion of ${path} left to the running scan`);
       return;
     }
+    return this.deps.runNonFullSyncOperation(() => this.deleteSingleFileActive(path));
+  }
+
+  private async deleteSingleFileActive(path: string): Promise<void> {
+    const base = this.deps.stateDB.getFile(path);
+    if (!base) return; // not tracked — nothing to do on remote
     const conn = await this.deps.connect();
     const summary = this.deps.journal.newSummary();
     const conflictsBefore = this.deps.conflictEncounters();
@@ -295,17 +387,19 @@ export class WatchOperations {
   }
 
   private async renameSingleFileLocked(oldPath: string, newPath: string): Promise<void> {
-    await this.deps.connect();
-    const rt = this.deps.renameTracker();
-    this.begin();
-    try {
-      await rt.applyLocalRename(oldPath, newPath);
-      this.deps.stateDB.requestSave(); // coalesced watch-mode save (P0-B)
-    } catch (err) {
-      console.warn(`[SyncEngine] Single-file rename failed ${oldPath} → ${newPath}:`, err);
-    } finally {
-      this.end();
-    }
+    return this.deps.runNonFullSyncOperation(async () => {
+      await this.deps.connect();
+      const rt = this.deps.renameTracker();
+      this.begin();
+      try {
+        await rt.applyLocalRename(oldPath, newPath);
+        this.deps.stateDB.requestSave(); // coalesced watch-mode save (P0-B)
+      } catch (err) {
+        console.warn(`[SyncEngine] Single-file rename failed ${oldPath} → ${newPath}:`, err);
+      } finally {
+        this.end();
+      }
+    });
   }
 
   /**
@@ -315,18 +409,20 @@ export class WatchOperations {
    */
   async createSingleFolder(path: string): Promise<void> {
     if (this.deps.isSystemExcluded(path)) return;
-    const conn = await this.deps.connect();
-    this.begin();
-    try {
-      await conn.client.createDirectory(path); // idempotent: existing folder → harmless
-      this.deps.stateDB.setDir({ path, remoteFileId: null });
-      this.deps.stateDB.requestSave(); // coalesced watch-mode save
-      void this.deps.logger?.log(`watch: folder created → MKCOL ${path}`);
-    } catch (err) {
-      console.warn(`[SyncEngine] Single-folder create failed for ${path}:`, err);
-    } finally {
-      this.end();
-    }
+    return this.deps.runNonFullSyncOperation(async () => {
+      const conn = await this.deps.connect();
+      this.begin();
+      try {
+        await conn.client.createDirectory(path); // idempotent: existing folder → harmless
+        this.deps.stateDB.setDir({ path, remoteFileId: null });
+        this.deps.stateDB.requestSave(); // coalesced watch-mode save
+        void this.deps.logger?.log(`watch: folder created → MKCOL ${path}`);
+      } catch (err) {
+        console.warn(`[SyncEngine] Single-folder create failed for ${path}:`, err);
+      } finally {
+        this.end();
+      }
+    });
   }
 
   /**
@@ -346,23 +442,25 @@ export class WatchOperations {
       void this.deps.logger?.log(`watch: full sync in progress → folder deletion of ${path} left to the running scan`);
       return;
     }
-    const conn = await this.deps.connect();
-    this.begin();
-    let succeeded = false;
-    try {
-      await conn.client.deleteCollection(path); // trashbin; 404 handled inside as success
-      void this.deps.logger?.log(`watch: folder deleted → remote collection removed ${path}`);
-      succeeded = true;
-    } catch (err) {
-      console.warn(`[SyncEngine] Single-folder delete failed for ${path}:`, err);
-    } finally {
-      this.end();
-    }
-    // BUG G1-2 fix: only drop the tracked directory when the remote delete actually succeeded (see
-    // deleteSingleFile for the full rationale) — otherwise the next sync would re-create it locally.
-    if (!succeeded) return;
-    this.deps.stateDB.deleteDir(path);
-    this.deps.stateDB.requestSave();
+    return this.deps.runNonFullSyncOperation(async () => {
+      const conn = await this.deps.connect();
+      this.begin();
+      let succeeded = false;
+      try {
+        await conn.client.deleteCollection(path); // trashbin; 404 handled inside as success
+        void this.deps.logger?.log(`watch: folder deleted → remote collection removed ${path}`);
+        succeeded = true;
+      } catch (err) {
+        console.warn(`[SyncEngine] Single-folder delete failed for ${path}:`, err);
+      } finally {
+        this.end();
+      }
+      // BUG G1-2 fix: only drop the tracked directory when the remote delete actually succeeded (see
+      // deleteSingleFile for the full rationale) — otherwise the next sync would re-create it locally.
+      if (!succeeded) return;
+      this.deps.stateDB.deleteDir(path);
+      this.deps.stateDB.requestSave();
+    });
   }
 
   /**
@@ -373,19 +471,21 @@ export class WatchOperations {
    */
   async renameSingleFolder(oldPath: string, newPath: string): Promise<void> {
     if (this.deps.isSystemExcluded(oldPath) && this.deps.isSystemExcluded(newPath)) return;
-    const conn = await this.deps.connect();
-    this.begin();
-    try {
-      await conn.client.moveFile(oldPath, newPath); // MOVE works for collections too
-      this.deps.stateDB.deleteDir(oldPath);
-      this.deps.stateDB.setDir({ path: newPath, remoteFileId: null });
-      this.deps.stateDB.requestSave();
-      void this.deps.logger?.log(`watch: folder renamed → MOVE ${oldPath} → ${newPath}`);
-    } catch (err) {
-      console.warn(`[SyncEngine] Single-folder rename failed ${oldPath} → ${newPath}:`, err);
-    } finally {
-      this.end();
-    }
+    return this.deps.runNonFullSyncOperation(async () => {
+      const conn = await this.deps.connect();
+      this.begin();
+      try {
+        await conn.client.moveFile(oldPath, newPath); // MOVE works for collections too
+        this.deps.stateDB.deleteDir(oldPath);
+        this.deps.stateDB.setDir({ path: newPath, remoteFileId: null });
+        this.deps.stateDB.requestSave();
+        void this.deps.logger?.log(`watch: folder renamed → MOVE ${oldPath} → ${newPath}`);
+      } catch (err) {
+        console.warn(`[SyncEngine] Single-folder rename failed ${oldPath} → ${newPath}:`, err);
+      } finally {
+        this.end();
+      }
+    });
   }
 
   /**

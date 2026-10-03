@@ -104,6 +104,7 @@ function buildRacy() {
     connect: async () => ({ client, uploadStrategy: {} as unknown as IUploadStrategy }),
     renameTracker: () => ({}) as unknown as RenameTracker,
     isSyncRunning: () => false,
+    runNonFullSyncOperation: async (fn) => await fn(),
     // Stands in for the real classifier. It reproduces the two facts that matter: the decision is
     // taken from (base vs local) and (base vs remote), and the upload changes the server BEFORE the
     // new baseline is recorded.
@@ -230,5 +231,28 @@ describe('[SPEC:WOV-1] serializing must not go too far, or catch too little', ()
     const baseRecorded = h.events.indexOf('base-recorded');
     const deleted = h.events.indexOf('delete');
     if (deleted >= 0) expect(deleted).toBeGreaterThan(baseRecorded);
+  });
+
+  it('uses the same path lock for a remote push and a local watch cycle', async () => {
+    const h = buildRacy();
+
+    h.type('h1');
+    const local = h.watch.syncSingleFile(PATH);
+    await tick();
+
+    // The remote-triggered cycle arrives while the local classifier is in the real upload→baseline
+    // gap. Sharing the path mutex is what prevents its PROPFIND from observing half-applied state.
+    const pushed = h.watch.reconcileRemoteFile(PATH, 'fid');
+    await Promise.all([local, pushed]);
+
+    const between: string[] = [];
+    let inGap = false;
+    for (const e of h.events) {
+      if (e === 'upload') { inGap = true; continue; }
+      if (e === 'base-recorded') { inGap = false; continue; }
+      if (inGap) between.push(e);
+    }
+    expect(between).toEqual([]);
+    expect(h.events).not.toContain('CONFLICT');
   });
 });
