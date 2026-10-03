@@ -38,6 +38,7 @@ import { remoteIdOf } from './remoteIdentity';
 import { DeletionService } from './deletion/DeletionService';
 import { ResolutionService } from './resolution/ResolutionService';
 import { ConflictApplier } from './conflict/ConflictApplier';
+import { hasCompleteMarkerSet } from './ConflictResolver';
 import { DirectoryReconciler } from './directory/DirectoryReconciler';
 import { WatchOperations } from './watch/WatchOperations';
 import { SyncActivityGate } from './SyncActivityGate';
@@ -1416,18 +1417,39 @@ export class SyncEngine {
         await this.handleConflict(remote.path, base, remote, remoteId, idType, summary);
         return;
       }
-      // Both sides match what we last synced → the file has converged. Refresh metadata that can
-      // safely be learned from the current remote object, and clear a stale conflict flag if needed.
-      // A missing fileId (standard WebDAV) must never erase an identity already known from Nextcloud.
+      // Equal local/remote bytes prove transport convergence, but they do not necessarily prove
+      // conflict resolution. Marker conflicts are intentionally uploaded so every device sees the
+      // same unresolved choice; keep that flag until the complete plugin marker set is removed.
+      // A newly learned Nextcloud fileId can still be refreshed independently of conflict state.
       const remoteFileIdChanged =
         remote.fileId !== null &&
         base?.remoteFileId !== remote.fileId;
+
+      let keepConflict = false;
+      if (base?.isConflicted) {
+        try {
+          const localContent = await this.opts.localAdapter.read(remote.path);
+          keepConflict = hasCompleteMarkerSet(localContent);
+          if (keepConflict) {
+            void this.opts.logger?.log(
+              `sync: converged marker content remains an unresolved conflict → ${remote.path}`,
+            );
+          }
+        } catch (err) {
+          // Never hide a conflict because verification itself failed. A later reconciliation can
+          // retry the read, while unrelated remote identity metadata may still be refreshed below.
+          keepConflict = true;
+          void this.opts.logger?.log(
+            `sync: could not verify conflicted content; keeping conflict flag → ${remote.path}: ${(err as Error).message}`,
+          );
+        }
+      }
 
       if (base && (base.isConflicted || remoteFileIdChanged)) {
         this.opts.stateDB.setFile({
           ...base,
           remoteFileId: remote.fileId ?? base.remoteFileId,
-          isConflicted: false,
+          isConflicted: keepConflict,
         });
       }
       return; // Unchanged

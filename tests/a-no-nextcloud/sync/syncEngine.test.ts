@@ -395,12 +395,21 @@ describe('SyncEngine.processRemoteFile — stale conflict-flag clearing', () => 
     size: 12, lastModified: 1000,
   };
 
-  function buildHarness(base: FileState, remoteInfo: RemoteFileInfo = remote) {
+  function buildHarness(
+    base: FileState,
+    remoteInfo: RemoteFileInfo = remote,
+    content = 'resolved content',
+    readError?: Error,
+  ) {
     const setFile = jest.fn();
     const localAdapter = {
       // The stat signature matches base.localMtime/localSize so the fast-path treats the file as
       // unchanged and does NOT recompute the hash → localChanged stays false.
       stat: jest.fn(async () => ({ size: base.size, mtime: base.mtime })),
+      read: jest.fn(async () => {
+        if (readError) throw readError;
+        return content;
+      }),
       readBinary: jest.fn(async () => new ArrayBuffer(0)),
     };
     const stateDB = { getFile: jest.fn(() => base), setFile, getLastSyncTime: jest.fn(() => 0) };
@@ -427,6 +436,61 @@ describe('SyncEngine.processRemoteFile — stale conflict-flag clearing', () => 
     // The unchanged path must rewrite the entry with the conflict flag cleared.
     expect(h.setFile).toHaveBeenCalledWith(expect.objectContaining({
       path: 'note.md', isConflicted: false,
+    }));
+  });
+
+  it('keeps an unchanged marker-bearing file conflicted after the marker content has synced', async () => {
+    const base: FileState = {
+      path: 'note.md', localHash: 'lh', remoteId: 'same-checksum', idType: 'sha256',
+      size: 12, mtime: 1000, remoteFileId: 'fid-1', isConflicted: true,
+      localMtime: 1000, localSize: 12,
+    };
+    const markerContent = [
+      '<<<<<<< LOCAL device-a',
+      'local edit',
+      '=======',
+      'remote edit',
+      '>>>>>>> REMOTE device-b',
+    ].join('\n');
+    const h = buildHarness(base, remote, markerContent);
+    await h.invoke(makeSummary());
+    expect(h.setFile).toHaveBeenCalledWith(expect.objectContaining({
+      path: 'note.md', isConflicted: true,
+    }));
+  });
+
+  it('keeps the conflict flag when marker verification cannot read the local file', async () => {
+    const base: FileState = {
+      path: 'note.md', localHash: 'lh', remoteId: 'same-checksum', idType: 'sha256',
+      size: 12, mtime: 1000, remoteFileId: 'fid-1', isConflicted: true,
+      localMtime: 1000, localSize: 12,
+    };
+    const h = buildHarness(base, remote, '', new Error('read failed'));
+    await h.invoke(makeSummary());
+    expect(h.setFile).toHaveBeenCalledWith(expect.objectContaining({
+      path: 'note.md', isConflicted: true,
+    }));
+  });
+
+  it('refreshes remoteFileId without clearing an unresolved marker conflict', async () => {
+    const base: FileState = {
+      path: 'note.md', localHash: 'lh', remoteId: 'same-checksum', idType: 'sha256',
+      size: 12, mtime: 1000, remoteFileId: 'old-fid', isConflicted: true,
+      localMtime: 1000, localSize: 12,
+    };
+    const markerContent = [
+      '<<<<<<< LOCAL device-a',
+      'local edit',
+      '=======',
+      'remote edit',
+      '>>>>>>> REMOTE device-b',
+    ].join('\n');
+    const h = buildHarness(base, remote, markerContent);
+    await h.invoke(makeSummary());
+    expect(h.setFile).toHaveBeenCalledWith(expect.objectContaining({
+      path: 'note.md',
+      remoteFileId: 'fid-1',
+      isConflicted: true,
     }));
   });
 
