@@ -483,16 +483,16 @@
  * Keep the visual icon small while retaining a comfortable mobile tap target.
  */
 .ncs-mobile-sync-status {
-  width: 26px;
-  min-width: 26px;
+  width: 24px;
+  min-width: 24px;
   height: 28px;
   min-height: 28px;
-  padding: 5px;
-  margin: 0 -2px 0 0;
+  padding: 4px;
+  margin: 0 -4px 0 0;
   border-radius: 50%;
   box-sizing: border-box;
-  opacity: 0.38;
-  transition: opacity 140ms ease, background-color 180ms ease, box-shadow 180ms ease;
+  opacity: 1;
+  transition: background-color 180ms ease, box-shadow 180ms ease;
 }
 
 .ncs-mobile-sync-status .ncs-mobile-sync-status-icon {
@@ -501,6 +501,8 @@
   height: 16px;
   align-items: center;
   justify-content: center;
+  opacity: 0.62;
+  transition: opacity 140ms ease;
 }
 
 .ncs-mobile-sync-status .ncs-mobile-sync-status-icon > svg {
@@ -508,18 +510,18 @@
   height: 15px;
 }
 
-.ncs-mobile-sync-status.is-syncing,
-.ncs-mobile-sync-status.is-recent-success {
-  opacity: 0.9;
+.ncs-mobile-sync-status.is-syncing .ncs-mobile-sync-status-icon,
+.ncs-mobile-sync-status.is-recent-success .ncs-mobile-sync-status-icon {
+  opacity: 0.95;
 }
 
-.ncs-mobile-sync-status.is-error,
-.ncs-mobile-sync-status.is-conflict {
+.ncs-mobile-sync-status.is-error .ncs-mobile-sync-status-icon,
+.ncs-mobile-sync-status.is-conflict .ncs-mobile-sync-status-icon {
   opacity: 1;
 }
 
-.ncs-mobile-sync-status.is-network-blocked {
-  opacity: 0.72;
+.ncs-mobile-sync-status.is-network-blocked .ncs-mobile-sync-status-icon {
+  opacity: 0.82;
 }
 
 .ncs-mobile-sync-status.is-syncing .ncs-mobile-sync-status-icon > svg {
@@ -528,7 +530,8 @@
 
 /* Client Push connected: deliberately subtle, never competing with error/conflict signalling. */
 .ncs-mobile-sync-status.is-realtime-connected {
-  background-color: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+  background-color: color-mix(in srgb, var(--interactive-accent) 18%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--interactive-accent) 28%, transparent);
 }
 
 /* Discovery / connect / reconnect only pulses the background, not the sync icon. */
@@ -537,12 +540,13 @@
 }
 
 .ncs-mobile-sync-status.is-realtime-offline {
-  background-color: color-mix(in srgb, var(--text-muted) 7%, transparent);
+  background-color: color-mix(in srgb, var(--text-muted) 12%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text-muted) 18%, transparent);
 }
 
 /* A received push gets one very small background acknowledgement; no second icon is introduced. */
 .ncs-mobile-sync-status.is-realtime-activity {
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--interactive-accent) 24%, transparent);
 }
 
 @keyframes ncs-mobile-sync-spin {
@@ -551,10 +555,12 @@
 
 @keyframes ncs-mobile-realtime-connect {
   0%, 100% {
-    background-color: color-mix(in srgb, var(--interactive-accent) 4%, transparent);
+    background-color: color-mix(in srgb, var(--interactive-accent) 8%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--interactive-accent) 16%, transparent);
   }
   50% {
-    background-color: color-mix(in srgb, var(--interactive-accent) 14%, transparent);
+    background-color: color-mix(in srgb, var(--interactive-accent) 22%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--interactive-accent) 32%, transparent);
   }
 }
 
