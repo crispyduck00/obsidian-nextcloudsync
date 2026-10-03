@@ -40,6 +40,8 @@ import { ResolutionService } from './resolution/ResolutionService';
 import { ConflictApplier } from './conflict/ConflictApplier';
 import { DirectoryReconciler } from './directory/DirectoryReconciler';
 import { WatchOperations } from './watch/WatchOperations';
+import { RemotePushReconciler, type RemoteBatchReconcileResult, type RemotePushBatch } from './push/RemotePushReconciler';
+import type { ClientPushScopeResult } from './push/PushSyncScheduler';
 import { MirrorService } from './mirror/MirrorService';
 import { SyncHistoryStore } from '../data/SyncHistoryStore';
 import { IStatusBar } from '../ui/StatusBarItem';
@@ -140,7 +142,7 @@ export class SyncEngine {
    * {@link abortAndWait} await a running sync's clean wind-down (including its finally state save)
    * before a maintenance reset clears the tracking index, so the two never interleave.
    */
-  private currentRun: Promise<void> | null = null;
+  private currentRun: Promise<boolean> | null = null;
   /** Start time of the in-progress full sync (= summary.startedAt); null outside a full sync run. */
   /** Session-scoped recording (feature 074). Owns the run start time that groups history entries. */
   private readonly journal: SyncJournal;
@@ -168,6 +170,8 @@ export class SyncEngine {
 
   /** Watch-mode single-path operations (feature 074). Owns its in-flight and deferred sets. */
   private readonly watch: WatchOperations;
+  /** Resolves notify_push IDs and delegates only safe known-file work to the existing classifier. */
+  private readonly remotePush: RemotePushReconciler;
 
   /** Mirror from remote: plan, then apply (feature 074). */
   private readonly mirror: MirrorService;
@@ -305,7 +309,14 @@ export class SyncEngine {
       isSyncRunning: () => this.running,
       processFile: (remote, summary) => this.processFileWithRetry(remote, summary),
       queueRetry: (p) => { this.retryQueue.push(p); },
+      retryQueueLength: () => this.retryQueue.length,
       conflictEncounters: () => this.conflictEncounters,
+      logger: opts.logger,
+    });
+    this.remotePush = new RemotePushReconciler({
+      stateDB: opts.stateDB,
+      isFullSyncRunning: () => this.isSyncRunning(),
+      reconcileFile: (path, expectedRemoteFileId) => this.watch.reconcileRemoteFile(path, expectedRemoteFileId),
       logger: opts.logger,
     });
     this.remoteListing = new RemoteListingSource({
@@ -379,64 +390,79 @@ export class SyncEngine {
   }
 
   /**
-   * Cheap Client Push scope gate. Returns false only when Nextcloud's vault-root ETag proves that the
-   * configured sync root is unchanged since the last real full scan. Every uncertain case preserves
-   * the old behavior and returns true so the ordinary sync engine remains authoritative.
-   *
-   * This method never updates StateDB: only a real full scan may advance the stored root ETag.
+   * Client Push scope gate. Only a positively changed Nextcloud vault-root ETag is eligible for
+   * targeted reconciliation. An unchanged root is ignored; every uncertain/stale-baseline case uses
+   * the ordinary full sync. The changed result carries the CURRENT root ETag only as batch-local push
+   * context; this method never updates StateDB, so only a real full scan advances the authoritative
+   * stored root ETag.
    */
-  async shouldReconcileClientPush(): Promise<boolean> {
+  async shouldReconcileClientPush(): Promise<ClientPushScopeResult> {
     // Preserve the existing Wi-Fi-only behavior without making a new network request on cellular.
-    if (this.isBlockedByWifiOnly()) return true;
+    if (this.isBlockedByWifiOnly()) return { kind: 'full-sync' };
 
     // Do not create/connect a client just for the optimization. The first ordinary sync establishes
     // the client and the root-ETag baseline; until then a push follows the original full-sync path.
     const client = this.client;
-    if (!client || this.features?.isNextcloud !== true) return true;
+    if (!client || this.features?.isNextcloud !== true) return { kind: 'full-sync' };
 
     // A token-capable server can advance StateDB without a real full scan, while remoteRootEtag is
     // deliberately updated only by full scans. Avoid using a potentially stale baseline there.
-    if (this.opts.stateDB.getSyncToken()) return true;
+    if (this.opts.stateDB.getSyncToken()) return { kind: 'full-sync' };
 
     const stored = this.opts.stateDB.getRemoteRootEtag();
-    if (stored == null) return true;
+    if (stored == null) return { kind: 'full-sync' };
 
-    const current = await client.getRootEtag();
-    if (current == null) return true;
-    if (current !== stored) {
-      void this.opts.logger?.log(`client-push: vault root ETag changed (${stored} → ${current}) → reconciliation required`);
-      return true;
+    const root = client.getRootInfo
+      ? await client.getRootInfo()
+      : { etag: await client.getRootEtag(), fileId: null };
+    if (root.etag == null) return { kind: 'full-sync' };
+    if (root.etag !== stored) {
+      void this.opts.logger?.log(`client-push: vault root ETag changed (${stored} → ${root.etag}) → reconciliation required`);
+      return { kind: 'targeted', rootFileId: root.fileId?.trim() || null, rootEtag: root.etag };
     }
 
-    void this.opts.logger?.log(`client-push: vault root ETag unchanged (${current})`);
-    return false;
+    void this.opts.logger?.log(`client-push: vault root ETag unchanged (${root.etag})`);
+    return { kind: 'ignore' };
   }
 
   async syncManual(opts: { manual?: boolean } = {}): Promise<void> {
+    await this.syncManualWithResult(opts);
+  }
+
+  /** Client Push fallback needs to know whether an authoritative full-sync attempt really completed. */
+  async syncForClientPush(): Promise<boolean> {
+    return this.syncManualWithResult();
+  }
+
+  private async syncManualWithResult(opts: { manual?: boolean } = {}): Promise<boolean> {
     // Mobile has no status bar; sync state (progress + result) is surfaced via NoticeStatusBar,
     // which implements IStatusBar and is driven uniformly for every run. The two early-return
     // guidance notices below still need an explicit mobile notice because those paths return
     // before any syncing toast is created. Desktop keeps using the status bar (no popups).
     void this.opts.logger?.log(`sync: start (manual=${opts.manual === true})`);
     // Prevent concurrent runs (avoid clashing with watch mode or scheduled sync).
-    if (this.running) {
+    if (this.isSyncRunning()) {
       void this.opts.logger?.log('sync: skipped — already running');
       if (Platform.isMobile) new Notice('⏳ A sync is already in progress.');
-      return;
+      return false;
     }
     if (this.isBlockedByWifiOnly()) { // "Wi-Fi only" enabled and on cellular
       void this.opts.logger?.log('sync: skipped — Wi-Fi-only and on cellular');
       if (Platform.isMobile) new Notice('Sync skipped — you are on cellular and Wi-Fi only sync is on.', 6000);
-      return;
+      return false;
     }
     // Set the balking flag synchronously (before any await) so a concurrent call still balks, then
     // run the body via a tracked promise so abortAndWait() can await this run's clean wind-down.
     this.running = true;
     this.cancelled = false;
+    // Full sync is exclusive with watch/remote single-path operations. The gate waits for operations
+    // that already started, while the synchronous `running=true` above prevents new guarded watch
+    // operations from entering ahead of us.
     const run = this.runSyncSession();
     this.currentRun = run;
+    let completed = false;
     try {
-      await run;
+      completed = await run;
     } finally {
       this.currentRun = null;
       // C-5: the run is over (runSyncSession's finally already cleared `running`), so any watch-mode
@@ -448,16 +474,17 @@ export class SyncEngine {
         console.warn('[SyncEngine] Deferred watch-mode sync failed:', err);
       }
     }
+    return completed;
   }
 
   /** The actual full-sync session body. Always runs under the {@link syncManual} balking guard. */
-  private async runSyncSession(): Promise<void> {
+  private async runSyncSession(): Promise<boolean> {
     // Build the summary and tag this run BEFORE the try so the catch/finally can reference them even
     // when the very first step fails.
     const summary = this.initSummary();
     this.journal.beginRun(summary.startedAt); // tag this run's history entries for grouping
 
-    const cancelled = false;
+    let completed = false;
     try {
       // Feature 053: connect INSIDE the guard. ensureClient() (client creation + capabilities probe)
       // can throw (network / auth / capabilities) or hang; if it ran outside this try, a failure would
@@ -476,6 +503,7 @@ export class SyncEngine {
       } else {
         await this.incrementalSync(summary);
       }
+      completed = !this.cancelled;
     } catch (err) {
       console.error('[SyncEngine] Sync failed:', err);
       void this.opts.logger?.log(`sync: FAILED — ${(err as Error).message}`, 'error');
@@ -491,7 +519,7 @@ export class SyncEngine {
 
       void this.opts.logger?.log(
         `sync: done up=${summary.uploadedCount} down=${summary.downloadedCount} ` +
-        `del=${summary.deletedCount} merged=${summary.mergedCount} conflicted=${summary.conflictedCount} err=${summary.errorCount} cancelled=${cancelled}`,
+        `del=${summary.deletedCount} merged=${summary.mergedCount} conflicted=${summary.conflictedCount} err=${summary.errorCount} cancelled=${this.cancelled}`,
       );
       this.logSessionErrors(summary);
       summary.completedAt = Date.now();
@@ -515,6 +543,7 @@ export class SyncEngine {
       // NoticeStatusBar (a result toast) on mobile, both via setSyncComplete above. Genuine
       // failures still surface via the catch-block notice / NextcloudErrorParser.
     }
+    return completed;
   }
 
   /**
@@ -548,6 +577,11 @@ export class SyncEngine {
   /** @see WatchOperations.syncSingleFile */
   syncSingleFile(path: string): Promise<void> {
     return this.watch.syncSingleFile(path);
+  }
+
+  /** Reconcile notify_push IDs without advancing the collection sync token. */
+  reconcileRemoteFileIds(batch: RemotePushBatch): Promise<RemoteBatchReconcileResult> {
+    return this.remotePush.reconcileFileIds(batch);
   }
 
   /** @see WatchOperations.drainPending */

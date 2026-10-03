@@ -19,7 +19,7 @@ import { TransferService } from '../../../../src/sync/transfer/TransferService';
 import { DeletionService } from '../../../../src/sync/deletion/DeletionService';
 import { ResolutionService } from '../../../../src/sync/resolution/ResolutionService';
 import { RenameTracker } from '../../../../src/sync/RenameTracker';
-import { FileState, RemoteFileInfo, SyncSessionSummary, NetworkError } from '../../../../src/types';
+import { FileState, RemoteFileInfo, SyncSessionSummary, NetworkError, ServerLockedError } from '../../../../src/types';
 import { IWebDAVClient } from '../../../../src/network/IWebDAVClient';
 import { IUploadStrategy } from '../../../../src/sync/upload/IUploadStrategy';
 
@@ -142,6 +142,7 @@ function build(o: Opts = {}, over: Partial<WatchDeps> = {}) {
       await o.processFile?.(r, s);
     },
     queueRetry: (p: string) => { calls.retries.push(p); },
+    retryQueueLength: () => calls.retries.length,
     conflictEncounters: o.conflicts ?? (() => 0),
     notify: (m: string) => { calls.notices.push(m); },
     ...over,
@@ -388,3 +389,124 @@ describe('WatchOperations — the status bar', () => {
     expect(calls.status).toEqual([]);
   });
 });
+describe('WatchOperations.reconcileRemoteFile — remote-triggered single-file path', () => {
+  it('bypasses the local-unchanged fast path and hands matching remote state to the shared classifier', async () => {
+    const { watch, calls } = build({
+      localContent: 'unchanged local body',
+      base: tracked({ localMtime: 1000, localSize: 20 }),
+      onServer: remote({ path: 'note.md', fileId: 'fid' }),
+    });
+
+    await expect(watch.reconcileRemoteFile('note.md', 'fid')).resolves.toBe('done');
+    expect(calls.statCalls).toBe(0);
+    expect(calls.readCalls).toBe(0);
+    expect(calls.stats).toEqual(['note.md']);
+    expect(calls.processed).toEqual(['note.md']);
+  });
+
+  it('returns busy without touching the network while a full sync owns the engine', async () => {
+    const { watch, calls } = build({ running: true, onServer: remote() });
+
+    await expect(watch.reconcileRemoteFile('note.md', 'fid')).resolves.toBe('busy');
+    expect(calls.stats).toEqual([]);
+    expect(calls.processed).toEqual([]);
+  });
+
+  it('falls back when the tracked path disappeared remotely (delete vs rename is ambiguous)', async () => {
+    const { watch, calls } = build({ onServer: null });
+
+    await expect(watch.reconcileRemoteFile('note.md', 'fid')).resolves.toBe('full-sync');
+    expect(calls.stats).toEqual(['note.md']);
+    expect(calls.processed).toEqual([]);
+  });
+
+  it('falls back when the old path now belongs to a different Nextcloud file ID', async () => {
+    const { watch, calls } = build({ onServer: remote({ fileId: 'replacement' }) });
+
+    await expect(watch.reconcileRemoteFile('note.md', 'fid')).resolves.toBe('full-sync');
+    expect(calls.processed).toEqual([]);
+  });
+
+  it('falls back when the remote path has no file ID instead of classifying stale identity', async () => {
+    const { watch, calls } = build({ onServer: remote({ fileId: null }) });
+
+    await expect(watch.reconcileRemoteFile('note.md', 'fid')).resolves.toBe('full-sync');
+    expect(calls.processed).toEqual([]);
+  });
+
+  it('does nothing for a path excluded by the same system rules as ordinary watch sync', async () => {
+    const { watch, calls } = build({}, { isSystemExcluded: () => true });
+
+    await expect(watch.reconcileRemoteFile('.obsidian/plugins/other/main.js', 'fid')).resolves.toBe('done');
+    expect(calls.stats).toEqual([]);
+  });
+
+  it('queues the path when a targeted network operation fails', async () => {
+    const { watch, calls } = build({
+      onServer: remote(),
+      processFile: () => { throw new NetworkError(500, '', 'GET'); },
+    });
+
+    await expect(watch.reconcileRemoteFile('note.md', 'fid')).resolves.toBe('deferred');
+    expect(calls.retries).toEqual(['note.md']);
+  });
+
+  it('treats an HTTP 423 server lock as deferred work and queues the file for ordinary retry', async () => {
+    const { watch, calls } = build({
+      onServer: remote(),
+      processFile: () => { throw new ServerLockedError('note.md', 'PUT', 'alice'); },
+    });
+
+    await expect(watch.reconcileRemoteFile('note.md', 'fid')).resolves.toBe('deferred');
+    expect(calls.retries).toEqual(['note.md']);
+  });
+
+  it('contains a connection failure as deferred push work instead of escalating immediately', async () => {
+    const { watch, calls } = build({}, {
+      connect: async () => { throw new NetworkError(503, '', 'PROPFIND'); },
+    });
+
+    await expect(watch.reconcileRemoteFile('note.md', 'fid')).resolves.toBe('deferred');
+    expect(calls.retries).toEqual(['note.md']);
+  });
+
+  it('does not certify a targeted batch when the shared classifier records a contained error', async () => {
+    const { watch } = build({
+      onServer: remote(),
+      processFile: async (_r, summary) => { summary.errorCount++; },
+    });
+
+    await expect(watch.reconcileRemoteFile('note.md', 'fid')).resolves.toBe('deferred');
+  });
+
+  it('does not certify an unresolved marker conflict as fully reconciled', async () => {
+    const { watch } = build({
+      onServer: remote(),
+      processFile: async (_r, summary) => { summary.conflictedCount++; },
+    });
+
+    await expect(watch.reconcileRemoteFile('note.md', 'fid')).resolves.toBe('deferred');
+  });
+
+  it('detects classifier deferral through the ordinary retry queue even without an error counter', async () => {
+    let retries = 0;
+    const { watch } = build({
+      onServer: remote(),
+      processFile: async () => { retries++; },
+    }, {
+      retryQueueLength: () => retries,
+    });
+
+    await expect(watch.reconcileRemoteFile('note.md', 'fid')).resolves.toBe('deferred');
+  });
+
+  it('still treats a clean merge as completed work', async () => {
+    const { watch } = build({
+      onServer: remote(),
+      processFile: async (_r, summary) => { summary.mergedCount++; },
+    });
+
+    await expect(watch.reconcileRemoteFile('note.md', 'fid')).resolves.toBe('done');
+  });
+});
+
