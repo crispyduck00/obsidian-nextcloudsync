@@ -38,6 +38,7 @@ import { remoteIdOf } from './remoteIdentity';
 import { DeletionService } from './deletion/DeletionService';
 import { ResolutionService } from './resolution/ResolutionService';
 import { ConflictApplier } from './conflict/ConflictApplier';
+import { hasCompleteMarkerSet } from './ConflictResolver';
 import { DirectoryReconciler } from './directory/DirectoryReconciler';
 import { WatchOperations } from './watch/WatchOperations';
 import { MirrorService } from './mirror/MirrorService';
@@ -1203,10 +1204,28 @@ export class SyncEngine {
         await this.handleConflict(remote.path, base, remote, remoteId, idType, summary);
         return;
       }
-      // Both sides match what we last synced → the file has converged. If it was previously
-      // flagged as conflicted (e.g. an error-policy skip or a prior markers write that has since
-      // been resolved), clear that stale flag now so the conflict count does not stay stuck.
+      // Equal local/remote bytes prove transport convergence, but they do NOT by themselves prove
+      // that a marker conflict was resolved: resolveByWrite intentionally uploads the marker-bearing
+      // note so every device sees the same unresolved conflict. Keep that conflict active until the
+      // marker set is actually removed (manually or by an explicit force-resolution action).
       if (base?.isConflicted) {
+        try {
+          const localContent = await this.opts.localAdapter.read(remote.path);
+          if (hasCompleteMarkerSet(localContent)) {
+            void this.opts.logger?.log(
+              `sync: converged marker content remains an unresolved conflict → ${remote.path}`,
+            );
+            return;
+          }
+        } catch (err) {
+          // Never clear a conflict merely because the verification read failed. A later sync can
+          // retry the check; keeping a false-positive warning is safer than hiding unresolved data.
+          void this.opts.logger?.log(
+            `sync: could not verify conflicted content; keeping conflict flag → ${remote.path}: ${(err as Error).message}`,
+          );
+          return;
+        }
+        // No complete plugin marker set remains, so a converged file can safely drop a stale flag.
         this.opts.stateDB.setFile({ ...base, isConflicted: false });
       }
       return; // Unchanged
