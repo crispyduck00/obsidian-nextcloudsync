@@ -195,8 +195,8 @@ export function resetDebugIdentityFields(
  *   - `syncOnWifiOnly`      = `true`  — cellular-cost-safe default (iOS lacks the API, so effectively
  *                                        inert there, but Android honours it).
  *   - `maxFileSizeMB`       = `20`    — OOM-safe cap; the mobile WebView holds the whole file in memory.
- *   - `watchOnChangeEnabled`= `false` — mobile delivers no reliable file-change events and continuous
- *                                        syncing drains battery.
+ *   - `watchOnChangeEnabled`= `false` — Android foreground watch is opt-in; mobile starts
+ *                                        conservatively even though the toggle is now available.
  *   - `syncIntervalMinutes` = `0`     — the mobile OS suspends background timers, so periodic sync never
  *                                        fires (see the `!Platform.isMobile` guard in
  *                                        `applyAutoSyncInterval`); defaulting to 0 (= manual only) makes
@@ -220,18 +220,47 @@ export function applyMobileFirstRunDefaults(
 }
 
 /**
- * Runtime guard (G7-2, feature 055): watch mode must never fire on mobile, regardless of the
- * persisted `watchOnChangeEnabled` value. {@link applyMobileFirstRunDefaults} only defaults this
- * to `false` on a brand-new install — a value copied in from another device (e.g. a synced
- * `.obsidian` folder) or carried over from an older profile can still persist `true` on a mobile
- * device. main.ts's vault-event listeners consult this single decision point (instead of reading
- * `watchOnChangeEnabled` directly) so the mobile constraint holds no matter how the persisted flag
- * got there. Pure and platform-agnostic — the caller passes `Platform.isMobile` — so it needs no
- * Obsidian mock to unit test. A no-op on desktop (`isMobile` false passes `watchOnChangeEnabled`
- * straight through).
+ * One-time safety migration for the release that first makes Android watch mode runnable.
+ *
+ * Before this feature, mobile runtime always ignored watchOnChangeEnabled even if data.json carried
+ * true (for example after copying a desktop profile). Letting that latent value suddenly become live
+ * would enable a high-frequency automatic sync without an Android user opting in. On the first
+ * Android load after this feature lands, force the setting off once and record the boundary.
+ *
+ * Later loads preserve the user's choice, including true. Desktop never calls this migration, so its
+ * established default/setting remains untouched.
+ *
+ * Returns true when settings changed and should be persisted.
  */
-export function isWatchModeActive(watchOnChangeEnabled: boolean, isMobile: boolean): boolean {
-  return watchOnChangeEnabled && !isMobile;
+export function migrateAndroidWatchOptIn(
+  saved: { mobileWatchMigrationVersion?: unknown },
+  settings: DavSyncSettings,
+): boolean {
+  if (saved.mobileWatchMigrationVersion === 1) return false;
+  settings.watchOnChangeEnabled = false;
+  settings.mobileWatchMigrationVersion = 1;
+  return true;
+}
+
+/**
+ * Runtime watch-mode gate.
+ *
+ * Desktop keeps the original behaviour. Android may opt into foreground watch; iOS remains disabled
+ * until the same lifecycle behaviour is validated there. {@link applyMobileFirstRunDefaults} still
+ * defaults the persisted setting to false on every mobile first run, so enabling Android watch is an
+ * explicit choice rather than a changed default.
+ *
+ * Pure and platform-agnostic: callers pass the platform facts, which keeps the policy unit-testable
+ * without an Obsidian runtime.
+ */
+export function isWatchModeActive(
+  watchOnChangeEnabled: boolean,
+  isMobile: boolean,
+  isIosApp = false,
+): boolean {
+  if (!watchOnChangeEnabled) return false;
+  if (!isMobile) return true;
+  return !isIosApp; // Android foreground watch; iOS stays off for now.
 }
 
 /**

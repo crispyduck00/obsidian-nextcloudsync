@@ -1,0 +1,360 @@
+/**
+ * Android foreground-watch lifecycle.
+ *
+ * This class deliberately knows nothing about Obsidian, WebDAV, merge policy or Client Push. It only
+ * owns the small amount of trigger state that mobile adds around the existing watch operations:
+ *
+ * - file edits may be queued while the app is hidden or Wi-Fi-only blocks the current network;
+ * - file work already in flight when the app hides is queued once more for a harmless foreground
+ *   re-check, because Android may suspend the WebView before the request/result is fully observed;
+ * - structural work (rename/delete/folder ops) is never blindly replayed after an uncertain suspend.
+ *   Instead it marks the vault structurally dirty and asks the ordinary full sync to reconcile once
+ *   the app is visible on an allowed network.
+ *
+ * The sync functions injected below are the existing SyncEngine entry points, so this class never
+ * becomes a second source of truth for conflict, merge, rename or transfer semantics.
+ */
+export interface MobileWatchLifecycleDeps {
+  isEnabled(): boolean;
+  isVisible(): boolean;
+  canUseNetwork(): boolean;
+  syncFile(path: string): Promise<boolean>;
+  recoverStructural(requireFreshAfterCurrent: boolean): Promise<boolean>;
+  log?(message: string): void;
+}
+
+export class MobileWatchLifecycle {
+  private readonly pendingFiles = new Set<string>();
+  private readonly inFlightFiles = new Set<string>();
+  private structuralInFlight = 0;
+  private structuralDirty = false;
+  /** True when the structural event happened DURING a full sync that may already have scanned it. */
+  private freshRecoveryRequired = false;
+  private structuralGeneration = 0;
+  private hiddenFlushAttempted = false;
+  private recovery: Promise<void> | null = null;
+
+  constructor(private readonly deps: MobileWatchLifecycleDeps) {}
+
+  /** Queue a local file create/modify for the existing debounced single-file path. */
+  queueFile(path: string): void {
+    if (!this.deps.isEnabled()) return;
+    const firstQueue = !this.pendingFiles.has(path);
+    this.pendingFiles.add(path);
+    if (firstQueue) this.deps.log?.(`mobile-watch: queued file ${path}`);
+  }
+
+  /** Remove a queued old path (delete/rename); returns whether an edit was pending there. */
+  takePendingFile(path: string): boolean {
+    const removed = this.pendingFiles.delete(path);
+    if (removed) this.deps.log?.(`mobile-watch: removed queued old path ${path}`);
+    return removed;
+  }
+
+  /**
+   * Whether a structural watch operation may start now.
+   *
+   * Once structure is uncertain, targeted MOVE/DELETE/MKCOL operations stop until an authoritative
+   * full reconciliation succeeds. This prevents a late event from acting on stale remote paths.
+   */
+  canStartStructural(): boolean {
+    return this.deps.isEnabled()
+      && this.deps.isVisible()
+      && this.deps.canUseNetwork()
+      && !this.structuralDirty
+      && this.recovery === null;
+  }
+
+  /**
+   * Run one rename/delete/folder operation while tracking the suspend window.
+   *
+   * Returning false means no network operation was started; the caller may still queue associated
+   * file content (e.g. edit+rename), which stays blocked behind structural recovery.
+   */
+  async runStructural(work: () => Promise<boolean>, description = 'structural operation'): Promise<boolean> {
+    if (!this.canStartStructural()) {
+      this.markStructuralDirty(`${description} deferred`);
+      return false;
+    }
+
+    this.deps.log?.(`mobile-watch: ${description} started`);
+    this.structuralInFlight++;
+    try {
+      const converged = await work();
+      if (!converged) {
+        this.markStructuralDirty(`${description} did not converge`);
+        return false;
+      }
+      this.deps.log?.(`mobile-watch: ${description} complete`);
+      return true;
+    } catch (err) {
+      this.markStructuralDirty(`${description} failed`);
+      this.deps.log?.(`mobile-watch: ${description} error — ${this.errorMessage(err)}`);
+      return false;
+    } finally {
+      this.structuralInFlight = Math.max(0, this.structuralInFlight - 1);
+      if (
+        this.structuralInFlight === 0
+        && this.pendingFiles.size > 0
+        && !this.structuralDirty
+        && this.recovery === null
+        && this.deps.isVisible()
+        && this.deps.canUseNetwork()
+      ) {
+        void this.flushFiles(false);
+      }
+    }
+  }
+
+  /**
+   * Mark structure as requiring the normal full reconciliation.
+   *
+   * The generation lets a recovery that was already running distinguish "I repaired the state I
+   * knew about" from "another structural event happened while I was repairing it".
+   */
+  markStructuralDirty(reason = 'structural state uncertain', requireFreshRecovery = false): void {
+    if (!this.deps.isEnabled()) return;
+    this.structuralDirty = true;
+    this.freshRecoveryRequired ||= requireFreshRecovery;
+    this.structuralGeneration++;
+    this.deps.log?.(
+      `mobile-watch: ${reason} → full reconciliation required${requireFreshRecovery ? ' after current sync' : ''}`,
+    );
+  }
+
+  /**
+   * Flush queued files.
+   *
+   * Normal calls are foreground-only. The one exception is onHidden(), which gets a single
+   * best-effort flush of files that were ALREADY pending when the app was left. Those paths are
+   * deliberately left pending as well, so the next foreground re-checks them even if Android
+   * suspended the WebView halfway through the request.
+   */
+  async flushFiles(allowHidden = false): Promise<void> {
+    if (!this.deps.isEnabled()) {
+      this.resetQueuedState();
+      return;
+    }
+    const pendingCount = this.pendingFiles.size;
+    if (this.structuralDirty || this.recovery !== null || this.structuralInFlight > 0) {
+      if (pendingCount > 0) {
+        this.deps.log?.(`mobile-watch: ${pendingCount} queued file(s) waiting for structural work/recovery`);
+      }
+      return;
+    }
+    if (!this.deps.canUseNetwork()) {
+      if (pendingCount > 0) {
+        this.deps.log?.(`mobile-watch: ${pendingCount} queued file(s) waiting for an allowed network`);
+      }
+      return;
+    }
+    if (!allowHidden && !this.deps.isVisible()) {
+      if (pendingCount > 0) {
+        this.deps.log?.(`mobile-watch: ${pendingCount} queued file(s) waiting for foreground`);
+      }
+      return;
+    }
+
+    const paths = [...this.pendingFiles];
+    if (paths.length === 0) return;
+    this.pendingFiles.clear();
+    this.deps.log?.(
+      `mobile-watch: flushing ${paths.length} file(s) (${allowHidden && !this.deps.isVisible() ? 'hidden best-effort' : 'foreground'})`,
+    );
+
+    for (const path of paths) {
+      // Re-check between paths: Wi-Fi can disappear while a batch is being drained. Already-started
+      // work is never aborted, but no new request should begin after the policy changed.
+      if (!this.deps.isEnabled()) {
+        this.resetQueuedState();
+        return;
+      }
+      if (!this.deps.canUseNetwork() || (!allowHidden && !this.deps.isVisible())) {
+        this.pendingFiles.add(path);
+        continue;
+      }
+
+      const hiddenBestEffort = allowHidden && !this.deps.isVisible();
+      if (hiddenBestEffort) this.pendingFiles.add(path); // foreground safety retry
+      void this.startFile(path);
+    }
+  }
+
+  /**
+   * App is becoming hidden.
+   *
+   * - never cancel work already started;
+   * - remember in-flight files for a foreground re-check;
+   * - any in-flight structural operation becomes uncertain;
+   * - give pre-existing pending file edits ONE immediate best-effort flush.
+   */
+  onHidden(): void {
+    if (!this.deps.isEnabled()) {
+      this.resetQueuedState();
+      return;
+    }
+
+    const inFlightAtHide = [...this.inFlightFiles];
+    if (this.pendingFiles.size > 0 || inFlightAtHide.length > 0 || this.structuralInFlight > 0 || this.structuralDirty) {
+      this.deps.log?.(
+        `mobile-watch: app hidden (queued=${this.pendingFiles.size}, in-flight=${inFlightAtHide.length}, structural=${this.structuralInFlight}, dirty=${this.structuralDirty})`,
+      );
+    }
+    if (this.structuralInFlight > 0) {
+      this.markStructuralDirty('app hidden during structural watch operation');
+    }
+
+    if (!this.hiddenFlushAttempted) {
+      this.hiddenFlushAttempted = true;
+      // Flush only work that was pending BEFORE hide. In-flight paths are added afterwards so they
+      // are retried on the next foreground, not started a second time while already running.
+      void this.flushFiles(true);
+    }
+
+    for (const path of inFlightAtHide) this.pendingFiles.add(path);
+  }
+
+  /**
+   * App is visible again. Structural uncertainty wins over targeted file retries: a full sync first
+   * re-establishes authoritative path state, then queued files are harmlessly re-checked.
+   */
+  onVisible(): void {
+    this.hiddenFlushAttempted = false;
+    if (!this.deps.isEnabled()) {
+      this.resetQueuedState();
+      return;
+    }
+    if (this.pendingFiles.size > 0 || this.structuralDirty || this.recovery !== null) {
+      this.deps.log?.(
+        `mobile-watch: app visible (queued=${this.pendingFiles.size}, dirty=${this.structuralDirty}, recovering=${this.recovery !== null})`,
+      );
+    }
+    void this.recoverOrFlush();
+  }
+
+  /** Re-evaluate blocked work after Android reports a network-type/connectivity change. */
+  onNetworkChanged(): void {
+    if (!this.deps.isEnabled()) {
+      this.resetQueuedState();
+      return;
+    }
+
+    if (!this.deps.canUseNetwork()) {
+      if (this.pendingFiles.size > 0 || this.inFlightFiles.size > 0 || this.structuralInFlight > 0 || this.structuralDirty) {
+        this.deps.log?.(
+          `mobile-watch: network blocked (queued=${this.pendingFiles.size}, in-flight=${this.inFlightFiles.size}, structural=${this.structuralInFlight}, dirty=${this.structuralDirty})`,
+        );
+      }
+      // Policy/connectivity changed after these requests had already started. Do not abort them;
+      // merely remember that their outcome may be uncertain and verify again on an allowed network.
+      for (const path of this.inFlightFiles) this.pendingFiles.add(path);
+      if (this.structuralInFlight > 0) {
+        this.markStructuralDirty('network became unavailable during structural watch operation');
+      }
+      return;
+    }
+
+    if (!this.deps.isVisible()) return; // never start new work merely because network changed hidden
+    if (this.pendingFiles.size > 0 || this.structuralDirty) {
+      this.deps.log?.(
+        `mobile-watch: network allowed again (queued=${this.pendingFiles.size}, dirty=${this.structuralDirty})`,
+      );
+    }
+    void this.recoverOrFlush();
+  }
+
+  // Small read-only probes kept for unit tests and diagnostics; no sync policy depends on them.
+  pendingFileCount(): number { return this.pendingFiles.size; }
+  isStructuralDirty(): boolean { return this.structuralDirty; }
+
+  private async startFile(path: string): Promise<void> {
+    this.inFlightFiles.add(path);
+    this.deps.log?.(`mobile-watch: file sync started ${path}`);
+    try {
+      const completed = await this.deps.syncFile(path);
+      if (!completed && this.deps.isEnabled()) {
+        // WatchOperations queued retry work (typically NetworkError). Keep the mobile trigger too so
+        // an online/Wi-Fi transition can retry immediately without waiting for a later full sync.
+        this.pendingFiles.add(path);
+        this.deps.log?.(`mobile-watch: file sync deferred for retry ${path}`);
+      } else if (completed) {
+        this.deps.log?.(`mobile-watch: file sync complete ${path}`);
+      }
+    } catch (err) {
+      // The existing WatchOperations normally contains network/classifier failures itself. This is a
+      // final lifecycle safety net for an unexpected rejection: keep the local path for a later
+      // foreground re-check rather than creating an unhandled promise or losing the trigger.
+      if (this.deps.isEnabled()) this.pendingFiles.add(path);
+      this.deps.log?.(`mobile-watch: file sync failed for ${path} — ${this.errorMessage(err)}`);
+    } finally {
+      this.inFlightFiles.delete(path);
+    }
+  }
+
+  private async recoverOrFlush(): Promise<void> {
+    if (!this.deps.isEnabled() || !this.deps.isVisible() || !this.deps.canUseNetwork()) return;
+
+    if (this.structuralDirty) {
+      if (this.recovery !== null) return;
+
+      const generation = this.structuralGeneration;
+      const requireFresh = this.freshRecoveryRequired;
+      let completed = false;
+      this.deps.log?.(
+        `mobile-watch: structural recovery started${requireFresh ? ' (fresh pass required)' : ''}`,
+      );
+      const run = (async () => {
+        try {
+          completed = await this.deps.recoverStructural(requireFresh);
+        } catch (err) {
+          this.deps.log?.(`mobile-watch: structural recovery failed — ${this.errorMessage(err)}`);
+          completed = false;
+        }
+        if (completed && generation === this.structuralGeneration) {
+          this.structuralDirty = false;
+          this.freshRecoveryRequired = false;
+          this.deps.log?.('mobile-watch: structural recovery complete');
+        } else if (completed) {
+          this.deps.log?.('mobile-watch: structural recovery completed, but newer structural work requires another pass');
+        } else {
+          this.deps.log?.('mobile-watch: structural recovery did not complete; keeping dirty state');
+        }
+      })();
+
+      this.recovery = run;
+      try {
+        await run;
+      } finally {
+        if (this.recovery === run) this.recovery = null;
+      }
+
+      if (!completed) return;
+
+      // A structural event may have arrived while the full reconciliation was running. Its generation
+      // keeps dirty=true; immediately run one more authoritative pass while the app is still usable.
+      if (this.structuralDirty) {
+        if (this.deps.isVisible() && this.deps.canUseNetwork()) void this.recoverOrFlush();
+        return;
+      }
+    }
+
+    await this.flushFiles(false);
+  }
+
+  private resetQueuedState(): void {
+    if (this.pendingFiles.size > 0 || this.structuralDirty) {
+      this.deps.log?.(
+        `mobile-watch: automatic watch disabled — dropping queued trigger state (queued=${this.pendingFiles.size}, dirty=${this.structuralDirty})`,
+      );
+    }
+    this.pendingFiles.clear();
+    this.structuralDirty = false;
+    this.freshRecoveryRequired = false;
+    this.structuralGeneration++;
+    this.hiddenFlushAttempted = false;
+  }
+
+  private errorMessage(err: unknown): string {
+    return err instanceof Error ? err.message : String(err);
+  }
+}

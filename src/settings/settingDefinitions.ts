@@ -95,6 +95,7 @@ export const UI_LESS_SETTING_KEYS: readonly (keyof DavSyncSettings)[] = [
   'logsFolder',          // fixed to the vault root (feature 032)
   'statusFilter',        // persisted UI state of the Sync Status dialog, not a preference
   'lastKnownServerVersion', // observed from the server, for the version-recommendation banner
+  'mobileWatchMigrationVersion', // one-time Android opt-in migration metadata, not a preference
   'configSync',          // container object; its categories bind through their own rows
 ];
 
@@ -343,11 +344,13 @@ function syncGroup(host: SettingDefinitionsHost): SettingDefinitionGroup {
     },
     {
       name: 'Sync on file change',
-      desc: host.isMobile
-        ? 'Disabled on mobile (the OS suspends background work). Use "Startup sync delay" or "Sync now".'
-        : 'Immediately sync a file or folder right after you create, edit, delete, or rename it (a short delay after you stop editing). Deletions and renames propagate too. Works alongside the periodic sync interval. Desktop only.',
+      desc: host.isIosApp
+        ? 'Not available on iOS yet. Desktop watch is unchanged; Android can opt into foreground watch.'
+        : host.isMobile
+          ? 'Android: sync local creates and edits after the same short debounce as desktop while Obsidian is in the foreground. Pending edits get one best-effort flush when the app is hidden; Android may still suspend an in-flight transfer, so the next foreground re-checks uncertain work. Renames/deletes are recovered authoritatively if suspension makes their state uncertain. Wi-Fi-only is respected. Off by default.'
+          : 'Immediately sync a file or folder right after you create, edit, delete, or rename it (a short delay after you stop editing). Deletions and renames propagate too. Works alongside the periodic sync interval.',
       aliases: ['watch', 'auto sync', 'realtime', 'live', 'on save'],
-      control: { type: 'toggle', key: 'watchOnChangeEnabled', disabled: () => host.isMobile },
+      control: { type: 'toggle', key: 'watchOnChangeEnabled', disabled: () => host.isIosApp },
     },
     slider(
       host,

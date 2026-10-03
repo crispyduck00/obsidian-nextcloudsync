@@ -17,9 +17,10 @@ import { isSyncTmpPath, LocalAdapter } from './data/LocalAdapter';
 import type { MergeBaseStore } from './data/MergeBaseStore';
 import { v4 as uuidv4 } from './util/uuid';
 import { hostToken, LogPlatform } from './util/hostToken';
-import { migrateConfigSyncCategories, migrateBookmarksToConfigSync, migrateStartupToggleToDelay, migrateConflictSettingsToStrategies, migrateFrontmatterScalarPolicyToStrategy, migrateMarkdownAutoMergeType, pruneObsoleteSettings, resetDebugIdentityFields, applyMobileFirstRunDefaults, isWatchModeActive } from './util/settingsMigration';
+import { migrateConfigSyncCategories, migrateBookmarksToConfigSync, migrateStartupToggleToDelay, migrateConflictSettingsToStrategies, migrateFrontmatterScalarPolicyToStrategy, migrateMarkdownAutoMergeType, pruneObsoleteSettings, resetDebugIdentityFields, applyMobileFirstRunDefaults, migrateAndroidWatchOptIn, isWatchModeActive } from './util/settingsMigration';
 import { debugLogPath, isActiveOwnLog } from './util/logPaths';
 import { autoNetworkConcurrency } from './util/platformDefaults';
+import { MobileWatchLifecycle } from './sync/watch/MobileWatchLifecycle';
 
 const MIN_OBSIDIAN_VERSION = '1.13.0';
 
@@ -55,6 +56,8 @@ export default class ObsidianNextcloudsync extends Plugin {
   cleanSideStore?: import('./data/CleanSideStore').CleanSideStore;
   /** Diagnostic file logger: writes this device's single log file while logging is enabled. */
   logger!: FileLogger;
+  /** Android-only lifecycle state for opt-in foreground Watch mode. */
+  private mobileWatch?: MobileWatchLifecycle;
   /**
    * Status filter for the Sync Status dialog. Held here (not on the modal, which is recreated per
    * open) so the selection persists across reopens. Hydrated from settings on load and saved on every
@@ -181,65 +184,203 @@ export default class ObsidianNextcloudsync extends Plugin {
         void this.initSyncEngine();
       }
 
-      // Watch mode: react to individual file events with lightweight single-file operations.
-      // Full vault sync is reserved for manual Sync Now and the periodic interval.
-      // Watch mode is disabled on mobile (OS suspends background work). This is enforced here at
-      // runtime via isWatchModeActive (G7-2) — not just via the first-run default in loadSettings —
-      // so a `watchOnChangeEnabled: true` persisted from another device (e.g. a copied/synced
-      // `.obsidian` folder) can never make watch mode fire on mobile.
-      const guard = (file: TAbstractFile): file is TFile =>
-        isWatchModeActive(this.settings.watchOnChangeEnabled, Platform.isMobile) && file instanceof TFile;
+      // Watch mode: Desktop keeps the established upstream path. Android may opt into the SAME
+      // lightweight operations while Obsidian is in the foreground; iOS remains disabled.
+      const watchOn = (): boolean =>
+        isWatchModeActive(
+          this.settings.watchOnChangeEnabled,
+          Platform.isMobile,
+          Platform.isIosApp,
+        );
 
-      // Vault events caused by the plugin itself (downloads / conflict writes use atomic
-      // tmp-write → rename) must not be propagated back to the server, or every download
-      // turns into a spurious upload/MOVE/DELETE storm. SyncEngine marks its own writes in
-      // the LocalAdapter ignore list; tmp paths are filtered unconditionally.
+      // Keep upstream's own-write filtering unchanged here. The separate
+      // fixes/watch-own-debug-log branch extends this for the active debug log.
       const isOwnSyncEvent = (path: string): boolean =>
         isSyncTmpPath(path) || (this.localAdapter?.shouldIgnore(path) ?? false);
 
-      // Accumulate paths changed during rapid editing and flush them together after the
-      // debounce window so each keystroke does not trigger a separate network request.
       const pendingUploads = new Set<string>();
-      const debouncedUpload = debounce(() => {
+      const mobileWatch = Platform.isMobile && !Platform.isIosApp
+        ? new MobileWatchLifecycle({
+            isEnabled: watchOn,
+            isVisible: () => !document.hidden,
+            canUseNetwork: () => this.syncEngine?.canRunWatchSync() ?? false,
+            syncFile: async (path) => {
+              const engine = this.syncEngine;
+              return engine ? engine.syncSingleFileForMobileWatch(path) : false;
+            },
+            recoverStructural: async (requireFreshAfterCurrent) => {
+              const engine = this.syncEngine;
+              return engine ? engine.syncForWatchRecovery(requireFreshAfterCurrent) : false;
+            },
+            log: (message) => { void this.logger.log(message); },
+          })
+        : null;
+      this.mobileWatch = mobileWatch ?? undefined;
+
+      const queuePendingUpload = (path: string): void => {
+        if (mobileWatch) mobileWatch.queueFile(path);
+        else pendingUploads.add(path);
+      };
+      const takePendingUpload = (path: string): boolean =>
+        mobileWatch ? mobileWatch.takePendingFile(path) : pendingUploads.delete(path);
+
+      const flushPendingUploads = (): void => {
+        if (mobileWatch) {
+          void mobileWatch.flushFiles();
+          return;
+        }
         const paths = [...pendingUploads];
         pendingUploads.clear();
-        for (const path of paths) {
-          void this.syncEngine?.syncSingleFile(path);
+        for (const path of paths) void this.syncEngine?.syncSingleFile(path);
+      };
+
+      const debouncedUpload = debounce(flushPendingUploads, EDIT_WINDOW_MS, true);
+      const queueDebouncedFile = (path: string): void => {
+        queuePendingUpload(path);
+        if (!mobileWatch || !document.hidden) debouncedUpload();
+      };
+
+      const guard = (file: TAbstractFile): file is TFile =>
+        watchOn() && file instanceof TFile;
+
+      const runStructural = (
+        description: string,
+        desktopWork: (engine: SyncEngine) => Promise<void>,
+        mobileWork: (engine: SyncEngine) => Promise<boolean>,
+      ): void => {
+        if (mobileWatch) {
+          const engineAtEvent = this.syncEngine;
+          if (engineAtEvent?.isSyncRunning()) {
+            mobileWatch.markStructuralDirty(`${description} arrived during full sync`, true);
+            mobileWatch.onVisible();
+            return;
+          }
+          void mobileWatch.runStructural(async () => {
+            const engine = this.syncEngine;
+            if (!engine) {
+              mobileWatch.markStructuralDirty(`${description} arrived before sync engine was ready`);
+              return false;
+            }
+            return mobileWork(engine);
+          }, description).then((ran) => {
+            if (!ran) mobileWatch.onVisible();
+          });
+          return;
         }
-      }, EDIT_WINDOW_MS, true);
+        const engine = this.syncEngine;
+        if (engine) void desktopWork(engine);
+      };
 
       this.registerEvent(this.app.vault.on('modify', (file: TAbstractFile) => {
         if (!guard(file) || isOwnSyncEvent(file.path)) return;
         this.lastLocalEdit.set(file.path, Date.now());
-        pendingUploads.add(file.path);
-        debouncedUpload();
+        queueDebouncedFile(file.path);
       }));
-      // Feature 046: folders (TFolder) propagate immediately via single-folder ops; files keep the
-      // debounced upload path. watchOn() is the master gate — false on mobile regardless of the
-      // persisted value (G7-2; see isWatchModeActive above).
-      const watchOn = (): boolean => isWatchModeActive(this.settings.watchOnChangeEnabled, Platform.isMobile);
+
       this.registerEvent(this.app.vault.on('create', (file: TAbstractFile) => {
         if (!watchOn() || isOwnSyncEvent(file.path)) return;
-        if (file instanceof TFolder) { void this.syncEngine?.createSingleFolder(file.path); return; }
-        if (!(file instanceof TFile)) return;
-        pendingUploads.add(file.path);
-        debouncedUpload();
+        if (file instanceof TFolder) {
+          runStructural(
+            `create folder ${file.path}`,
+            (engine) => engine.createSingleFolder(file.path),
+            (engine) => engine.createSingleFolderForMobileWatch(file.path),
+          );
+          return;
+        }
+        if (file instanceof TFile) queueDebouncedFile(file.path);
       }));
+
       this.registerEvent(this.app.vault.on('delete', (file: TAbstractFile) => {
         if (!watchOn()) return;
-        pendingUploads.delete(file.path); // cancel any pending upload for this path
-        if (isOwnSyncEvent(file.path)) return; // e.g. atomic write replacing the old copy
-        if (file instanceof TFolder) { void this.syncEngine?.deleteSingleFolder(file.path); return; }
-        void this.syncEngine?.deleteSingleFile(file.path);
+        takePendingUpload(file.path);
+        if (isOwnSyncEvent(file.path)) return;
+        if (file instanceof TFolder) {
+          runStructural(
+            `delete folder ${file.path}`,
+            (engine) => engine.deleteSingleFolder(file.path),
+            (engine) => engine.deleteSingleFolderForMobileWatch(file.path),
+          );
+          return;
+        }
+        runStructural(
+          `delete file ${file.path}`,
+          (engine) => engine.deleteSingleFile(file.path),
+          (engine) => engine.deleteSingleFileForMobileWatch(file.path),
+        );
       }));
+
       this.registerEvent(this.app.vault.on('rename', (file: TAbstractFile, oldPath: string) => {
         if (!watchOn()) return;
-        pendingUploads.delete(oldPath);
-        // tmp → target renames are the tail of the plugin's own atomic writes.
+        const hadPendingUpload = takePendingUpload(oldPath);
         if (isOwnSyncEvent(oldPath) || isOwnSyncEvent(file.path)) return;
-        if (file instanceof TFolder) { void this.syncEngine?.renameSingleFolder(oldPath, file.path); return; }
-        void this.syncEngine?.renameSingleFile(oldPath, file.path);
+
+        if (file instanceof TFolder) {
+          runStructural(
+            `rename folder ${oldPath} → ${file.path}`,
+            (engine) => engine.renameSingleFolder(oldPath, file.path),
+            (engine) => engine.renameSingleFolderForMobileWatch(oldPath, file.path),
+          );
+          return;
+        }
+        if (!(file instanceof TFile)) return;
+
+        const newPath = file.path;
+        const engine = this.syncEngine;
+        if (!mobileWatch) {
+          // Keep Desktop exactly at upstream behaviour. Pending-edit preservation lives in its
+          // own fixes/watch-rename-pending-upload branch.
+          if (engine) void engine.renameSingleFile(oldPath, newPath);
+          return;
+        }
+
+        const lastEditAt = this.lastLocalEdit.get(oldPath);
+        if (lastEditAt !== undefined) {
+          this.lastLocalEdit.delete(oldPath);
+          this.lastLocalEdit.set(newPath, lastEditAt);
+        }
+
+        if (!engine) {
+          mobileWatch.markStructuralDirty(`rename file ${oldPath} → ${newPath} arrived before sync engine was ready`);
+          if (hadPendingUpload) mobileWatch.queueFile(newPath);
+          return;
+        }
+        if (engine.isSyncRunning()) {
+          mobileWatch.markStructuralDirty(`rename file ${oldPath} → ${newPath} arrived during full sync`, true);
+          if (hadPendingUpload) mobileWatch.queueFile(newPath);
+          mobileWatch.onVisible();
+          return;
+        }
+
+        void mobileWatch.runStructural(
+          () => engine.renameSingleFileForMobileWatch(oldPath, newPath),
+          `rename file ${oldPath} → ${newPath}`,
+        ).then((ran) => {
+          if (hadPendingUpload) mobileWatch.queueFile(newPath);
+          if (!ran) {
+            mobileWatch.onVisible();
+            return;
+          }
+          void mobileWatch.flushFiles();
+        });
       }));
+
+      if (mobileWatch) {
+        this.registerDomEvent(document, 'visibilitychange', () => {
+          if (document.hidden) {
+            mobileWatch.onHidden();
+            return;
+          }
+          queueMicrotask(() => mobileWatch.onVisible());
+        });
+        this.registerDomEvent(window, 'online', () => mobileWatch.onNetworkChanged());
+        this.registerDomEvent(window, 'offline', () => mobileWatch.onNetworkChanged());
+        const connection = (navigator as Navigator & { connection?: EventTarget }).connection;
+        if (connection) {
+          const onConnectionChange = (): void => mobileWatch.onNetworkChanged();
+          connection.addEventListener('change', onConnectionChange);
+          this.register(() => connection.removeEventListener('change', onConnectionChange));
+        }
+      }
 
       // Feature 079 (discussion #44): sync when the app comes back to the foreground.
       //
@@ -258,6 +399,11 @@ export default class ObsidianNextcloudsync extends Plugin {
         startupSyncEnabled: () => this.settings.startupSyncDelaySeconds > 0,
       })));
     });
+  }
+
+  /** Re-evaluate Android Watch after a live Watch/Wi-Fi-only setting change. */
+  reevaluateMobileWatchPolicy(): void {
+    this.mobileWatch?.onNetworkChanged();
   }
 
   /**
@@ -531,9 +677,11 @@ export default class ObsidianNextcloudsync extends Plugin {
     this.settings.configSync = { ...DEFAULT_SETTINGS.configSync };
     migrateConfigSyncCategories(saved, this.settings);
     migrateBookmarksToConfigSync(saved, this.settings);
-    // Mobile first-run defaults: override before pruning so they are persisted immediately.
+    // Mobile first-run defaults plus the one-time Android Watch opt-in boundary.
+    let mobileWatchMigrated = false;
     if (Platform.isMobile) {
       applyMobileFirstRunDefaults(saved, this.settings);
+      if (!Platform.isIosApp) mobileWatchMigrated = migrateAndroidWatchOptIn(saved, this.settings);
     }
     // networkConcurrency: derived from device RAM on first run (the persisted value is kept as-is).
     if (saved.networkConcurrency === undefined) {
@@ -567,7 +715,7 @@ export default class ObsidianNextcloudsync extends Plugin {
     // `logLevel` / `syncResults*` fields from an earlier 0.3.0-beta), then persist the cleaned
     // settings so data.json no longer carries them (or no longer carries a stale Debug identity).
     const removed = pruneObsoleteSettings(this.settings as unknown as Record<string, unknown>);
-    if (removed.length > 0 || debugReset) {
+    if (removed.length > 0 || debugReset || mobileWatchMigrated) {
       await this.saveSettings();
     }
   }
@@ -604,6 +752,7 @@ export default class ObsidianNextcloudsync extends Plugin {
     const { SyncHistoryStore } = await import('./data/SyncHistoryStore');
     const { StatusBarItem } = await import('./ui/StatusBarItem');
     const { NoticeStatusBar } = await import('./ui/NoticeStatusBar');
+    const { NullStatusBar } = await import('./ui/NullStatusBar');
     const { WebDAVFactory } = await import('./network/WebDAVFactory');
     const { loadAppPassword } = await import('./settings/SettingTab');
 
@@ -647,6 +796,7 @@ export default class ObsidianNextcloudsync extends Plugin {
       baseStore,
       cleanSideStore,
       statusBar,
+      lightweightStatusBar: Platform.isMobile ? new NullStatusBar() : statusBar,
       historyStore,
       webdavFactory,
       pluginDir,
