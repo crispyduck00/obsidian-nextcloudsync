@@ -84,8 +84,6 @@ export interface WatchDeps {
   retryQueueLength?(): number;
   /** How many conflicts the engine has encountered so far (see notifyWatchOutcome). */
   conflictEncounters(): number;
-  /** Current unresolved conflict count, when the host can provide it. */
-  activeConflictCount?(): number;
   logger?: Pick<FileLogger, 'log'>;
   /** User-facing notice; injected so the outcome rules can be exercised without an Obsidian runtime. */
   notify?(message: string, timeout?: number): void;
@@ -517,9 +515,6 @@ export class WatchOperations {
    * only on merged/conflicted would stay silent about the most destructive resolution of all.
    */
   private notifyWatchOutcome(path: string, summary: SyncSessionSummary, conflictsBefore: number): void {
-    const activeConflicts = this.deps.activeConflictCount?.();
-    if (activeConflicts !== undefined) this.deps.statusBar.setConflictCount(activeConflicts);
-
     if (summary.errorCount > 0) {
       this.notify(`❌ Sync failed: ${path}`, 6000);
       return;

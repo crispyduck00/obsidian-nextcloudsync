@@ -270,7 +270,12 @@ export default class ObsidianNextcloudsync extends Plugin {
             canUseNetwork: () => this.syncEngine?.canRunWatchSync() ?? false,
             syncFile: async (path) => {
               const engine = this.syncEngine;
-              return engine ? engine.syncSingleFileForMobileWatch(path) : false;
+              if (!engine) return false;
+              try {
+                return await engine.syncSingleFileForMobileWatch(path);
+              } finally {
+                this.refreshMobileConflictStatus();
+              }
             },
             recoverStructural: async (requireFreshAfterCurrent) => {
               const engine = this.syncEngine;
@@ -582,6 +587,8 @@ export default class ObsidianNextcloudsync extends Plugin {
           await applyForceResolution(this.syncEngine!, path, choice);
         } catch (err) {
           new Notice(`Could not resolve "${path}": ${(err as Error).message}`);
+        } finally {
+          this.refreshMobileConflictStatus();
         }
       },
       // Feature 042: force-resolve every currently-listed conflict with one chosen action. The
@@ -599,6 +606,7 @@ export default class ObsidianNextcloudsync extends Plugin {
         });
         if (!ok) return;
         const { resolved, noop, failed } = await applyBulkForceResolution(this.syncEngine!, paths, choice);
+        this.refreshMobileConflictStatus();
         new Notice(`Resolved ${resolved} of ${n} conflicts`
           + (noop ? `; ${noop} unchanged` : '') + (failed ? `; ${failed} failed` : ''));
       },
@@ -935,6 +943,7 @@ export default class ObsidianNextcloudsync extends Plugin {
       },
     });
     androidStatus?.setNetworkAvailable(this.syncEngine.canRunWatchSync());
+    this.refreshMobileConflictStatus();
 
     // Progressive enhancement: if the server advertises Nextcloud Client Push, keep a WebSocket
     // open and use file IDs only to select an existing sync path. The vault-root scope gate filters
@@ -970,7 +979,12 @@ export default class ObsidianNextcloudsync extends Plugin {
       },
       reconcileFileIds: async (batch) => {
         const engine = this.syncEngine;
-        return engine ? engine.reconcileRemoteFileIds(batch) : 'full-sync';
+        if (!engine) return 'full-sync';
+        try {
+          return await engine.reconcileRemoteFileIds(batch);
+        } finally {
+          this.refreshMobileConflictStatus();
+        }
       },
       sync: async () => {
         const engine = this.syncEngine;
@@ -1044,6 +1058,19 @@ export default class ObsidianNextcloudsync extends Plugin {
     this.mobileSyncStatusItem?.setRealtimeState('inactive');
     this.pushStatusItem?.destroy();
     this.pushStatusItem = undefined;
+  }
+
+  /**
+   * Refresh the compact Android indicator from the engine's existing read-only status snapshot.
+   *
+   * Deliberately lives in the plugin host rather than WatchOperations/SyncEngine: conflict tracking
+   * remains a generic sync concern, while deciding to paint it in an Android view action is UI only.
+   */
+  private refreshMobileConflictStatus(): void {
+    const item = this.mobileSyncStatusItem;
+    const engine = this.syncEngine;
+    if (!item || !engine) return;
+    item.setConflictCount(engine.getStatusReport().conflictedFiles.length);
   }
 
   /** Apply the Client Push settings immediately without rebuilding the sync engine. */
