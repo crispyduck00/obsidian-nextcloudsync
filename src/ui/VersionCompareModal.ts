@@ -2,6 +2,7 @@ import { App, Modal, Notice } from 'obsidian';
 import { FileVersion } from '../types';
 import { VersionComparison } from '../sync/versions/VersionService';
 import { renderDiffSections } from './diffRender';
+import { renderVersionUnifiedDiff } from './versionUnifiedDiff';
 
 function authorLabel(version: FileVersion, currentUserId: string): string {
   if (!version.author) return 'Unknown author';
@@ -61,8 +62,15 @@ export class VersionCompareModal extends Modal {
         headers.createDiv({ text: label, cls: 'ncs-diff-header-cell' });
       }
 
-      const scrollEl = this.contentEl.createDiv({ cls: 'ncs-diff-scroll' });
-      const firstChanged = renderDiffSections(scrollEl, result.beforeText, result.afterText);
+      const desktopScroll = this.contentEl.createDiv({ cls: 'ncs-diff-scroll ncs-version-diff-desktop' });
+      const desktopFirstChanged = renderDiffSections(desktopScroll, result.beforeText, result.afterText);
+
+      const mobileScroll = this.contentEl.createDiv({ cls: 'ncs-version-unified ncs-version-diff-mobile' });
+      const mobileFirstChanged = renderVersionUnifiedDiff(mobileScroll, result.beforeText, result.afterText);
+
+      const firstChanged = window.matchMedia('(max-width: 600px)').matches
+        ? mobileFirstChanged
+        : desktopFirstChanged;
       if (firstChanged) {
         window.requestAnimationFrame(() => firstChanged.scrollIntoView({ block: 'center' }));
       }
