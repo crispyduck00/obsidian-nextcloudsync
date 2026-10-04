@@ -55,6 +55,9 @@ export class VersionCompareModal extends Modal {
         cls: 'setting-item-description',
       });
 
+      const controls = this.contentEl.createDiv({ cls: 'ncs-version-view-controls' });
+      const wrapButton = controls.createEl('button', { text: 'Wrap lines: on' });
+
       const headers = this.contentEl.createDiv({ cls: 'ncs-diff-headers' });
       for (const label of [versionLabel(result.before), versionLabel(result.after)]) {
         headers.createDiv({ cls: 'ncs-diff-gutter' });
@@ -67,6 +70,17 @@ export class VersionCompareModal extends Modal {
 
       const mobileScroll = this.contentEl.createDiv({ cls: 'ncs-version-unified ncs-version-diff-mobile' });
       const mobileFirstChanged = renderVersionUnifiedDiff(mobileScroll, result.beforeText, result.afterText);
+
+      let wrapped = true;
+      const applyWrap = () => {
+        for (const el of [desktopScroll, mobileScroll]) el.toggleClass('is-nowrap', !wrapped);
+        wrapButton.setText(`Wrap lines: ${wrapped ? 'on' : 'off'}`);
+      };
+      wrapButton.addEventListener('click', () => {
+        wrapped = !wrapped;
+        applyWrap();
+      });
+      applyWrap();
 
       const firstChanged = window.matchMedia('(max-width: 600px)').matches
         ? mobileFirstChanged
