@@ -36,7 +36,7 @@ export class VersionHistoryModal extends Modal {
     private readonly versions: FileVersion[],
     private readonly currentUserId: string,
     private readonly onCompare: (before: FileVersion, after: FileVersion) => void,
-    private readonly onLineHistory: () => void,
+    private readonly onLineHistory: (version: FileVersion) => void,
     private readonly onRestore: (version: FileVersion) => Promise<void>,
   ) {
     super(app);
@@ -59,8 +59,6 @@ export class VersionHistoryModal extends Modal {
       text: 'History is based on the versions currently retained by Nextcloud.',
       cls: 'setting-item-description',
     });
-    const lineButton = intro.createEl('button', { text: 'Line history' });
-    lineButton.addEventListener('click', () => this.onLineHistory());
 
     const ordered = [...this.versions].sort((a, b) => b.lastModified - a.lastModified);
     const current = ordered.find((v) => v.isCurrent);
@@ -105,6 +103,9 @@ export class VersionHistoryModal extends Modal {
         const comparePrevious = actions.createEl('button', { text: 'Compare previous' });
         comparePrevious.addEventListener('click', () => this.onCompare(previous, version));
       }
+
+      const lineHistory = actions.createEl('button', { text: 'Line history' });
+      lineHistory.addEventListener('click', () => this.onLineHistory(version));
 
       if (!version.isCurrent) {
         const restore = actions.createEl('button', { text: 'Restore', cls: 'mod-warning' });
