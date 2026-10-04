@@ -234,7 +234,11 @@ export class SyncEngine {
     this.versions = new VersionService({
       localAdapter: opts.localAdapter,
       stateDB: opts.stateDB,
-      isTextEligible: (path) => isTextEligible(path, this.opts.settings.autoMergeFileTypes),
+      // Markdown is always a mergeable text type in the sync engine even though `md` is
+      // intentionally not stored in autoMergeFileTypes. Version compare/line history must mirror
+      // that same policy: Markdown + every user-configured Auto Merge File type.
+      isTextEligible: (path) => path.toLowerCase().endsWith('.md')
+        || isTextEligible(path, this.opts.settings.autoMergeFileTypes),
     });
     this.deletion = new DeletionService({
       app: opts.app,
