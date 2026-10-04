@@ -541,3 +541,370 @@
   }
 }
 
+
+
+/* ── Nextcloud version history ───────────────────────────────────────────── */
+.ncs-version-history-modal {
+  width: min(760px, 96vw);
+}
+
+.ncs-version-history-intro {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 4px 0 10px;
+}
+
+.ncs-version-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 65vh;
+  overflow-y: auto;
+}
+
+.ncs-version-card {
+  padding: 10px 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s, 6px);
+  background: var(--background-secondary);
+  min-width: 0;
+}
+
+.ncs-version-title {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.ncs-version-current {
+  color: var(--text-accent);
+}
+
+.ncs-version-meta,
+.ncs-version-id {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  overflow-wrap: anywhere;
+}
+
+.ncs-version-id {
+  margin-top: 2px;
+  font-family: var(--font-monospace);
+}
+
+.ncs-version-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+/* Blame-style line history: one continuous current-file view with compact provenance. */
+.ncs-line-history-modal {
+  width: min(1050px, 98vw);
+}
+
+.ncs-line-history-note {
+  padding: 8px 10px;
+  margin: 6px 0 10px;
+  border-left: 3px solid var(--interactive-accent);
+  background: var(--background-secondary);
+  font-size: var(--font-ui-smaller);
+}
+
+.ncs-line-history-count {
+  margin-top: 5px;
+  color: var(--text-muted);
+}
+
+.ncs-line-history-warning {
+  margin-top: 5px;
+  color: var(--text-warning);
+}
+
+.ncs-blame-list {
+  max-height: 68vh;
+  overflow: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s, 6px);
+  font-family: var(--font-monospace);
+  font-size: 12px;
+}
+
+.ncs-blame-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 150px) 42px minmax(0, 1fr);
+  min-width: 0;
+  align-items: start;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.ncs-blame-row:last-child {
+  border-bottom: none;
+}
+
+.ncs-blame-provenance {
+  min-height: 22px;
+  padding: 2px 8px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  overflow: hidden;
+}
+
+.ncs-blame-author {
+  color: var(--text-normal);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ncs-blame-date {
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.ncs-blame-line-number {
+  padding: 2px 6px;
+  text-align: right;
+  color: var(--text-faint);
+  user-select: none;
+  background: var(--background-primary-alt);
+}
+
+.ncs-blame-text {
+  min-width: 0;
+  min-height: 22px;
+  padding: 2px 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 600px) {
+  .ncs-version-history-modal,
+  .ncs-line-history-modal {
+    width: 98vw;
+  }
+
+  .ncs-version-card {
+    padding: 9px 10px;
+  }
+
+  .ncs-version-actions button {
+    min-height: 36px;
+  }
+
+  .ncs-blame-list {
+    max-height: 62vh;
+    font-size: 11px;
+  }
+
+  .ncs-blame-row {
+    grid-template-columns: 78px 30px minmax(0, 1fr);
+  }
+
+  .ncs-blame-provenance {
+    padding: 2px 4px;
+  }
+
+  .ncs-blame-author {
+    font-size: 10px;
+  }
+
+  .ncs-blame-date {
+    font-size: 9px;
+  }
+
+  .ncs-blame-line-number {
+    padding: 2px 3px;
+  }
+
+  .ncs-blame-text {
+    padding: 2px 5px;
+  }
+}
+
+
+/* Version-history compare: desktop keeps the shared two-column renderer; mobile gets a unified diff. */
+.ncs-version-diff-mobile {
+  display: none;
+}
+
+.ncs-version-unified {
+  max-height: 60vh;
+  overflow: auto;
+  border-top: 1px solid var(--background-modifier-border);
+  font-family: var(--font-monospace);
+  font-size: 12px;
+}
+
+.ncs-version-unified-row {
+  display: grid;
+  grid-template-columns: 28px 28px 16px minmax(0, 1fr);
+  align-items: start;
+  min-width: 0;
+}
+
+.ncs-version-unified-num {
+  padding: 1px 3px;
+  text-align: right;
+  color: var(--text-faint);
+  user-select: none;
+}
+
+.ncs-version-unified-marker {
+  padding: 1px 2px;
+  text-align: center;
+  font-weight: 700;
+  color: var(--text-faint);
+  user-select: none;
+}
+
+.ncs-version-unified-text {
+  min-width: 0;
+  padding: 1px 5px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ncs-version-unified-row.is-del .ncs-version-unified-marker {
+  color: var(--color-red);
+}
+
+.ncs-version-unified-row.is-del .ncs-version-unified-text {
+  background: color-mix(in srgb, var(--color-red) 20%, transparent);
+}
+
+.ncs-version-unified-row.is-add .ncs-version-unified-marker {
+  color: var(--color-green);
+}
+
+.ncs-version-unified-row.is-add .ncs-version-unified-text {
+  background: color-mix(in srgb, var(--color-green) 20%, transparent);
+}
+
+/* Stable author buckets: color is only a visual aid; name/date remain the authoritative labels. */
+.ncs-author-0 .ncs-blame-provenance { border-left: 4px solid var(--color-red); }
+.ncs-author-1 .ncs-blame-provenance { border-left: 4px solid var(--color-orange); }
+.ncs-author-2 .ncs-blame-provenance { border-left: 4px solid var(--color-yellow); }
+.ncs-author-3 .ncs-blame-provenance { border-left: 4px solid var(--color-green); }
+.ncs-author-4 .ncs-blame-provenance { border-left: 4px solid var(--color-cyan); }
+.ncs-author-5 .ncs-blame-provenance { border-left: 4px solid var(--color-blue); }
+.ncs-author-6 .ncs-blame-provenance { border-left: 4px solid var(--color-purple); }
+.ncs-author-7 .ncs-blame-provenance { border-left: 4px solid var(--color-pink); }
+
+.ncs-blame-current {
+  font-size: 10px;
+  color: var(--text-accent);
+  white-space: nowrap;
+}
+
+@media (max-width: 600px) {
+  .ncs-version-diff-desktop,
+  .ncs-diff-headers {
+    display: none;
+  }
+
+  .ncs-version-diff-mobile {
+    display: block;
+  }
+
+  .ncs-version-unified {
+    max-height: 56vh;
+    font-size: 11px;
+  }
+
+  .ncs-version-unified-row {
+    grid-template-columns: 24px 24px 14px minmax(0, 1fr);
+  }
+
+  .ncs-blame-row {
+    grid-template-columns: 104px 30px minmax(0, 1fr);
+  }
+
+  .ncs-blame-provenance {
+    padding: 2px 5px;
+  }
+
+  .ncs-blame-author {
+    font-size: 10px;
+  }
+
+  .ncs-blame-date,
+  .ncs-blame-current {
+    font-size: 9px;
+  }
+}
+
+
+/* Version-history-only display controls. New dialogs default to wrapped text; turning wrapping off
+   keeps each logical line on one visual line and exposes horizontal scrolling. */
+.ncs-version-view-controls {
+  display: flex;
+  justify-content: flex-end;
+  margin: 4px 0 8px;
+}
+
+.ncs-version-view-controls button {
+  min-height: 30px;
+}
+
+.ncs-diff-scroll.is-nowrap {
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+
+.ncs-diff-scroll.is-nowrap .ncs-diff-cell,
+.ncs-version-unified.is-nowrap .ncs-version-unified-text,
+.ncs-blame-list.is-nowrap .ncs-blame-text {
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.ncs-version-unified.is-nowrap .ncs-version-unified-row,
+.ncs-blame-list.is-nowrap .ncs-blame-row {
+  width: max-content;
+  min-width: 100%;
+}
+
+.ncs-version-unified.is-nowrap .ncs-version-unified-text,
+.ncs-blame-list.is-nowrap .ncs-blame-text {
+  min-width: max-content;
+}
+
+
+/* Compact phone action layout for version cards. Four actions become a predictable 2×2 grid
+   instead of large wrapped Obsidian buttons with uneven empty space. */
+@media (max-width: 600px) {
+  .ncs-version-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .ncs-version-actions button {
+    width: 100%;
+    min-width: 0;
+    min-height: 32px;
+    padding: 4px 6px;
+    margin: 0;
+    font-size: var(--font-ui-smaller);
+    line-height: 1.2;
+    white-space: normal;
+  }
+
+  .ncs-version-view-controls {
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .ncs-version-view-controls button {
+    min-height: 32px;
+    padding: 4px 8px;
+    font-size: var(--font-ui-smaller);
+  }
+}

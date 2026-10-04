@@ -259,12 +259,21 @@ describe('VersionService', () => {
 
   function build(tracked?: FileState) {
     const calls: {
-      listed: string[]; restored: string[]; wrote: string[]; saves: number; setFile?: FileState;
-    } = { listed: [], restored: [], wrote: [], saves: 0 };
+      listed: string[]; restored: string[]; fetchedVersions: string[]; downloaded: string[];
+      wrote: string[]; saves: number; setFile?: FileState;
+    } = { listed: [], restored: [], fetchedVersions: [], downloaded: [], wrote: [], saves: 0 };
     const client = {
       listVersions: async (fid: string) => { calls.listed.push(fid); return [version]; },
+      statFile: async () => null,
+      getVersionContent: async (v: FileVersion, fid: string) => {
+        calls.fetchedVersions.push(`${fid}:${v.versionId}`);
+        return new TextEncoder().encode(`version-${v.versionId}`).buffer;
+      },
       restoreVersion: async (_v: FileVersion, fid: string) => { calls.restored.push(fid); },
-      downloadFile: async () => new TextEncoder().encode('restored body').buffer,
+      downloadFile: async (path: string) => {
+        calls.downloaded.push(path);
+        return new TextEncoder().encode('restored body').buffer;
+      },
     } as unknown as IWebDAVClient;
     const service = new VersionService({
       localAdapter: {
@@ -276,6 +285,7 @@ describe('VersionService', () => {
         setFile: (f: FileState) => { calls.setFile = f; },
         save: async () => { calls.saves++; },
       } as never,
+      isTextEligible: () => true,
     });
     return { service, client, calls };
   }
@@ -289,6 +299,34 @@ describe('VersionService', () => {
     const { service, client, calls } = build(tracked('fid-7'));
     expect(await service.listVersions(client, NEXTCLOUD, 'note.md')).toEqual([version]);
     expect(calls.listed).toEqual(['fid-7']);
+  });
+
+  it('adds a synthetic Current entry when the live file is not present in retained versions', async () => {
+    const { service, client } = build(tracked('fid-7'));
+    const retained: FileVersion = {
+      versionId: '100', href: '/v/100', lastModified: 100_000, size: 3, author: 'alice',
+    };
+    client.listVersions = async () => [retained];
+    client.statFile = async () => ({
+      path: 'note.md',
+      fileId: 'fid-7',
+      checksum: null,
+      size: 7,
+      lastModified: 200_000,
+      etag: '"current-etag"',
+    });
+
+    const listed = await service.listVersions(client, NEXTCLOUD, 'note.md');
+
+    expect(listed).toHaveLength(2);
+    expect(listed[0]).toMatchObject({
+      versionId: 'current-200',
+      lastModified: 200_000,
+      size: 7,
+      etag: '"current-etag"',
+      isCurrent: true,
+    });
+    expect(listed[1]).toMatchObject({ versionId: '100', isCurrent: false });
   });
 
   it('refuses on a non-Nextcloud server', async () => {
@@ -305,6 +343,54 @@ describe('VersionService', () => {
   it('refuses for a tracked file with no remote id yet', async () => {
     const { service, client } = build(tracked(null));
     await expect(service.listVersions(client, NEXTCLOUD, 'note.md')).rejects.toThrow(FeatureUnsupportedError);
+  });
+
+  it('compares two retained versions through the same file-id version API', async () => {
+    const { service, client, calls } = build(tracked('fid-7'));
+    const before: FileVersion = {
+      versionId: 'v1', href: '/v/v1', lastModified: 1, size: 1,
+    };
+    const after: FileVersion = {
+      versionId: 'v2', href: '/v/v2', lastModified: 2, size: 1,
+    };
+
+    const result = await service.compareVersions(client, NEXTCLOUD, 'note.md', before, after);
+
+    expect(result.beforeText).toBe('version-v1');
+    expect(result.afterText).toBe('version-v2');
+    expect(calls.fetchedVersions).toEqual(['fid-7:v1', 'fid-7:v2']);
+    expect(calls.downloaded).toEqual([]);
+  });
+
+  it('uses the current file endpoint when the newer comparison side is current', async () => {
+    const { service, client, calls } = build(tracked('fid-7'));
+    const before: FileVersion = {
+      versionId: 'v1', href: '/v/v1', lastModified: 1, size: 1,
+    };
+    const current: FileVersion = {
+      versionId: 'current', href: '', lastModified: 2, size: 1, isCurrent: true,
+    };
+
+    const result = await service.compareVersions(client, NEXTCLOUD, 'note.md', before, current);
+
+    expect(result.beforeText).toBe('version-v1');
+    expect(result.afterText).toBe('restored body');
+    expect(calls.fetchedVersions).toEqual(['fid-7:v1']);
+    expect(calls.downloaded).toEqual(['note.md']);
+  });
+
+  it('builds historical line history only up to the selected retained version', async () => {
+    const { service, client, calls } = build(tracked('fid-7'));
+    const v1: FileVersion = { versionId: 'v1', href: '/v/v1', lastModified: 1, size: 1 };
+    const v2: FileVersion = { versionId: 'v2', href: '/v/v2', lastModified: 2, size: 1 };
+    const current: FileVersion = {
+      versionId: 'current', href: '', lastModified: 3, size: 1, isCurrent: true,
+    };
+
+    await service.lineHistory(client, NEXTCLOUD, 'note.md', [current, v2, v1], v2);
+
+    expect(calls.fetchedVersions).toEqual(['fid-7:v1', 'fid-7:v2']);
+    expect(calls.downloaded).toEqual([]);
   });
 
   it('restores on the server, applies the result locally, then converges the state DB', async () => {

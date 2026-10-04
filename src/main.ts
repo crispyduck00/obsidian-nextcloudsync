@@ -3,6 +3,8 @@ import { DavSyncSettings, DEFAULT_SETTINGS, FeatureUnsupportedError } from './ty
 import { NextcloudSyncSettingTab } from './settings/SettingTab';
 import { SyncEngine } from './sync/SyncEngine';
 import { VersionHistoryModal } from './ui/VersionHistoryModal';
+import { VersionCompareModal } from './ui/VersionCompareModal';
+import { LineHistoryModal } from './ui/LineHistoryModal';
 import { SyncStatusModal } from './ui/SyncStatusModal';
 import { StatusFilterState, makeDefaultFilterState, serializeFilter, deserializeFilter } from './ui/statusFilter';
 import { CompareModal } from './ui/CompareModal';
@@ -709,12 +711,43 @@ export default class ObsidianNextcloudsync extends Plugin {
     if (!engine) return;
     try {
       const versions = await engine.listVersions(file.path);
-      new VersionHistoryModal(
+      let historyModal: VersionHistoryModal;
+      historyModal = new VersionHistoryModal(
         this.app,
         file.path,
         versions,
+        this.settings.username,
+        (before, after, restoreTarget) => new VersionCompareModal(
+          this.app,
+          file.path,
+          before,
+          after,
+          this.settings.username,
+          restoreTarget,
+          () => engine.compareVersions(file.path, before, after),
+          restoreTarget
+            ? async () => {
+                await engine.restoreVersion(file.path, restoreTarget);
+                historyModal.close();
+              }
+            : undefined,
+        ).open(),
+        (version) => new LineHistoryModal(
+          this.app,
+          file.path,
+          this.settings.username,
+          version,
+          () => engine.lineHistory(file.path, versions, version),
+          !version.isCurrent
+            ? async () => {
+                await engine.restoreVersion(file.path, version);
+                historyModal.close();
+              }
+            : undefined,
+        ).open(),
         (version) => engine.restoreVersion(file.path, version),
-      ).open();
+      );
+      historyModal.open();
     } catch (err) {
       if (err instanceof FeatureUnsupportedError) {
         new Notice('No server version history is available for this file.', 6000);
