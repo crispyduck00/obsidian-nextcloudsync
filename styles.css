@@ -773,3 +773,36 @@
 .ncs-blame-list.is-nowrap .ncs-blame-text {
   min-width: max-content;
 }
+
+
+/* Compact phone action layout for version cards. Four actions become a predictable 2×2 grid
+   instead of large wrapped Obsidian buttons with uneven empty space. */
+@media (max-width: 600px) {
+  .ncs-version-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .ncs-version-actions button {
+    width: 100%;
+    min-width: 0;
+    min-height: 32px;
+    padding: 4px 6px;
+    margin: 0;
+    font-size: var(--font-ui-smaller);
+    line-height: 1.2;
+    white-space: normal;
+  }
+
+  .ncs-version-view-controls {
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .ncs-version-view-controls button {
+    min-height: 32px;
+    padding: 4px 8px;
+    font-size: var(--font-ui-smaller);
+  }
+}
