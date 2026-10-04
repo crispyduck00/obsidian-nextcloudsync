@@ -264,7 +264,14 @@ describe('VersionService', () => {
     } = { listed: [], restored: [], fetchedVersions: [], downloaded: [], wrote: [], saves: 0 };
     const client = {
       listVersions: async (fid: string) => { calls.listed.push(fid); return [version]; },
-      statFile: async () => null,
+      statFile: async () => ({
+        path: 'note.md',
+        fileId: 'fid-7',
+        checksum: null,
+        etag: '"restored-etag"',
+        size: 13,
+        lastModified: 123456,
+      }),
       getVersionContent: async (v: FileVersion, fid: string) => {
         calls.fetchedVersions.push(`${fid}:${v.versionId}`);
         return new TextEncoder().encode(`version-${v.versionId}`).buffer;
@@ -399,10 +406,36 @@ describe('VersionService', () => {
     expect(calls.restored).toEqual(['fid-7']);
     expect(calls.wrote).toEqual(['note.md']);
     expect(calls.setFile).toMatchObject({
-      remoteFileId: 'fid-7', idType: 'sha256', isConflicted: false, localMtime: 777,
+      remoteFileId: 'fid-7',
+      remoteId: '"restored-etag"',
+      idType: 'etag',
+      remoteMtime: 123456,
+      mtime: 123456,
+      isConflicted: false,
+      localMtime: 777,
     });
-    expect(calls.setFile?.localHash).toBe(calls.setFile?.remoteId); // both sides hold this body
+    expect(calls.setFile?.localHash).not.toBe(calls.setFile?.remoteId);
     expect(calls.saves).toBe(1);
+  });
+
+  it('prefers a server checksum over etag after restore, matching normal sync identity', async () => {
+    const { service, client, calls } = build(tracked('fid-7'));
+    client.statFile = async () => ({
+      path: 'note.md',
+      fileId: 'fid-7',
+      checksum: 'abc123',
+      etag: '"etag"',
+      size: 13,
+      lastModified: 999,
+    });
+
+    await service.restoreVersion(client, NEXTCLOUD, 'note.md', version);
+
+    expect(calls.setFile).toMatchObject({
+      remoteId: 'abc123',
+      idType: 'sha256',
+      remoteMtime: 999,
+    });
   });
 
   it('applies the same two preconditions to a restore', async () => {

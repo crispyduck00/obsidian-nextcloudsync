@@ -9,6 +9,7 @@ import { StateDB } from '../../data/StateDB';
 import { IWebDAVClient } from '../../network/IWebDAVClient';
 import { withLocalSignature } from '../../data/localSignature';
 import { sha256 } from '../../util/hash';
+import { remoteIdOf } from '../remoteIdentity';
 import { LineHistoryResult, reconstructLineHistory, VersionSnapshot } from './lineHistory';
 
 export interface VersionDeps {
@@ -127,15 +128,30 @@ export class VersionService {
     const fileId = this.requireFileId(features, path);
 
     await client.restoreVersion(version, fileId);
-    const data = await client.downloadFile(path);
+
+    // Re-read the live remote after restore and persist the SAME identity model the sync engine
+    // uses (checksum → ETag → size). Otherwise the next sync can mistake the restored file for a
+    // fresh remote change and merge/upload it again even though the user did not edit it.
+    const [data, remote] = await Promise.all([
+      client.downloadFile(path),
+      client.statFile(path),
+    ]);
+    if (!remote) throw new Error('Restored file is not available on the server.');
+
     await this.deps.localAdapter.atomicWriteBinary(path, data);
     const localHash = await sha256(data);
+    const { remoteId, idType } = remoteIdOf(remote);
     const stat = await this.deps.localAdapter.stat(path);
     this.deps.stateDB.setFile(await withLocalSignature(this.deps.localAdapter, {
-      path, localHash, remoteId: localHash, idType: 'sha256',
-      size: stat?.size ?? data.byteLength, mtime: stat?.mtime ?? Date.now(),
-      remoteFileId: fileId, isConflicted: false,
-    }));
+      path,
+      localHash,
+      remoteId,
+      idType,
+      size: remote.size || stat?.size || data.byteLength,
+      mtime: remote.lastModified || stat?.mtime || Date.now(),
+      remoteFileId: remote.fileId ?? fileId,
+      isConflicted: false,
+    }, remote.lastModified));
     await this.deps.stateDB.save();
   }
 
