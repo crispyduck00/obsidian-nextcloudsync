@@ -460,12 +460,13 @@ export default class ObsidianNextcloudsync extends Plugin {
         file.path,
         versions,
         this.settings.username,
-        (version) => new VersionCompareModal(
+        (before, after) => new VersionCompareModal(
           this.app,
           file.path,
-          version,
+          before,
+          after,
           this.settings.username,
-          () => engine.compareVersion(file.path, version),
+          () => engine.compareVersions(file.path, before, after),
         ).open(),
         () => new LineHistoryModal(
           this.app,
