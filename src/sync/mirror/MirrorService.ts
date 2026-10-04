@@ -8,8 +8,8 @@
 // touched, and a plan that could not be built reliably comes back with `ok: false` and an empty
 // action list: a failed remote listing must produce ZERO deletions, never a plan that reads "the
 // server has nothing, so delete everything".
-import { TFolder, Vault, App } from 'obsidian';
-import { FileState, RemoteFileInfo } from '../../types';
+import { TFolder, Vault, App, normalizePath } from 'obsidian';
+import { FileState, RemoteDirInfo, RemoteFileInfo } from '../../types';
 import { buildMirrorPlan, MirrorPlan, MirrorResult, LocalFileEntry } from '../mirrorPlan';
 import { planStateConvergence } from './convergence';
 import { LocalAdapter } from '../../data/LocalAdapter';
@@ -41,7 +41,8 @@ export interface MirrorDeps {
   app: App;
   localAdapter: Pick<LocalAdapter, 'stat' | 'readBinary'>;
   stateDB: Pick<StateDB,
-    'getFile' | 'setFile' | 'getAllFiles' | 'deleteFile' | 'deleteDir'
+    'getFile' | 'setFile' | 'getAllFiles' | 'deleteFile'
+    | 'getAllDirs' | 'setDir' | 'deleteDir'
     | 'setRemoteRootEtag' | 'setSyncToken'>;
   statusBar: IStatusBar;
   journal: SyncJournal;
@@ -70,16 +71,18 @@ export class MirrorService {
     try {
       client = await this.deps.connect();
     } catch (err) {
-      return buildMirrorPlan([], [], [], () => false, false, `Not connected to the server: ${(err as Error).message}`);
+      return buildMirrorPlan([], [], [], [], () => false, false, `Not connected to the server: ${(err as Error).message}`);
     }
 
     // 1. Authoritative remote listing (no short-circuit). Failure ⇒ abort gate (zero deletions).
     onPhase?.('Reading the remote file list…');
     let remoteFiles: RemoteFileInfo[];
+    let remoteDirs: RemoteDirInfo[];
     try {
       remoteFiles = await client.getFiles('');
+      remoteDirs = await client.getDirectories('');
     } catch (err) {
-      return buildMirrorPlan([], [], [], () => false, false, `Failed to list the remote: ${(err as Error).message}`);
+      return buildMirrorPlan([], [], [], [], () => false, false, `Failed to list the remote: ${(err as Error).message}`);
     }
 
     // 2. Local files.
@@ -121,7 +124,7 @@ export class MirrorService {
     const vault = this.deps.app.vault as Vault & { getAllFolders?: (includeRoot?: boolean) => TFolder[] };
     const localDirs = (vault.getAllFolders?.() ?? []).map((f) => f.path).filter((p) => p && p !== '/');
 
-    return buildMirrorPlan(remoteFiles, localFiles, localDirs, (p) => this.deps.isSystemExcluded(p), true);
+    return buildMirrorPlan(remoteFiles, remoteDirs, localFiles, localDirs, (p) => this.deps.isSystemExcluded(p), true);
   }
 
   /**
@@ -141,7 +144,7 @@ export class MirrorService {
     // Progress reporting: identical surface to a normal "Sync now" — the status bar on desktop and the
     // single result toast on mobile (NoticeStatusBar), driven via setStatus/setProgress/tickProgress
     // and closed with setSyncComplete. Total = every action item (downloads + file/folder deletions).
-    const total = plan.downloads.length + plan.deleteFiles.length + plan.deleteDirs.length;
+    const total = plan.createDirs.length + plan.downloads.length + plan.deleteFiles.length + plan.deleteDirs.length;
     this.deps.progress.begin(total);
     this.deps.statusBar.setStatus('syncing');
     if (total > 0) this.deps.statusBar.setProgress(0, total);
@@ -155,7 +158,19 @@ export class MirrorService {
       onProgress?.(done, total);
     };
 
-    // 1. Downloads (remote wins — forced overwrite, not a 3-way merge).
+    // 1. Create remote-only folders locally, parents before children. This is what makes empty
+    //    remote collections survive a mirror: they have no file path that could imply their existence.
+    for (const remoteDir of plan.createDirs) {
+      try {
+        await this.deps.app.vault.adapter.mkdir(normalizePath(remoteDir.path));
+        this.deps.stateDB.setDir({ path: remoteDir.path, remoteFileId: remoteDir.fileId });
+      } catch (err) {
+        result.errors.push({ path: remoteDir.path, message: (err as Error).message });
+      }
+      tick();
+    }
+
+    // 2. Downloads (remote wins — forced overwrite, not a 3-way merge).
     for (const remote of plan.downloads) {
       const remoteId = remote.checksum ?? remote.etag ?? String(remote.size);
       const idType: FileState['idType'] = remote.checksum ? 'sha256' : (remote.etag ? 'etag' : 'size');
@@ -169,7 +184,7 @@ export class MirrorService {
       tick();
     }
 
-    // 2. Delete local-only files (processRemoteDeletion honors the trash setting + cleans StateDB).
+    // 3. Delete local-only files (processRemoteDeletion honors the trash setting + cleans StateDB).
     for (const path of plan.deleteFiles) {
       try {
         await this.deps.deletion.processRemoteDeletion(path, summary);
@@ -180,7 +195,7 @@ export class MirrorService {
       tick();
     }
 
-    // 3. Delete local-only folders child→parent (trashFile handles TFolder). Dir tracking is dropped
+    // 4. Delete local-only folders child→parent (trashFile handles TFolder). Dir tracking is dropped
     //    inside processRemoteDeletion, together with the whole subtree's (feature 086).
     for (const path of plan.deleteDirs) {
       try {
@@ -192,14 +207,14 @@ export class MirrorService {
       tick();
     }
 
-    // 4. Reconcile StateDB to the remote so the next sync sees no diff (self-healing, FR-011).
+    // 5. Reconcile StateDB to the remote so the next sync sees no diff (self-healing, FR-011).
     const { toTrack, toDrop } = planStateConvergence(
       plan.remoteFiles,
       new Set(plan.downloads.map((d) => d.path)),
       this.deps.stateDB.getAllFiles().map((f) => f.path),
       (p) => this.deps.isSystemExcluded(p),
     );
-    // 4a. Skipped files (content already matched): downloadFile did NOT run for them, so ensure they
+    // 5a. Skipped files (content already matched): downloadFile did NOT run for them, so ensure they
     //     are tracked as unchanged (localHash === remoteId) — otherwise an untracked-but-present file
     //     would be misread as a conflict next sync and break convergence.
     for (const remote of toTrack) {
@@ -213,13 +228,26 @@ export class MirrorService {
         remoteFileId: remote.fileId, isConflicted: false,
       }, remote.lastModified));
     }
-    // 4b. Drop any tracked file the remote no longer has (deleteFiles already dropped their entries;
+    // 5b. Drop any tracked file the remote no longer has (deleteFiles already dropped their entries;
     //     this also clears entries whose local file was absent locally but still tracked).
     for (const path of toDrop) {
       this.deps.stateDB.deleteFile(path);
       this.deps.mergeBase.drop(path);
     }
-    // 4c. Force a real full scan next sync (never short-circuit) so convergence is genuinely verified.
+    // 5c. Mirror directory tracking to the authoritative remote directory listing, including empty
+    //     collections. A later ordinary sync must not reinterpret mirror-created/deleted folders as
+    //     fresh local changes.
+    const remoteDirPaths = new Set(plan.remoteDirs.map((d) => d.path));
+    for (const remoteDir of plan.remoteDirs) {
+      this.deps.stateDB.setDir({ path: remoteDir.path, remoteFileId: remoteDir.fileId });
+    }
+    for (const trackedDir of this.deps.stateDB.getAllDirs()) {
+      if (!remoteDirPaths.has(trackedDir.path) && !this.deps.isSystemExcluded(trackedDir.path)) {
+        this.deps.stateDB.deleteDir(trackedDir.path);
+      }
+    }
+
+    // 5d. Force a real full scan next sync (never short-circuit) so convergence is genuinely verified.
     this.deps.stateDB.setRemoteRootEtag(null);
     this.deps.stateDB.setSyncToken('');
 

@@ -14,8 +14,9 @@ import { DeletionService } from '../../../../src/sync/deletion/DeletionService';
 import { LocalScanner } from '../../../../src/sync/scan/LocalScanner';
 import { RemoteListingSource } from '../../../../src/sync/scan/RemoteListingSource';
 import { MirrorPlan } from '../../../../src/sync/mirrorPlan';
-import { FileState, RemoteFileInfo, SyncSessionSummary } from '../../../../src/types';
+import { DirState, FileState, RemoteDirInfo, RemoteFileInfo, SyncSessionSummary } from '../../../../src/types';
 import { IWebDAVClient } from '../../../../src/network/IWebDAVClient';
+import { TFolder } from '../../support/obsidian';
 
 const remote = (path: string, over: Partial<RemoteFileInfo> = {}): RemoteFileInfo => ({
   path, fileId: `fid-${path}`, checksum: null, etag: '"e"', size: 10, lastModified: 1000, ...over,
@@ -24,7 +25,7 @@ const remote = (path: string, over: Partial<RemoteFileInfo> = {}): RemoteFileInf
 function plan(over: Partial<MirrorPlan> = {}): MirrorPlan {
   return {
     ok: true, reason: undefined, skipCount: 0,
-    downloads: [], deleteFiles: [], deleteDirs: [], remoteFiles: [],
+    downloads: [], deleteFiles: [], createDirs: [], deleteDirs: [], remoteFiles: [], remoteDirs: [],
     ...over,
   } as MirrorPlan;
 }
@@ -40,6 +41,7 @@ function build(over: Partial<MirrorDeps> = {}, tracked: FileState[] = []) {
     deleted: [] as string[],
     setFile: [] as string[],
     deleteFile: [] as string[],
+    setDir: [] as string[],
     deleteDir: [] as string[],
     droppedBase: [] as string[],
     status: [] as string[],
@@ -51,12 +53,13 @@ function build(over: Partial<MirrorDeps> = {}, tracked: FileState[] = []) {
 
   const client = {
     getFiles: async () => [] as RemoteFileInfo[],
+    getDirectories: async () => [] as RemoteDirInfo[],
     recalcChecksum: async () => null,
   } as unknown as IWebDAVClient;
 
   const deps: MirrorDeps = {
     app: {
-      vault: { getAllFolders: () => [] },
+      vault: { getAllFolders: () => [], adapter: { mkdir: async () => undefined } },
     } as unknown as MirrorDeps['app'],
     localAdapter: {
       stat: async () => ({ size: 10, mtime: 1000 }),
@@ -67,6 +70,8 @@ function build(over: Partial<MirrorDeps> = {}, tracked: FileState[] = []) {
       setFile: (f: FileState) => { calls.setFile.push(f.path); },
       getAllFiles: () => tracked,
       deleteFile: (p: string) => { calls.deleteFile.push(p); },
+      getAllDirs: () => [] as DirState[],
+      setDir: (d: DirState) => { calls.setDir.push(d.path); },
       deleteDir: (p: string) => { calls.deleteDir.push(p); },
       setRemoteRootEtag: () => { /* noop */ },
       setSyncToken: () => { /* noop */ },
@@ -125,6 +130,22 @@ describe('MirrorService.applyRemoteMirror — the refusal gate', () => {
 });
 
 describe('MirrorService.applyRemoteMirror — applying the plan', () => {
+  it('creates remote-only empty folders and tracks them', async () => {
+    const mkdir = jest.fn(async () => undefined);
+    const { mirror, client, calls } = build({
+      app: { vault: { getAllFolders: () => [], adapter: { mkdir } } } as unknown as MirrorDeps['app'],
+    });
+    const remoteDir: RemoteDirInfo = {
+      path: 'Empty', fileId: 'dir-empty', etag: null, lastModified: 0,
+    };
+    const result = await mirror.applyRemoteMirror(client, plan({
+      createDirs: [remoteDir], remoteDirs: [remoteDir],
+    }));
+    expect(mkdir).toHaveBeenCalledWith('Empty');
+    expect(calls.setDir).toContain('Empty');
+    expect(result.errors).toEqual([]);
+  });
+
   it('downloads, deletes files, then deletes folders', async () => {
     const { mirror, client, calls } = build();
     const result = await mirror.applyRemoteMirror(client, plan({
@@ -256,6 +277,44 @@ describe('MirrorService.applyRemoteMirror — converging the state DB', () => {
     await mirror.applyRemoteMirror(client, plan());
     expect(rootEtag).toEqual([null]);
     expect(tokens).toEqual(['']);
+  });
+});
+
+describe('MirrorService.planRemoteMirror — remote directory safety', () => {
+  it('keeps an empty local directory when the authoritative remote directory listing contains it', async () => {
+    const remoteDir: RemoteDirInfo = {
+      path: 'Empty', fileId: 'dir-empty', etag: null, lastModified: 0,
+    };
+    const { mirror } = build({
+      app: {
+        vault: {
+          getAllFolders: () => [new TFolder('Empty')],
+          adapter: { mkdir: async () => undefined },
+        },
+      } as unknown as MirrorDeps['app'],
+      connect: async () => ({
+        getFiles: async () => [],
+        getDirectories: async () => [remoteDir],
+        recalcChecksum: async () => null,
+      }) as unknown as IWebDAVClient,
+    });
+    const p = await mirror.planRemoteMirror();
+    expect(p.ok).toBe(true);
+    expect(p.deleteDirs).toEqual([]);
+  });
+
+  it('aborts with zero deletions when the directory listing fails', async () => {
+    const { mirror } = build({
+      connect: async () => ({
+        getFiles: async () => [],
+        getDirectories: async () => { throw new Error('dir PROPFIND 500'); },
+      }) as unknown as IWebDAVClient,
+    });
+    const p = await mirror.planRemoteMirror();
+    expect(p.ok).toBe(false);
+    expect(p.deleteFiles).toEqual([]);
+    expect(p.deleteDirs).toEqual([]);
+    expect(p.createDirs).toEqual([]);
   });
 });
 
