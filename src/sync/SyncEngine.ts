@@ -33,7 +33,8 @@ import { SyncJournal } from './session/SyncJournal';
 import { MergeBaseRecorder } from './session/MergeBaseRecorder';
 import { withLocalSignature } from '../data/localSignature';
 import { TransferService } from './transfer/TransferService';
-import { VersionService } from './versions/VersionService';
+import { VersionService, VersionComparison } from './versions/VersionService';
+import { LineHistoryResult } from './versions/lineHistory';
 import { remoteIdOf } from './remoteIdentity';
 import { DeletionService } from './deletion/DeletionService';
 import { ResolutionService } from './resolution/ResolutionService';
@@ -1298,13 +1299,13 @@ export class SyncEngine {
   }
 
   /** @see VersionService.compareVersion */
-  async compareVersion(path: string, version: FileVersion) {
+  async compareVersion(path: string, version: FileVersion): Promise<VersionComparison> {
     const { client, features } = await this.ensureClient();
     return this.versions.compareVersion(client, features, path, version);
   }
 
   /** @see VersionService.lineHistory */
-  async lineHistory(path: string, versions: FileVersion[]) {
+  async lineHistory(path: string, versions: FileVersion[]): Promise<LineHistoryResult> {
     const { client, features } = await this.ensureClient();
     return this.versions.lineHistory(client, features, path, versions);
   }
