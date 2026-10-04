@@ -1311,9 +1311,11 @@ export class SyncEngine {
   }
 
   /** @see VersionService.lineHistory */
-  async lineHistory(path: string, versions: FileVersion[]): Promise<LineHistoryResult> {
+  async lineHistory(
+    path: string, versions: FileVersion[], targetVersion: FileVersion,
+  ): Promise<LineHistoryResult> {
     const { client, features } = await this.ensureClient();
-    return this.versions.lineHistory(client, features, path, versions);
+    return this.versions.lineHistory(client, features, path, versions, targetVersion);
   }
 
   /** @see VersionService.restoreVersion */
