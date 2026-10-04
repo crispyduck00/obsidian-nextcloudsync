@@ -12,6 +12,7 @@ import { StateDB } from '../../data/StateDB';
 import { IWebDAVClient } from '../../network/IWebDAVClient';
 import { withLocalSignature } from '../../data/localSignature';
 import { sha256 } from '../../util/hash';
+import { remoteIdOf } from '../remoteIdentity';
 
 export interface VersionDeps {
   localAdapter: Pick<LocalAdapter, 'stat' | 'atomicWriteBinary'>;
@@ -35,17 +36,32 @@ export class VersionService {
 
     // 1. Restore on the server side (MOVE restore).
     await client.restoreVersion(version, fileId);
-    // 2. Fetch the current content after restore and atomically apply it locally.
-    const data = await client.downloadFile(path);
+    // 2. Fetch the restored live file and its ACTUAL remote identity. The sync engine compares
+    //    RemoteFileInfo through remoteIdOf(checksum → etag → size); recording a local SHA-256 here
+    //    unconditionally makes the next sync see a false remote change on servers whose stat returns
+    //    an ETag instead of a checksum.
+    const [data, remote] = await Promise.all([
+      client.downloadFile(path),
+      client.statFile(path),
+    ]);
+    if (!remote) throw new Error('Restored file is not available on the server.');
+
     await this.deps.localAdapter.atomicWriteBinary(path, data);
-    // 3. Update the state DB (localHash=remoteId=hash of restored content, isConflicted=false).
+
+    // 3. Converge StateDB to the same identity model used by normal sync classification.
     const localHash = await sha256(data);
+    const { remoteId, idType } = remoteIdOf(remote);
     const stat = await this.deps.localAdapter.stat(path);
     this.deps.stateDB.setFile(await withLocalSignature(this.deps.localAdapter, {
-      path, localHash, remoteId: localHash, idType: 'sha256',
-      size: stat?.size ?? data.byteLength, mtime: stat?.mtime ?? Date.now(),
-      remoteFileId: fileId, isConflicted: false,
-    }));
+      path,
+      localHash,
+      remoteId,
+      idType,
+      size: remote.size || stat?.size || data.byteLength,
+      mtime: remote.lastModified || stat?.mtime || Date.now(),
+      remoteFileId: remote.fileId ?? fileId,
+      isConflicted: false,
+    }, remote.lastModified));
     await this.deps.stateDB.save();
   }
 
