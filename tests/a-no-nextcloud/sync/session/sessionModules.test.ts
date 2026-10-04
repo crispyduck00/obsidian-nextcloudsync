@@ -263,6 +263,7 @@ describe('VersionService', () => {
     } = { listed: [], restored: [], wrote: [], saves: 0 };
     const client = {
       listVersions: async (fid: string) => { calls.listed.push(fid); return [version]; },
+      statFile: async () => null,
       restoreVersion: async (_v: FileVersion, fid: string) => { calls.restored.push(fid); },
       downloadFile: async () => new TextEncoder().encode('restored body').buffer,
     } as unknown as IWebDAVClient;
@@ -276,6 +277,7 @@ describe('VersionService', () => {
         setFile: (f: FileState) => { calls.setFile = f; },
         save: async () => { calls.saves++; },
       } as never,
+      isTextEligible: () => true,
     });
     return { service, client, calls };
   }
