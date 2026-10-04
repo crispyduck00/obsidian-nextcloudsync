@@ -51,6 +51,7 @@ function makeEngine(opts: { tracked: FileState[]; localFiles: string[] }) {
     deleteDir: jest.fn(),
     setRemoteRootEtag,
     setSyncToken,
+    save: jest.fn(async () => undefined),
   };
   const statusBar = {
     setStatus: jest.fn(), setProgress: jest.fn(), setSyncComplete: jest.fn(), setErrorCount: jest.fn(),
@@ -63,7 +64,7 @@ function makeEngine(opts: { tracked: FileState[]; localFiles: string[] }) {
 }
 
 const plan = (over: Partial<MirrorPlan>): MirrorPlan => ({
-  ok: true, reason: null, downloads: [], deleteFiles: [], deleteDirs: [], skipCount: 0, remoteFiles: [], ...over,
+  ok: true, reason: null, downloads: [], deleteFiles: [], createDirs: [], deleteDirs: [], skipCount: 0, remoteFiles: [], remoteDirs: [], ...over,
 });
 
 describe('[SPEC:MIR-3] SyncEngine.applyRemoteMirror — convergence & breaker bypass', () => {

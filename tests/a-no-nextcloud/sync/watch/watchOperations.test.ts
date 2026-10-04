@@ -77,6 +77,7 @@ function build(o: Opts = {}, over: Partial<WatchDeps> = {}) {
       return o.onServer === undefined ? remote({ path: p }) : o.onServer;
     },
     createDirectory: async (p: string) => { calls.createDirectory.push(p); },
+    isRemoteDirEmpty: async () => true,
     deleteCollection: async (p: string) => {
       if (o.failFolderDelete) throw new Error('boom');
       calls.deleteCollection.push(p);
@@ -115,6 +116,8 @@ function build(o: Opts = {}, over: Partial<WatchDeps> = {}) {
     } as unknown as MergeBaseRecorder,
     transfer: {
       uploadFile: async (_c: unknown, _u: unknown, p: string) => { calls.uploaded.push(p); },
+      acquireLock: async () => null,
+      releaseLock: async () => undefined,
     } as unknown as TransferService,
     deletion: {
       // Feature 086: watch and the full scan share one guarded deletion. What it does with the path

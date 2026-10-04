@@ -446,13 +446,20 @@ export class WatchOperations {
       const conn = await this.deps.connect();
       this.begin();
       let succeeded = false;
+      let token: string | null = null;
       try {
+        token = await this.deps.transfer.acquireLock(conn.client, path);
+        if (!(await conn.client.isRemoteDirEmpty(path))) {
+          void this.deps.logger?.log(`watch: remote folder not empty → keeping for full reconciliation ${path}`);
+          return;
+        }
         await conn.client.deleteCollection(path); // trashbin; 404 handled inside as success
         void this.deps.logger?.log(`watch: folder deleted → remote collection removed ${path}`);
         succeeded = true;
       } catch (err) {
         console.warn(`[SyncEngine] Single-folder delete failed for ${path}:`, err);
       } finally {
+        await this.deps.transfer.releaseLock(conn.client, path, token);
         this.end();
       }
       // BUG G1-2 fix: only drop the tracked directory when the remote delete actually succeeded (see

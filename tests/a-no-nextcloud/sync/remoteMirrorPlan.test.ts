@@ -1,5 +1,5 @@
 import { buildMirrorPlan, LocalFileEntry } from '../../../src/sync/mirrorPlan';
-import { RemoteFileInfo } from '../../../src/types';
+import { RemoteDirInfo, RemoteFileInfo } from '../../../src/types';
 
 // [SPEC:MIR-1] specs/045-remote-mirror-pull — Pull mirror plan classification (pure).
 // The mirror overwrites this device to match the remote: download what the remote has (or differs),
@@ -10,6 +10,9 @@ import { RemoteFileInfo } from '../../../src/types';
 function remote(path: string, checksum: string | null = null): RemoteFileInfo {
   return { path, fileId: null, checksum, etag: null, size: 1, lastModified: 0 };
 }
+function dir(path: string): RemoteDirInfo {
+  return { path, fileId: `dir-${path}`, etag: null, lastModified: 0 };
+}
 function local(path: string, hash: string): LocalFileEntry {
   return { path, hash };
 }
@@ -18,7 +21,7 @@ const noExclude = () => false;
 describe('[SPEC:MIR-1] buildMirrorPlan', () => {
   describe('download / skip classification', () => {
     it('downloads remote files missing locally', () => {
-      const plan = buildMirrorPlan([remote('a.md'), remote('b.md')], [], [], noExclude, true);
+      const plan = buildMirrorPlan([remote('a.md'), remote('b.md')], [], [], [], noExclude, true);
       expect(plan.ok).toBe(true);
       expect(plan.downloads.map((d) => d.path)).toEqual(['a.md', 'b.md']);
       expect(plan.skipCount).toBe(0);
@@ -27,6 +30,7 @@ describe('[SPEC:MIR-1] buildMirrorPlan', () => {
     it('skips remote files whose server checksum equals the local hash', () => {
       const plan = buildMirrorPlan(
         [remote('a.md', 'h-a')],
+        [],
         [local('a.md', 'h-a')],
         [],
         noExclude,
@@ -39,6 +43,7 @@ describe('[SPEC:MIR-1] buildMirrorPlan', () => {
     it('downloads (overwrites) when local hash differs from the remote checksum', () => {
       const plan = buildMirrorPlan(
         [remote('a.md', 'h-remote')],
+        [],
         [local('a.md', 'h-local')],
         [],
         noExclude,
@@ -51,6 +56,7 @@ describe('[SPEC:MIR-1] buildMirrorPlan', () => {
     it('downloads (safe side) when the remote checksum is unknown even if a local file exists', () => {
       const plan = buildMirrorPlan(
         [remote('a.md', null)],
+        [],
         [local('a.md', 'h-local')],
         [],
         noExclude,
@@ -65,6 +71,7 @@ describe('[SPEC:MIR-1] buildMirrorPlan', () => {
     it('deletes local files absent from the remote listing', () => {
       const plan = buildMirrorPlan(
         [remote('keep.md', 'h')],
+        [],
         [local('keep.md', 'h'), local('gone1.md', 'x'), local('gone2.md', 'y')],
         [],
         noExclude,
@@ -76,6 +83,7 @@ describe('[SPEC:MIR-1] buildMirrorPlan', () => {
     it('deletes local-only folders sorted child→parent (deepest first)', () => {
       const plan = buildMirrorPlan(
         [remote('kept/a.md')],
+        [dir('kept')],
         [],
         ['old', 'old/deep', 'old/deep/deeper', 'kept'],
         noExclude,
@@ -88,12 +96,38 @@ describe('[SPEC:MIR-1] buildMirrorPlan', () => {
     it('keeps a folder that still holds a remote file', () => {
       const plan = buildMirrorPlan(
         [remote('dir/file.md')],
+        [dir('dir')],
         [],
         ['dir'],
         noExclude,
         true,
       );
       expect(plan.deleteDirs).toEqual([]);
+    });
+
+    it('keeps an empty local folder when the same empty folder exists remotely', () => {
+      const plan = buildMirrorPlan(
+        [],
+        [dir('Empty')],
+        [],
+        ['Empty'],
+        noExclude,
+        true,
+      );
+      expect(plan.deleteDirs).toEqual([]);
+      expect(plan.createDirs).toEqual([]);
+    });
+
+    it('creates an empty remote-only folder locally', () => {
+      const plan = buildMirrorPlan(
+        [],
+        [dir('RemoteOnly'), dir('RemoteOnly/Child')],
+        [],
+        [],
+        noExclude,
+        true,
+      );
+      expect(plan.createDirs.map((d) => d.path)).toEqual(['RemoteOnly', 'RemoteOnly/Child']);
     });
   });
 
@@ -104,6 +138,7 @@ describe('[SPEC:MIR-1] buildMirrorPlan', () => {
         p === '.obsidian' || p.startsWith('.obsidian/') || p === 'Excluded' || p.startsWith('Excluded/');
       const plan = buildMirrorPlan(
         [remote('.obsidian/x.json', 'h'), remote('note.md', 'h2')],
+        [],
         [local('Excluded/keep.md', 'z'), local('note.md', 'old')],
         ['Excluded', 'Excluded/sub'],
         isExcluded,
@@ -119,6 +154,7 @@ describe('[SPEC:MIR-1] buildMirrorPlan', () => {
   describe('[SPEC:MIR-2] listing-completeness gate (FR-009 / SC-005)', () => {
     it('when the listing is not ok, plan is not ok and every list is empty (zero deletions)', () => {
       const plan = buildMirrorPlan(
+        [],
         [],
         [local('a.md', 'x'), local('b.md', 'y')],
         ['dir'],
@@ -139,6 +175,7 @@ describe('[SPEC:MIR-1] buildMirrorPlan', () => {
     it('reports download count and total delete count', () => {
       const plan = buildMirrorPlan(
         [remote('new.md'), remote('same.md', 'h'), remote('diff.md', 'hr')],
+        [],
         [local('same.md', 'h'), local('diff.md', 'hl'), local('goneFile.md', 'g')],
         ['goneDir'],
         noExclude,
