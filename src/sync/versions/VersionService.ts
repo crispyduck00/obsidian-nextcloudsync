@@ -62,7 +62,7 @@ export class VersionService {
       author: null,
       label: '',
       mimeType: '',
-      etag: current.etag,
+      etag: current.etag ?? undefined,
       isCurrent: true,
     }, ...marked];
   }
