@@ -3,12 +3,16 @@ import { FileVersion } from '../types';
 import { LineHistoryLine, LineHistoryResult } from '../sync/versions/lineHistory';
 
 function authorLabel(version: FileVersion, currentUserId: string): string {
-  if (!version.author) return 'Unknown author';
+  if (!version.author) return 'Unknown';
   return version.author === currentUserId ? 'You' : version.author;
 }
 
 function provenanceKey(version: FileVersion): string {
   return `${version.versionId}\u0000${version.lastModified}\u0000${version.author ?? ''}`;
+}
+
+function shortDate(ms: number): string {
+  return new Date(ms).toLocaleDateString(undefined, { month: '2-digit', day: '2-digit' });
 }
 
 export class LineHistoryModal extends Modal {
@@ -43,8 +47,7 @@ export class LineHistoryModal extends Modal {
 
   private async load(): Promise<void> {
     try {
-      const result = await this.loadHistory();
-      this.render(result);
+      this.render(await this.loadHistory());
     } catch (err) {
       new Notice(`❌ Line history failed: ${(err as Error).message}`, 6000);
       this.close();
@@ -60,8 +63,8 @@ export class LineHistoryModal extends Modal {
     note.createEl('strong', { text: 'Based on available Nextcloud versions. ' });
     note.createSpan({
       text:
-        'The author shown is the author recorded for the retained version in which a current line can first be traced. ' +
-        'It does not prove who originally wrote that line, and pruned intermediate versions cannot be reconstructed.',
+        'The author and date identify the retained version in which each current line can first be traced. ' +
+        'This is not proof of the original line author; pruned intermediate versions cannot be reconstructed.',
     });
     note.createDiv({
       text: `${result.versionCount} available version${result.versionCount === 1 ? '' : 's'} used.`,
@@ -79,41 +82,38 @@ export class LineHistoryModal extends Modal {
       return;
     }
 
-    const oldestTime = result.oldestVersionTime;
-
-    const list = contentEl.createDiv({ cls: 'ncs-line-history-list' });
-    let group: HTMLElement | null = null;
+    const list = contentEl.createDiv({ cls: 'ncs-blame-list' });
     let previousKey = '';
     for (const line of result.lines) {
       const key = provenanceKey(line.version);
-      if (key !== previousKey) {
-        group = list.createDiv({ cls: 'ncs-line-history-group' });
-        this.renderGroupHeader(group, line.version, oldestTime);
-        previousKey = key;
-      }
-      this.renderLine(group!, line);
+      this.renderLine(list, line, key !== previousKey, result.oldestVersionTime);
+      previousKey = key;
     }
   }
 
-  private renderGroupHeader(group: HTMLElement, version: FileVersion, oldestTime: number | null): void {
-    const header = group.createDiv({ cls: 'ncs-line-history-group-header' });
-    const date = new Date(version.lastModified).toLocaleString();
-    const prefix = version.isCurrent
-      ? 'Current version'
-      : oldestTime != null && version.lastModified === oldestTime
-        ? '≤ Oldest available version'
-        : 'Available version';
-    const label = version.label ? ` · ${version.label}` : '';
-    header.createDiv({ text: `${prefix}${label}`, cls: 'ncs-line-history-version' });
-    header.createDiv({
-      text: `${authorLabel(version, this.currentUserId)} · ${date}`,
-      cls: 'ncs-line-history-meta',
-    });
-  }
+  private renderLine(
+    list: HTMLElement,
+    line: LineHistoryLine,
+    firstInBlock: boolean,
+    oldestVersionTime: number | null,
+  ): void {
+    const row = list.createDiv({ cls: 'ncs-blame-row' });
+    const provenance = row.createDiv({ cls: 'ncs-blame-provenance' });
 
-  private renderLine(group: HTMLElement, line: LineHistoryLine): void {
-    const row = group.createDiv({ cls: 'ncs-line-history-row' });
-    row.createDiv({ text: String(line.lineNumber), cls: 'ncs-line-history-gutter' });
-    row.createDiv({ text: line.text || ' ', cls: 'ncs-line-history-text' });
+    if (firstInBlock) {
+      const isOldest = oldestVersionTime != null && line.version.lastModified === oldestVersionTime;
+      const author = authorLabel(line.version, this.currentUserId);
+      provenance.createDiv({
+        text: line.version.isCurrent ? `${author} · Current` : author,
+        cls: 'ncs-blame-author',
+      });
+      provenance.createDiv({
+        text: `${isOldest && !line.version.isCurrent ? '≤ ' : ''}${shortDate(line.version.lastModified)}`,
+        cls: 'ncs-blame-date',
+      });
+    }
+
+    row.createDiv({ text: String(line.lineNumber), cls: 'ncs-blame-line-number' });
+    row.createDiv({ text: line.text || ' ', cls: 'ncs-blame-text' });
   }
 }
