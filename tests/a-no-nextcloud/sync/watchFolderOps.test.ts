@@ -20,6 +20,7 @@ function makeEngine(opts: { tracked?: DirState[]; settings?: DavSyncSettings } =
   const client = {
     createDirectory: jest.fn(async () => undefined),
     deleteCollection: jest.fn(async () => undefined),
+    isRemoteDirEmpty: jest.fn(async () => true),
     moveFile: jest.fn(async () => undefined),
   };
   const features = { isNextcloud: true, version: '30', hasChecksums: true, hasFilesLocking: false, hasBulkUpload: false, syncToken: null };
@@ -88,6 +89,14 @@ describe('[SPEC:WF-2] SyncEngine.deleteSingleFolder', () => {
     const { engine, client } = makeEngine({ tracked: [dirState('.obsidian/x')] });
     await engine.deleteSingleFolder('.obsidian/x');
     expect(client.deleteCollection).not.toHaveBeenCalled();
+  });
+
+  it('keeps a tracked remote folder when it is not empty anymore', async () => {
+    const { engine, client, dirs } = makeEngine({ tracked: [dirState('Shared')] });
+    client.isRemoteDirEmpty.mockResolvedValueOnce(false);
+    await engine.deleteSingleFolder('Shared');
+    expect(client.deleteCollection).not.toHaveBeenCalled();
+    expect(dirs.has('Shared')).toBe(true);
   });
 });
 
