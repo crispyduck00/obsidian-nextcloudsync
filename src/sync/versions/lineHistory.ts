@@ -15,6 +15,8 @@ export interface LineHistoryLine {
 export interface LineHistoryResult {
   lines: LineHistoryLine[];
   versionCount: number;
+  /** Timestamp of the oldest retained snapshot that participated, even if none of its lines survive. */
+  oldestVersionTime: number | null;
   /** True when a bounded-memory fallback was needed for at least one very large comparison. */
   approximate: boolean;
 }
@@ -98,7 +100,9 @@ function orderedExactPairs(a: string[], b: string[]): Array<[number, number]> {
  * versions cannot be reconstructed.
  */
 export function reconstructLineHistory(snapshots: VersionSnapshot[]): LineHistoryResult {
-  if (snapshots.length === 0) return { lines: [], versionCount: 0, approximate: false };
+  if (snapshots.length === 0) {
+    return { lines: [], versionCount: 0, oldestVersionTime: null, approximate: false };
+  }
 
   const ordered = [...snapshots].sort((a, b) => a.version.lastModified - b.version.lastModified);
   let previousLines = splitLines(ordered[0].text);
@@ -122,6 +126,7 @@ export function reconstructLineHistory(snapshots: VersionSnapshot[]): LineHistor
   return {
     lines: previousLines.map((text, i) => ({ lineNumber: i + 1, text, version: attribution[i] })),
     versionCount: ordered.length,
+    oldestVersionTime: ordered[0].version.lastModified,
     approximate,
   };
 }
