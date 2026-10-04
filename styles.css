@@ -447,16 +447,17 @@
  * Keep the visual icon small while retaining a comfortable mobile tap target.
  */
 .ncs-mobile-sync-status {
-  width: 22px;
-  min-width: 22px;
-  height: 22px;
-  min-height: 22px;
-  flex: 0 0 22px;
+  width: 20px;
+  min-width: 20px;
+  height: 20px;
+  min-height: 20px;
+  flex: 0 0 20px;
   aspect-ratio: 1 / 1;
   align-self: center;
-  padding: 4px 2px 4px 5px;
-  margin: 0 -3px 0 0;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  margin: 0 -5px 0 0;
   border-radius: 50%;
   box-sizing: border-box;
   opacity: 1;
@@ -465,8 +466,8 @@
 
 .ncs-mobile-sync-status .ncs-mobile-sync-status-icon {
   display: inline-flex;
-  width: 13px;
-  height: 13px;
+  width: 12px;
+  height: 12px;
   align-items: center;
   justify-content: center;
   opacity: 0.62;
@@ -474,8 +475,8 @@
 }
 
 .ncs-mobile-sync-status .ncs-mobile-sync-status-icon > svg {
-  width: 13px;
-  height: 13px;
+  width: 12px;
+  height: 12px;
 }
 
 .ncs-mobile-sync-status.is-syncing .ncs-mobile-sync-status-icon,
@@ -514,7 +515,7 @@
 
 /* A received push gets one very small background acknowledgement; no second icon is introduced. */
 .ncs-mobile-sync-status.is-realtime-activity {
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--interactive-accent) 24%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--interactive-accent) 24%, transparent);
 }
 
 @keyframes ncs-mobile-sync-spin {
