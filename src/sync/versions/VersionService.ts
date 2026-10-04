@@ -48,7 +48,23 @@ export class VersionService {
       }
       return { ...version, isCurrent: false };
     });
-    return marked;
+
+    if (found) return marked;
+
+    // After a restore (and on some Nextcloud backends) the live file is not necessarily returned as
+    // a retained DAV version with the same timestamp. Still expose exactly one Current entry: it is
+    // the real remote file and is read through the normal files endpoint, never restored.
+    return [{
+      versionId: `current-${currentRevision}`,
+      href: '',
+      lastModified: current.lastModified,
+      size: current.size,
+      author: null,
+      label: '',
+      mimeType: '',
+      etag: current.etag,
+      isCurrent: true,
+    }, ...marked];
   }
 
   /** Compare two retained revisions (or one retained revision with current). Read-only. */
@@ -77,33 +93,22 @@ export class VersionService {
    * Lazy by design: no old version body is downloaded until the user opens Line history.
    */
   async lineHistory(
-    client: IWebDAVClient, features: NextcloudFeatures, path: string, listedVersions: FileVersion[],
+    client: IWebDAVClient, features: NextcloudFeatures, path: string,
+    listedVersions: FileVersion[], targetVersion: FileVersion,
   ): Promise<LineHistoryResult> {
     if (!this.deps.isTextEligible(path)) {
       throw new Error('Line history is available for text files only.');
     }
     const fileId = this.requireFileId(features, path);
-    const versions = [...listedVersions];
+    const orderedAll = [...listedVersions].sort((a, b) => a.lastModified - b.lastModified);
+    const targetIndex = orderedAll.findIndex((version) =>
+      version.versionId === targetVersion.versionId && version.isCurrent === targetVersion.isCurrent,
+    );
+    if (targetIndex < 0) throw new Error('Selected version is no longer available.');
 
-    // A current entry should normally be in Nextcloud's collection. If it could not be identified,
-    // append a synthetic current marker so the displayed lines still match the actual current remote
-    // body. Its author is deliberately unknown rather than guessed.
-    if (!versions.some((v) => v.isCurrent)) {
-      const current = await client.statFile(path);
-      versions.push({
-        versionId: current?.lastModified ? `current-${Math.floor(current.lastModified / 1000)}` : 'current',
-        href: '',
-        lastModified: current?.lastModified ?? Date.now(),
-        size: current?.size ?? 0,
-        author: null,
-        label: '',
-        mimeType: '',
-        etag: current?.etag ?? '',
-        isCurrent: true,
-      });
-    }
-
-    const ordered = versions.sort((a, b) => a.lastModified - b.lastModified);
+    // "Line history" for a historical version means provenance as the file looked AT THAT retained
+    // snapshot, so later snapshots/current must not influence attribution.
+    const ordered = orderedAll.slice(0, targetIndex + 1);
     const snapshots: VersionSnapshot[] = [];
     for (const version of ordered) {
       const data = await this.readVersionData(client, path, fileId, version);
