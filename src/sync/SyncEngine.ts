@@ -230,7 +230,11 @@ export class SyncEngine {
       queueRetry: (p) => { this.retryQueue.push(p); },
       logger: opts.logger,
     });
-    this.versions = new VersionService({ localAdapter: opts.localAdapter, stateDB: opts.stateDB });
+    this.versions = new VersionService({
+      localAdapter: opts.localAdapter,
+      stateDB: opts.stateDB,
+      isTextEligible: (path) => isTextEligible(path, this.opts.settings.autoMergeFileTypes),
+    });
     this.deletion = new DeletionService({
       app: opts.app,
       stateDB: opts.stateDB,
@@ -1291,6 +1295,18 @@ export class SyncEngine {
   async listVersions(path: string): Promise<FileVersion[]> {
     const { client, features } = await this.ensureClient();
     return this.versions.listVersions(client, features, path);
+  }
+
+  /** @see VersionService.compareVersion */
+  async compareVersion(path: string, version: FileVersion) {
+    const { client, features } = await this.ensureClient();
+    return this.versions.compareVersion(client, features, path, version);
+  }
+
+  /** @see VersionService.lineHistory */
+  async lineHistory(path: string, versions: FileVersion[]) {
+    const { client, features } = await this.ensureClient();
+    return this.versions.lineHistory(client, features, path, versions);
   }
 
   /** @see VersionService.restoreVersion */
