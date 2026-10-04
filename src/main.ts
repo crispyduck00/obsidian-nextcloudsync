@@ -234,11 +234,33 @@ export default class ObsidianNextcloudsync extends Plugin {
       }));
       this.registerEvent(this.app.vault.on('rename', (file: TAbstractFile, oldPath: string) => {
         if (!watchOn()) return;
-        pendingUploads.delete(oldPath);
+        const hadPendingUpload = pendingUploads.delete(oldPath);
         // tmp → target renames are the tail of the plugin's own atomic writes.
         if (isOwnSyncEvent(oldPath) || isOwnSyncEvent(file.path)) return;
         if (file instanceof TFolder) { void this.syncEngine?.renameSingleFolder(oldPath, file.path); return; }
-        void this.syncEngine?.renameSingleFile(oldPath, file.path);
+
+        const newPath = file.path;
+        // Keep the write-deferral guard attached to the file after a user rename. Otherwise a
+        // pending edit loses its "being edited" protection just because its path changed.
+        const lastEditAt = this.lastLocalEdit.get(oldPath);
+        if (lastEditAt !== undefined) {
+          this.lastLocalEdit.delete(oldPath);
+          this.lastLocalEdit.set(newPath, lastEditAt);
+        }
+
+        const engine = this.syncEngine;
+        if (!engine) return;
+        const renamePromise = engine.renameSingleFile(oldPath, newPath);
+
+        if (hadPendingUpload) {
+          // The local file has already moved, so the old debounced path would now no-op. Reconcile
+          // the current content at the new path only after the remote rename attempt has settled;
+          // this preserves the pending edit without letting its upload race ahead of the MOVE.
+          void renamePromise.then(
+            () => { void engine.syncSingleFile(newPath); },
+            () => undefined,
+          );
+        }
       }));
 
       // Feature 079 (discussion #44): sync when the app comes back to the foreground.
