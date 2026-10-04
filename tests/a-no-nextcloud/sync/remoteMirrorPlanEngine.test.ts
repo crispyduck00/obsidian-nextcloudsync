@@ -33,6 +33,7 @@ function makeEngine(over: {
   const byPath = new Map(localFiles.map((f) => [f.path, f.content]));
   const client = {
     getFiles: over.getFiles ?? jest.fn(async () => [] as RemoteFileInfo[]),
+    getDirectories: jest.fn(async () => []),
     recalcChecksum: over.recalcChecksum ?? jest.fn(async () => null),
   };
   const localAdapter = {

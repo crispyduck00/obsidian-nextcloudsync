@@ -1,4 +1,4 @@
-import { RemoteFileInfo } from '../types';
+import { RemoteDirInfo, RemoteFileInfo } from '../types';
 
 /**
  * Pull mirror (feature 045): pure classification of what a "mirror this device from the remote"
@@ -30,12 +30,16 @@ export interface MirrorPlan {
   downloads: RemoteFileInfo[];
   /** Local-only files to delete (present locally, absent from the remote listing). */
   deleteFiles: string[];
+  /** Remote-only folders to create locally (empty folders included), sorted parent→child. */
+  createDirs: RemoteDirInfo[];
   /** Local-only folders to delete (empty folders included), sorted child→parent. */
   deleteDirs: string[];
   /** Count of remote files already identical locally (skipped, no transfer). */
   skipCount: number;
-  /** The authoritative remote listing (kept for apply + StateDB reconciliation). */
+  /** The authoritative remote file listing (kept for apply + StateDB reconciliation). */
   remoteFiles: RemoteFileInfo[];
+  /** The authoritative remote directory listing, including empty collections. */
+  remoteDirs: RemoteDirInfo[];
 }
 
 /** The outcome of applying a mirror plan. */
@@ -58,6 +62,7 @@ function depth(path: string): number {
  * Build a {@link MirrorPlan} from an authoritative remote listing and the local state.
  *
  * @param remoteFiles  the COMPLETE remote file listing (from a real PROPFIND, no short-circuit)
+ * @param remoteDirs   the COMPLETE remote directory listing (empty collections included)
  * @param localFiles   every local file the mirror may touch (path + content hash)
  * @param localDirs    every local folder the mirror may touch (vault-relative paths)
  * @param isExcluded   predicate for system/user exclusions (isSystemExcluded ∪ excluded folders)
@@ -66,6 +71,7 @@ function depth(path: string): number {
  */
 export function buildMirrorPlan(
   remoteFiles: RemoteFileInfo[],
+  remoteDirs: RemoteDirInfo[],
   localFiles: LocalFileEntry[],
   localDirs: string[],
   isExcluded: (path: string) => boolean,
@@ -79,14 +85,18 @@ export function buildMirrorPlan(
       reason: reason ?? 'Remote listing could not be obtained; mirror aborted (no changes made).',
       downloads: [],
       deleteFiles: [],
+      createDirs: [],
       deleteDirs: [],
       skipCount: 0,
       remoteFiles: [],
+      remoteDirs: [],
     };
   }
 
   const remoteEligible = remoteFiles.filter((r) => !isExcluded(r.path));
+  const remoteDirsEligible = remoteDirs.filter((r) => !isExcluded(r.path));
   const remoteSet = new Set(remoteEligible.map((r) => r.path));
+  const remoteDirSet = new Set(remoteDirsEligible.map((r) => r.path.replace(/\/+$/, '')));
   const localHashByPath = new Map(localFiles.map((f) => [f.path, f.hash]));
 
   const downloads: RemoteFileInfo[] = [];
@@ -108,10 +118,22 @@ export function buildMirrorPlan(
     .map((f) => f.path)
     .filter((p) => !isExcluded(p) && !remoteSet.has(p));
 
-  // Local-only folders → delete. A folder is kept iff some remote file lives under it.
-  const remoteDirPrefixes = remoteEligible.map((r) => r.path);
+  const localDirSet = new Set(localDirs.map((d) => d.replace(/\/+$/, '')));
+
+  // Remote-only folders → create locally. Remote directories are first-class: an empty collection
+  // has no descendant file to reveal its existence, so file paths alone can never mirror it.
+  const createDirs = remoteDirsEligible
+    .filter((d) => d.path && !localDirSet.has(d.path.replace(/\/+$/, '')))
+    .sort((a, b) => depth(a.path) - depth(b.path));
+
+  // Local-only folders → delete. Preserve a directory when the authoritative directory listing
+  // contains it, OR as a conservative fallback when a remote file lives below it.
+  const remoteFilePrefixes = remoteEligible.map((r) => r.path);
   const deleteDirs = localDirs
-    .filter((d) => !isExcluded(d) && !remoteDirPrefixes.some((rp) => rp === d || rp.startsWith(d + '/')))
+    .map((d) => d.replace(/\/+$/, ''))
+    .filter((d) => !isExcluded(d)
+      && !remoteDirSet.has(d)
+      && !remoteFilePrefixes.some((rp) => rp === d || rp.startsWith(d + '/')))
     // child→parent so a parent folder is never removed before its children
     .sort((a, b) => depth(b) - depth(a));
 
@@ -120,8 +142,10 @@ export function buildMirrorPlan(
     reason: null,
     downloads,
     deleteFiles,
+    createDirs,
     deleteDirs,
     skipCount,
     remoteFiles,
+    remoteDirs: remoteDirsEligible,
   };
 }

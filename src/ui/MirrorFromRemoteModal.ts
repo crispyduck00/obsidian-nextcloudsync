@@ -104,7 +104,7 @@ class MirrorFromRemoteModal extends Modal {
   // ── Phase 2: confirmation ──────────────────────────────────────────────────
   private renderConfirm(plan: MirrorPlan): void {
     const deleteCount = plan.deleteFiles.length + plan.deleteDirs.length;
-    if (plan.downloads.length === 0 && deleteCount === 0) {
+    if (plan.downloads.length === 0 && plan.createDirs.length === 0 && deleteCount === 0) {
       this.renderMessage('Already in sync', 'This device already matches the remote — nothing to mirror.');
       return;
     }
@@ -115,6 +115,7 @@ class MirrorFromRemoteModal extends Modal {
     info.createEl('p', { text: 'This will make this device exactly match the remote:' });
     const ul = info.createEl('ul');
     ul.createEl('li', { text: `Download: ${plan.downloads.length} file(s)` });
+    if (plan.createDirs.length > 0) ul.createEl('li', { text: `Create locally: ${plan.createDirs.length} folder(s)` });
     ul.createEl('li', { text: `Delete locally: ${deleteCount} file(s)/folder(s) not on the remote (moved to your Obsidian trash — recoverable)` });
     if (plan.skipCount > 0) ul.createEl('li', { text: `Already in sync: ${plan.skipCount} file(s)` });
     info.createEl('p', { text: 'Unsynced local changes will be discarded. This cannot be undone except from the trash.' });
@@ -128,7 +129,7 @@ class MirrorFromRemoteModal extends Modal {
   private async runApply(): Promise<void> {
     const plan = this.plan;
     if (!plan) return;
-    const total = plan.downloads.length + plan.deleteFiles.length + plan.deleteDirs.length;
+    const total = plan.createDirs.length + plan.downloads.length + plan.deleteFiles.length + plan.deleteDirs.length;
 
     const { contentEl } = this;
     contentEl.empty();

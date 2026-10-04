@@ -63,7 +63,7 @@ function makeEngine(opts: { tracked: FileState[]; localFiles: string[] }) {
 }
 
 const plan = (over: Partial<MirrorPlan>): MirrorPlan => ({
-  ok: true, reason: null, downloads: [], deleteFiles: [], deleteDirs: [], skipCount: 0, remoteFiles: [], ...over,
+  ok: true, reason: null, downloads: [], deleteFiles: [], createDirs: [], deleteDirs: [], skipCount: 0, remoteFiles: [], remoteDirs: [], ...over,
 });
 
 describe('[SPEC:MIR-3] SyncEngine.applyRemoteMirror — convergence & breaker bypass', () => {
