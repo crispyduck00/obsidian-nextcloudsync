@@ -73,8 +73,7 @@ export class VersionHistoryModal extends Modal {
     const oldest = Math.min(...byTime.map((v) => v.lastModified));
     const list = contentEl.createDiv({ cls: 'ncs-version-list' });
 
-    for (let index = 0; index < ordered.length; index++) {
-      const version = ordered[index];
+    for (const version of ordered) {
       const previous = byTime.find((candidate) =>
         !candidate.isCurrent && candidate.lastModified < version.lastModified,
       );
