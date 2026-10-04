@@ -1302,10 +1302,12 @@ export class SyncEngine {
     return this.versions.listVersions(client, features, path);
   }
 
-  /** @see VersionService.compareVersion */
-  async compareVersion(path: string, version: FileVersion): Promise<VersionComparison> {
+  /** @see VersionService.compareVersions */
+  async compareVersions(
+    path: string, before: FileVersion, after: FileVersion,
+  ): Promise<VersionComparison> {
     const { client, features } = await this.ensureClient();
-    return this.versions.compareVersion(client, features, path, version);
+    return this.versions.compareVersions(client, features, path, before, after);
   }
 
   /** @see VersionService.lineHistory */
