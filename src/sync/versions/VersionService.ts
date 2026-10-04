@@ -18,9 +18,10 @@ export interface VersionDeps {
 }
 
 export interface VersionComparison {
-  version: FileVersion;
-  versionText: string;
-  currentText: string;
+  before: FileVersion;
+  after: FileVersion;
+  beforeText: string;
+  afterText: string;
 }
 
 export class VersionService {
@@ -50,22 +51,24 @@ export class VersionService {
     return marked;
   }
 
-  /** Load a retained version and compare it to the current REMOTE file. Read-only. */
-  async compareVersion(
-    client: IWebDAVClient, features: NextcloudFeatures, path: string, version: FileVersion,
+  /** Compare two retained revisions (or one retained revision with current). Read-only. */
+  async compareVersions(
+    client: IWebDAVClient, features: NextcloudFeatures, path: string,
+    before: FileVersion, after: FileVersion,
   ): Promise<VersionComparison> {
     if (!this.deps.isTextEligible(path)) {
       throw new Error('Version compare is available for text files only.');
     }
     const fileId = this.requireFileId(features, path);
-    const [versionData, currentData] = await Promise.all([
-      this.readVersionData(client, path, fileId, version),
-      client.downloadFile(path),
+    const [beforeData, afterData] = await Promise.all([
+      this.readVersionData(client, path, fileId, before),
+      this.readVersionData(client, path, fileId, after),
     ]);
     return {
-      version,
-      versionText: new TextDecoder().decode(versionData),
-      currentText: new TextDecoder().decode(currentData),
+      before,
+      after,
+      beforeText: new TextDecoder().decode(beforeData),
+      afterText: new TextDecoder().decode(afterData),
     };
   }
 
