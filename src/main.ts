@@ -20,6 +20,9 @@ import { hostToken, LogPlatform } from './util/hostToken';
 import { migrateConfigSyncCategories, migrateBookmarksToConfigSync, migrateStartupToggleToDelay, migrateConflictSettingsToStrategies, migrateFrontmatterScalarPolicyToStrategy, migrateMarkdownAutoMergeType, pruneObsoleteSettings, resetDebugIdentityFields, applyMobileFirstRunDefaults, isWatchModeActive } from './util/settingsMigration';
 import { debugLogPath, isActiveOwnLog } from './util/logPaths';
 import { autoNetworkConcurrency } from './util/platformDefaults';
+import { NextcloudPushClient } from './network/push/NextcloudPushClient';
+import { PushSyncScheduler } from './sync/push/PushSyncScheduler';
+import { ClientPushStatusItem } from './ui/ClientPushStatusItem';
 
 const MIN_OBSIDIAN_VERSION = '1.13.0';
 
@@ -69,6 +72,12 @@ export default class ObsidianNextcloudsync extends Plugin {
    * edited?" always answers no, exactly when the answer matters. Timestamps outlive the flush.
    */
   private readonly lastLocalEdit = new Map<string, number>();
+  /** Nextcloud Client Push transport (notify_push), when the server advertises it. */
+  private pushClient?: NextcloudPushClient;
+  /** Coalesces best-effort push hints into ordinary reconciliations. */
+  private pushSyncScheduler?: PushSyncScheduler;
+  /** Desktop-only fixed-width Client Push indicator. Mobile stays quiet by design. */
+  private pushStatusItem?: ClientPushStatusItem;
 
   async onload(): Promise<void> {
     // Obsidian version check
@@ -117,6 +126,40 @@ export default class ObsidianNextcloudsync extends Plugin {
       callback: async () => {
         await this.runSyncNow();
       },
+    });
+
+    this.addCommand({
+      id: 'show-client-push-status',
+      name: 'Show client push status',
+      callback: () => {
+        new Notice(this.clientPushStatusText(), 10_000);
+      },
+    });
+
+    // Client Push sockets can be suspended while a mobile WebView is in the background. Reconnect
+    // immediately when Obsidian becomes visible again or the browser reports network recovery.
+    this.registerDomEvent(document, 'visibilitychange', () => {
+      if (document.hidden) return;
+      // Mobile WebViews may miss online/offline events while suspended. Refresh the network hint on
+      // foreground and then force an immediate reconnect attempt when connectivity is available.
+      const online = typeof navigator === 'undefined' || navigator.onLine !== false;
+      const hadPushSession = (this.pushClient?.getStatus().lastConnectedAt ?? null) !== null;
+      this.pushClient?.setNetworkOnline(online);
+      if (online) {
+        // The socket can remain logically OPEN while the WebView was actually suspended, so catch-up
+        // must not depend on seeing a reconnect transition. Only do this after at least one real push
+        // session; initial connection/startup semantics stay owned by the existing startup sync.
+        if (hadPushSession) this.pushSyncScheduler?.requestRemoteCatchUp('app became visible');
+        void this.pushClient?.ensureConnected(true);
+      }
+    });
+    this.registerDomEvent(window, 'offline', () => {
+      this.pushClient?.setNetworkOnline(false);
+    });
+    this.registerDomEvent(window, 'online', () => {
+      const hadPushSession = (this.pushClient?.getStatus().lastConnectedAt ?? null) !== null;
+      this.pushClient?.setNetworkOnline(true);
+      if (hadPushSession) this.pushSyncScheduler?.requestRemoteCatchUp('network returned');
     });
 
     // Ribbon entry point for the same manual sync (feature 060 / issue #19). One click on desktop,
@@ -509,6 +552,7 @@ export default class ObsidianNextcloudsync extends Plugin {
    * StateDB concurrently.
    */
   private teardownSyncEngine(): void {
+    this.teardownClientPush();
     this.syncEngine?.stopAutoSync();
     // Two-Phase Termination: signal an in-flight sync to stop pulling new work (phase 1), then flush
     // any pending debounced state save so a coalesced watch-mode update is not lost on teardown (phase 2).
@@ -671,6 +715,11 @@ export default class ObsidianNextcloudsync extends Plugin {
       },
     });
 
+    // Progressive enhancement: if the server advertises Nextcloud Client Push, keep a WebSocket
+    // open and use file IDs only to select an existing sync path. The vault-root scope gate filters
+    // unrelated account activity; ambiguous events still fall back to the ordinary full sync.
+    this.initClientPush(password);
+
     // Periodic auto-sync is desktop-only (mobile OS suspends background timers).
     this.applyAutoSyncInterval();
 
@@ -680,6 +729,123 @@ export default class ObsidianNextcloudsync extends Plugin {
       const delayMs = this.settings.startupSyncDelaySeconds * 1000;
       window.setTimeout(() => { void this.syncEngine?.syncManual(); }, delayMs);
     }
+  }
+
+  private initClientPush(password: string | null): void {
+    if (!this.settings.useClientPush || !password || !this.syncEngine) return;
+
+    if (!Platform.isMobile && !this.pushStatusItem) {
+      this.pushStatusItem = new ClientPushStatusItem(this.addStatusBarItem(), () => {
+        new Notice(this.clientPushStatusText(), 10_000);
+      });
+    }
+
+    const scheduler = new PushSyncScheduler({
+      isSyncRunning: () => this.syncEngine?.isSyncRunning() ?? false,
+      shouldSync: async () => this.syncEngine?.shouldReconcileClientPush() ?? true,
+      onReconciliationTriggered: () => this.pushStatusItem?.pulse(),
+      reconcileFileIds: async (batch) => {
+        const engine = this.syncEngine;
+        return engine ? engine.reconcileRemoteFileIds(batch) : 'full-sync';
+      },
+      sync: async () => {
+        const engine = this.syncEngine;
+        if (!engine) return 'retry';
+        return (await engine.syncForClientPush()) ? 'completed' : 'retry';
+      },
+      log: (message) => { void this.logger.log(`client-push: ${message}`); },
+    });
+    this.pushSyncScheduler = scheduler;
+
+    let hadConnectedPushSession = false;
+    let previousPushState: string | null = null;
+    const client = new NextcloudPushClient({
+      serverUrl: this.settings.serverUrl,
+      username: this.settings.username,
+      password,
+      networkTimeoutMs: (this.settings.networkTimeoutSeconds ?? 0) * 1000,
+      endpointOverride: this.settings.clientPushUrlOverride,
+      onFileNotification: (notification) => scheduler.notify(notification),
+      onStatusChange: (status) => {
+        this.pushStatusItem?.setStatus(status);
+
+        // A reconnect closes another possible notification gap on BOTH desktop and mobile. The first
+        // successful connection is excluded so Client Push does not invent a second startup-sync path.
+        // Status is also emitted for ordinary notifications, so trigger only on an actual transition
+        // into the connected state, not merely whenever status.state happens to be "connected".
+        const enteredConnected = status.state === 'connected' && previousPushState !== 'connected';
+        if (enteredConnected) {
+          if (hadConnectedPushSession) scheduler.requestRemoteCatchUp('WebSocket reconnected');
+          hadConnectedPushSession = true;
+        }
+        previousPushState = status.state;
+      },
+      log: (message) => { void this.logger.log(`client-push: ${message}`); },
+    });
+    this.pushClient = client;
+    this.pushStatusItem?.setStatus(client.getStatus());
+    void client.start();
+  }
+
+  private teardownClientPush(): void {
+    this.pushSyncScheduler?.stop();
+    this.pushSyncScheduler = undefined;
+    this.pushClient?.stop();
+    this.pushClient = undefined;
+    this.pushStatusItem?.destroy();
+    this.pushStatusItem = undefined;
+  }
+
+  /** Apply the Client Push settings immediately without rebuilding the sync engine. */
+  async applyClientPushSettings(): Promise<void> {
+    this.teardownClientPush();
+    if (!this.settings.useClientPush || !this.syncEngine) return;
+    const { loadAppPassword } = await import('./settings/SettingTab');
+    const password = loadAppPassword(this.app, this.settings.passwordSecretId);
+    this.initClientPush(password);
+  }
+
+  /** Compact read-only value used by the settings row. */
+  clientPushSettingsStatus(): string {
+    if (!this.settings.useClientPush) return 'Disabled';
+    const push = this.pushClient?.getStatus();
+    if (!push) return 'Enabled · not initialized';
+    const endpoint = push.endpoint ?? (this.settings.clientPushUrlOverride.trim() || 'auto-detect');
+    const source = push.endpointSource === 'override' ? 'override' : 'auto';
+    const suffix = push.reason && push.state !== 'connected' ? ` · ${push.reason}` : '';
+    return `${push.state} · ${source} · ${endpoint}${suffix}`;
+  }
+
+  private clientPushStatusText(): string {
+    const push = this.pushClient?.getStatus();
+    const scheduler = this.pushSyncScheduler?.getStatus();
+    if (!this.settings.useClientPush) return 'Client push is disabled in settings.';
+    if (!push) return 'Client push is enabled but not initialized. Configure the server and sign in first.';
+
+    const age = (at: number | null | undefined): string => {
+      if (!at) return 'never';
+      const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
+      return `${seconds}s ago`;
+    };
+
+    const retry = push.nextRetryAt
+      ? `${Math.max(0, Math.ceil((push.nextRetryAt - Date.now()) / 1000))}s (${new Date(push.nextRetryAt).toLocaleTimeString()})`
+      : 'none';
+
+    return [
+      `Client push: ${push.state}`,
+      `Authenticated: ${push.authenticated ? 'yes' : 'no'}`,
+      `Endpoint: ${push.endpoint ?? 'not advertised'}`,
+      `Endpoint source: ${push.endpointSource === 'override' ? 'settings override' : push.endpointSource === 'auto' ? 'auto-detected' : 'not resolved'}`,
+      `Endpoint override: ${this.settings.clientPushUrlOverride.trim() || 'none (auto-detect)'}`,
+      `Reason: ${push.reason ?? 'none'}`,
+      `Last connected: ${age(push.lastConnectedAt)}`,
+      `Next retry: ${retry}`,
+      `Last message: ${push.lastMessage || 'none'}`,
+      `Last file notification: ${age(push.lastNotificationAt)}`,
+      `Pending reconciliation: ${scheduler?.pending ? 'yes' : 'no'}`,
+      `Last push-triggered sync: ${age(scheduler?.lastTriggeredSyncAt)}`,
+    ].join('\n');
   }
 
   private compareVersions(a: string, b: string): number {

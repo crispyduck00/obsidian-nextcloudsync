@@ -51,6 +51,8 @@ export interface SettingDefinitionsHost {
   vaultName: string;
   /** Effective WebDAV target (Server URL + vault folder), for the read-only row. */
   syncTargetUrl(): string;
+  /** Current Client Push runtime state, including the detected/overridden endpoint when known. */
+  clientPushStatusSummary(): string;
 
   runSyncNow(): unknown;
   runRemoteMirror(): unknown;
@@ -139,7 +141,7 @@ const CONFLICT_STRATEGY_OPTIONS = {
  *
  * Called on every render (obsidian.d.ts:6577-6583), which is what lets the row set be dynamic:
  * one row per excluded folder, and two config-category rows only while the master toggle is on.
- * The count is therefore `27 + excludedFolders.length + (syncConfigFolder ? 2 : 0)` — not a
+ * The count is therefore `30 + excludedFolders.length + (syncConfigFolder ? 2 : 0)` — not a
  * constant, a fact that three separate attempts to count the old implementation got wrong.
  */
 export function buildSettingDefinitions(host: SettingDefinitionsHost): SettingDefinitionItem[] {
@@ -286,6 +288,29 @@ function nextcloudGroup(host: SettingDefinitionsHost): SettingDefinitionGroup {
       desc: 'Read-only preview of the effective remote path (Server URL + vault folder). Confirm this is where you expect the vault to sync.',
       aliases: ['effective url', 'remote path', 'destination'],
       render: (setting: Setting) => host.renderReadOnly(setting, host.syncTargetUrl(), 'ncs-break-all'),
+    } as SettingGroupItem,
+    {
+      name: 'Use Nextcloud client push',
+      desc: 'Use Nextcloud Client Push (notify_push) as a best-effort remote-change trigger for near-realtime synchronization. The Client Push app must be installed and configured on the Nextcloud server. Normal startup, scheduled, resume and manual sync continue to work when push is unavailable.',
+      aliases: ['notify_push', 'push', 'realtime', 'websocket', 'client push'],
+      control: { type: 'toggle', key: 'useClientPush' },
+    },
+    {
+      name: 'Client Push URL override',
+      desc: 'Optional WebSocket URL override. Leave blank to auto-detect the endpoint from Nextcloud capabilities. Use only when a reverse proxy makes Nextcloud advertise an incorrect push URL.',
+      aliases: ['push url', 'websocket url', 'notify_push url', 'proxy'],
+      control: {
+        type: 'text',
+        key: 'clientPushUrlOverride',
+        placeholder: 'Leave blank to auto-detect',
+        disabled: () => !host.settings.useClientPush,
+      },
+    },
+    {
+      name: 'Client Push status',
+      desc: 'Read-only runtime state of the Client Push connection. Re-open settings or use the command palette for the most recent diagnostics.',
+      aliases: ['push status', 'connected', 'endpoint'],
+      render: (setting: Setting) => host.renderReadOnly(setting, host.clientPushStatusSummary(), 'ncs-break-all'),
     } as SettingGroupItem,
   ]);
 }

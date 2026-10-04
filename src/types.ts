@@ -99,6 +99,10 @@ export interface DavSyncSettings {
   maxFileSizeMB: number;
   /** Detect local Markdown edits and sync immediately (watch mode). Disabled on mobile. */
   watchOnChangeEnabled: boolean;
+  /** Use Nextcloud Client Push (notify_push) as a best-effort remote-change trigger. */
+  useClientPush: boolean;
+  /** Optional WebSocket endpoint override. Empty = auto-detect from Nextcloud capabilities. */
+  clientPushUrlOverride: string;
   /**
    * Startup sync delay in seconds, 0–10. 0 = no startup sync; 1–10 = wait that long after startup
    * before syncing. Default 1 (enabled). Folds the former `syncOnStartupEnabled` toggle (feature 034
@@ -206,6 +210,8 @@ export const DEFAULT_SETTINGS: DavSyncSettings = {
   deviceId: '',
   maxFileSizeMB: 0, // 0 = unlimited (desktop default). Mobile gets a safe cap in loadSettings().
   watchOnChangeEnabled: true, // Mobile first-run: false (applied in loadSettings()).
+  useClientPush: false,
+  clientPushUrlOverride: '',
   startupSyncDelaySeconds: 1, // 0 = no startup sync; default 1 = enabled with a 1 s delay.
   networkConcurrency: 16, // First-run: overridden by autoNetworkConcurrency() in loadSettings(); persisted value is kept on subsequent loads.
   // Desktop default OFF; mobile's first run flips it ON in loadSettings() (metered data).
