@@ -308,7 +308,12 @@ describe('VersionService', () => {
     };
     client.listVersions = async () => [retained];
     client.statFile = async () => ({
-      path: 'note.md', size: 7, lastModified: 200_000, etag: '"current-etag"',
+      path: 'note.md',
+      fileId: 'fid-7',
+      checksum: null,
+      size: 7,
+      lastModified: 200_000,
+      etag: '"current-etag"',
     });
 
     const listed = await service.listVersions(client, NEXTCLOUD, 'note.md');
