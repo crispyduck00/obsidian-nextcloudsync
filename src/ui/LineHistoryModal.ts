@@ -79,12 +79,7 @@ export class LineHistoryModal extends Modal {
       return;
     }
 
-    const versionsByAge = new Map<string, number>();
-    for (const line of result.lines) {
-      const key = provenanceKey(line.version);
-      if (!versionsByAge.has(key)) versionsByAge.set(key, line.version.lastModified);
-    }
-    const oldestTime = Math.min(...versionsByAge.values());
+    const oldestTime = result.oldestVersionTime;
 
     const list = contentEl.createDiv({ cls: 'ncs-line-history-list' });
     let group: HTMLElement | null = null;
@@ -100,12 +95,14 @@ export class LineHistoryModal extends Modal {
     }
   }
 
-  private renderGroupHeader(group: HTMLElement, version: FileVersion, oldestTime: number): void {
+  private renderGroupHeader(group: HTMLElement, version: FileVersion, oldestTime: number | null): void {
     const header = group.createDiv({ cls: 'ncs-line-history-group-header' });
     const date = new Date(version.lastModified).toLocaleString();
     const prefix = version.isCurrent
       ? 'Current version'
-      : version.lastModified === oldestTime ? '≤ Oldest available version' : 'Available version';
+      : oldestTime != null && version.lastModified === oldestTime
+        ? '≤ Oldest available version'
+        : 'Available version';
     const label = version.label ? ` · ${version.label}` : '';
     header.createDiv({ text: `${prefix}${label}`, cls: 'ncs-line-history-version' });
     header.createDiv({
