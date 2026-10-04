@@ -51,6 +51,7 @@ function makeEngine(opts: { tracked: FileState[]; localFiles: string[] }) {
     deleteDir: jest.fn(),
     setRemoteRootEtag,
     setSyncToken,
+    save: jest.fn(async () => undefined),
   };
   const statusBar = {
     setStatus: jest.fn(), setProgress: jest.fn(), setSyncComplete: jest.fn(), setErrorCount: jest.fn(),

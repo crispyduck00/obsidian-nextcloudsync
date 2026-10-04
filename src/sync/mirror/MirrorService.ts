@@ -42,7 +42,7 @@ export interface MirrorDeps {
   localAdapter: Pick<LocalAdapter, 'stat' | 'readBinary'>;
   stateDB: Pick<StateDB,
     'getFile' | 'setFile' | 'getAllFiles' | 'deleteFile' | 'deleteDir'
-    | 'setRemoteRootEtag' | 'setSyncToken'>;
+    | 'setRemoteRootEtag' | 'setSyncToken' | 'save'>;
   statusBar: IStatusBar;
   journal: SyncJournal;
   mergeBase: MergeBaseRecorder;
@@ -222,6 +222,12 @@ export class MirrorService {
     // 4c. Force a real full scan next sync (never short-circuit) so convergence is genuinely verified.
     this.deps.stateDB.setRemoteRootEtag(null);
     this.deps.stateDB.setSyncToken('');
+
+    // Mirror mutates files/directories and the tracking index outside the ordinary full-sync
+    // session. Persist that converged state before reporting success, otherwise an immediate app
+    // reload can resurrect stale tracking and reinterpret mirror-applied local deletions as user
+    // deletions on the next sync.
+    await this.deps.stateDB.save();
 
     // Close the progress surface with a result — exactly like a normal sync. On mobile this replaces
     // the "🔄 Syncing…" toast with the outcome (and auto-dismisses); on desktop it updates the bar.

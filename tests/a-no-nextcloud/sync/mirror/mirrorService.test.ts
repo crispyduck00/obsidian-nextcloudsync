@@ -45,6 +45,7 @@ function build(over: Partial<MirrorDeps> = {}, tracked: FileState[] = []) {
     status: [] as string[],
     progress: [] as Array<[number, number]>,
     complete: [] as Array<number[]>,
+    saves: 0,
   };
   let processed = 0;
   let total = 0;
@@ -70,6 +71,7 @@ function build(over: Partial<MirrorDeps> = {}, tracked: FileState[] = []) {
       deleteDir: (p: string) => { calls.deleteDir.push(p); },
       setRemoteRootEtag: () => { /* noop */ },
       setSyncToken: () => { /* noop */ },
+      save: async () => { calls.saves++; },
     } as unknown as MirrorDeps['stateDB'],
     statusBar: {
       setStatus: (s: string) => { calls.status.push(s); },
@@ -237,6 +239,13 @@ describe('MirrorService.applyRemoteMirror — converging the state DB', () => {
     }));
     expect(calls.deleteFile).toEqual([]);            // not dropped
     expect(calls.setFile).toEqual(['a.md']);          // not tracked
+  });
+
+  it('persists the converged StateDB before reporting success', async () => {
+    const { mirror, client, calls } = build();
+    await mirror.applyRemoteMirror(client, plan());
+    expect(calls.saves).toBe(1);
+    expect(calls.complete).toHaveLength(1);
   });
 
   it('forces a real full scan next sync', async () => {
