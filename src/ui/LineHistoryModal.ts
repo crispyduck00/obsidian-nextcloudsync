@@ -1,9 +1,10 @@
 import { App, Modal, Notice } from 'obsidian';
 import { FileVersion } from '../types';
 import { LineHistoryLine, LineHistoryResult } from '../sync/versions/lineHistory';
+import { confirmModal } from './ConfirmModal';
 
 function authorLabel(version: FileVersion, currentUserId: string): string {
-  if (!version.author) return 'Unknown';
+  if (!version.author) return 'Unavailable';
   return version.author === currentUserId ? 'You' : version.author;
 }
 
@@ -31,7 +32,9 @@ export class LineHistoryModal extends Modal {
     app: App,
     private readonly filePath: string,
     private readonly currentUserId: string,
+    private readonly targetVersion: FileVersion,
     private readonly loadHistory: () => Promise<LineHistoryResult>,
+    private readonly onRestore?: () => Promise<void>,
   ) {
     super(app);
   }
@@ -45,6 +48,28 @@ export class LineHistoryModal extends Modal {
 
   onClose(): void {
     this.contentEl.empty();
+  }
+
+  private async restoreSelected(): Promise<void> {
+    if (this.targetVersion.isCurrent || !this.onRestore) return;
+    const date = new Date(this.targetVersion.lastModified).toLocaleString();
+    const confirmed = await confirmModal(this.app, {
+      title: 'Restore version',
+      message:
+        `Restore "${this.filePath}" to this version from ${date}? ` +
+        'Unsaved local changes to this file will be overwritten.',
+      cta: 'Restore',
+      destructive: true,
+    });
+    if (!confirmed) return;
+
+    try {
+      await this.onRestore();
+      new Notice(`✅ Restored ${this.filePath} (${date})`, 5000);
+      this.close();
+    } catch (err) {
+      new Notice(`❌ Restore failed: ${(err as Error).message}`, 6000);
+    }
   }
 
   private renderLoading(): void {
@@ -72,6 +97,13 @@ export class LineHistoryModal extends Modal {
 
     const controls = contentEl.createDiv({ cls: 'ncs-version-view-controls' });
     const wrapButton = controls.createEl('button', { text: 'Wrap lines: on' });
+    if (!this.targetVersion.isCurrent && this.onRestore) {
+      const restoreButton = controls.createEl('button', {
+        text: 'Restore this version',
+        cls: 'mod-warning',
+      });
+      restoreButton.addEventListener('click', () => void this.restoreSelected());
+    }
 
     const note = contentEl.createDiv({ cls: 'ncs-line-history-note' });
     note.createEl('strong', { text: 'Based on available Nextcloud versions. ' });
