@@ -468,11 +468,11 @@ export default class ObsidianNextcloudsync extends Plugin {
           this.settings.username,
           () => engine.compareVersions(file.path, before, after),
         ).open(),
-        () => new LineHistoryModal(
+        (version) => new LineHistoryModal(
           this.app,
           file.path,
           this.settings.username,
-          () => engine.lineHistory(file.path, versions),
+          () => engine.lineHistory(file.path, versions, version),
         ).open(),
         (version) => engine.restoreVersion(file.path, version),
       ).open();
