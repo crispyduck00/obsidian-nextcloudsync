@@ -1,4 +1,5 @@
 import { requestUrl } from 'obsidian';
+import { DOMParser as XmlDomParser } from '@xmldom/xmldom';
 import { NextcloudClient } from '../../../src/network/NextcloudClient';
 import { DEFAULT_SETTINGS, DavSyncSettings, FeatureUnsupportedError, FileVersion } from '../../../src/types';
 
@@ -20,6 +21,11 @@ function makeClient(): NextcloudClient {
 }
 
 describe('NextcloudClient versions', () => {
+  beforeAll(() => {
+    (globalThis as unknown as { DOMParser: typeof DOMParser }).DOMParser =
+      XmlDomParser as unknown as typeof DOMParser;
+  });
+
   beforeEach(() => mockRequestUrl.mockReset());
 
   it('throws FeatureUnsupportedError when fileId is empty', async () => {
