@@ -28,6 +28,7 @@ describe('retained Nextcloud line history', () => {
       ['current', '3'],
     ]);
     expect(result.versionCount).toBe(3);
+    expect(result.oldestVersionTime).toBe(1000);
     expect(result.approximate).toBe(false);
   });
 
