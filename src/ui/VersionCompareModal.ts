@@ -3,9 +3,10 @@ import { FileVersion } from '../types';
 import { VersionComparison } from '../sync/versions/VersionService';
 import { renderDiffSections } from './diffRender';
 import { renderVersionUnifiedDiff } from './versionUnifiedDiff';
+import { confirmModal } from './ConfirmModal';
 
 function authorLabel(version: FileVersion, currentUserId: string): string {
-  if (!version.author) return 'Unknown author';
+  if (!version.author) return 'Author unavailable';
   return version.author === currentUserId ? 'You' : version.author;
 }
 
@@ -21,7 +22,9 @@ export class VersionCompareModal extends Modal {
     private readonly before: FileVersion,
     private readonly after: FileVersion,
     private readonly currentUserId: string,
+    private readonly restoreTarget: FileVersion | null,
     private readonly loadComparison: () => Promise<VersionComparison>,
+    private readonly onRestore?: () => Promise<void>,
   ) {
     super(app);
   }
@@ -35,6 +38,28 @@ export class VersionCompareModal extends Modal {
 
   onClose(): void {
     this.contentEl.empty();
+  }
+
+  private async restoreSelected(): Promise<void> {
+    if (!this.restoreTarget || !this.onRestore) return;
+    const date = new Date(this.restoreTarget.lastModified).toLocaleString();
+    const confirmed = await confirmModal(this.app, {
+      title: 'Restore version',
+      message:
+        `Restore "${this.filePath}" to the selected version from ${date}? ` +
+        'Unsaved local changes to this file will be overwritten.',
+      cta: 'Restore',
+      destructive: true,
+    });
+    if (!confirmed) return;
+
+    try {
+      await this.onRestore();
+      new Notice(`✅ Restored ${this.filePath} (${date})`, 5000);
+      this.close();
+    } catch (err) {
+      new Notice(`❌ Restore failed: ${(err as Error).message}`, 6000);
+    }
   }
 
   private renderLoading(): void {
@@ -57,6 +82,13 @@ export class VersionCompareModal extends Modal {
 
       const controls = this.contentEl.createDiv({ cls: 'ncs-version-view-controls' });
       const wrapButton = controls.createEl('button', { text: 'Wrap lines: on' });
+      if (this.restoreTarget && this.onRestore) {
+        const restoreButton = controls.createEl('button', {
+          text: 'Restore selected version',
+          cls: 'mod-warning',
+        });
+        restoreButton.addEventListener('click', () => void this.restoreSelected());
+      }
 
       const headers = this.contentEl.createDiv({ cls: 'ncs-diff-headers' });
       for (const label of [versionLabel(result.before), versionLabel(result.after)]) {
