@@ -8,11 +8,17 @@ function authorLabel(version: FileVersion, currentUserId: string): string {
   return version.author === currentUserId ? 'You' : version.author;
 }
 
+function versionLabel(version: FileVersion): string {
+  if (version.isCurrent) return 'Current';
+  return version.label || new Date(version.lastModified).toLocaleString();
+}
+
 export class VersionCompareModal extends Modal {
   constructor(
     app: App,
     private readonly filePath: string,
-    private readonly version: FileVersion,
+    private readonly before: FileVersion,
+    private readonly after: FileVersion,
     private readonly currentUserId: string,
     private readonly loadComparison: () => Promise<VersionComparison>,
   ) {
@@ -21,7 +27,7 @@ export class VersionCompareModal extends Modal {
 
   onOpen(): void {
     this.modalEl.addClass('ncs-diff-modal');
-    this.setTitle('Compare version');
+    this.setTitle('Compare versions');
     this.renderLoading();
     void this.load();
   }
@@ -33,29 +39,30 @@ export class VersionCompareModal extends Modal {
   private renderLoading(): void {
     this.contentEl.empty();
     this.contentEl.createEl('p', { text: this.filePath, cls: 'setting-item-description' });
-    this.contentEl.createEl('p', { text: 'Loading version and current file…', cls: 'setting-item-description' });
+    this.contentEl.createEl('p', { text: 'Loading versions…', cls: 'setting-item-description' });
   }
 
   private async load(): Promise<void> {
     try {
       const result = await this.loadComparison();
-      const date = new Date(this.version.lastModified).toLocaleString();
       this.contentEl.empty();
       this.contentEl.createEl('p', { text: this.filePath, cls: 'setting-item-description' });
       this.contentEl.createEl('p', {
-        text: `${authorLabel(this.version, this.currentUserId)} · ${date} → Current remote version`,
+        text:
+          `${authorLabel(result.before, this.currentUserId)} · ${new Date(result.before.lastModified).toLocaleString()} ` +
+          `→ ${authorLabel(result.after, this.currentUserId)} · ${new Date(result.after.lastModified).toLocaleString()}`,
         cls: 'setting-item-description',
       });
 
       const headers = this.contentEl.createDiv({ cls: 'ncs-diff-headers' });
-      for (const label of ['Selected version', 'Current']) {
+      for (const label of [versionLabel(result.before), versionLabel(result.after)]) {
         headers.createDiv({ cls: 'ncs-diff-gutter' });
         headers.createDiv({ cls: 'ncs-diff-marker' });
         headers.createDiv({ text: label, cls: 'ncs-diff-header-cell' });
       }
 
       const scrollEl = this.contentEl.createDiv({ cls: 'ncs-diff-scroll' });
-      const firstChanged = renderDiffSections(scrollEl, result.versionText, result.currentText);
+      const firstChanged = renderDiffSections(scrollEl, result.beforeText, result.afterText);
       if (firstChanged) {
         window.requestAnimationFrame(() => firstChanged.scrollIntoView({ block: 'center' }));
       }
