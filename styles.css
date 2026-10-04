@@ -454,8 +454,9 @@
   flex: 0 0 22px;
   aspect-ratio: 1 / 1;
   align-self: center;
-  padding: 4px;
+  padding: 4px 2px 4px 5px;
   margin: 0 -3px 0 0;
+  justify-content: flex-end;
   border-radius: 50%;
   box-sizing: border-box;
   opacity: 1;
@@ -464,8 +465,8 @@
 
 .ncs-mobile-sync-status .ncs-mobile-sync-status-icon {
   display: inline-flex;
-  width: 14px;
-  height: 14px;
+  width: 13px;
+  height: 13px;
   align-items: center;
   justify-content: center;
   opacity: 0.62;
@@ -473,8 +474,8 @@
 }
 
 .ncs-mobile-sync-status .ncs-mobile-sync-status-icon > svg {
-  width: 14px;
-  height: 14px;
+  width: 13px;
+  height: 13px;
 }
 
 .ncs-mobile-sync-status.is-syncing .ncs-mobile-sync-status-icon,
