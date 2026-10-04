@@ -70,6 +70,9 @@ export class LineHistoryModal extends Modal {
     contentEl.empty();
     contentEl.createEl('p', { text: this.filePath, cls: 'setting-item-description' });
 
+    const controls = contentEl.createDiv({ cls: 'ncs-version-view-controls' });
+    const wrapButton = controls.createEl('button', { text: 'Wrap lines: on' });
+
     const note = contentEl.createDiv({ cls: 'ncs-line-history-note' });
     note.createEl('strong', { text: 'Based on available Nextcloud versions. ' });
     note.createSpan({
@@ -94,6 +97,17 @@ export class LineHistoryModal extends Modal {
     }
 
     const list = contentEl.createDiv({ cls: 'ncs-blame-list' });
+    let wrapped = true;
+    const applyWrap = () => {
+      list.toggleClass('is-nowrap', !wrapped);
+      wrapButton.setText(`Wrap lines: ${wrapped ? 'on' : 'off'}`);
+    };
+    wrapButton.addEventListener('click', () => {
+      wrapped = !wrapped;
+      applyWrap();
+    });
+    applyWrap();
+
     let previousKey = '';
     for (const line of result.lines) {
       const key = provenanceKey(line.version);
