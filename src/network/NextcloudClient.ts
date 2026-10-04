@@ -582,7 +582,18 @@ export class NextcloudClient implements IWebDAVClient {
         'Content-Type': 'application/xml; charset=utf-8',
         ...NO_CACHE_HEADERS,
       },
-      body: `<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:getlastmodified/><d:getcontentlength/></d:prop></d:propfind>`,
+      body: `<?xml version="1.0"?>
+<d:propfind xmlns:d="DAV:" xmlns:nc="http://nextcloud.org/ns">
+  <d:prop>
+    <d:getlastmodified/>
+    <d:getcontentlength/>
+    <d:getcontenttype/>
+    <d:getetag/>
+    <nc:version-label/>
+    <nc:version-author/>
+    <nc:has-preview/>
+  </d:prop>
+</d:propfind>`,
       throw: false,
     });
     if (res.status === 404) return [];
@@ -637,7 +648,19 @@ export class NextcloudClient implements IWebDAVClient {
       const lastModifiedStr = prop?.getElementsByTagNameNS('DAV:', 'getlastmodified')[0]?.textContent ?? '';
       const lastModified = lastModifiedStr ? new Date(lastModifiedStr).getTime() : 0;
       const size = parseInt(prop?.getElementsByTagNameNS('DAV:', 'getcontentlength')[0]?.textContent ?? '0', 10);
-      versions.push({ versionId, href, lastModified, size });
+      const mimeType = prop?.getElementsByTagNameNS('DAV:', 'getcontenttype')[0]?.textContent?.trim() ?? '';
+      const etag = prop?.getElementsByTagNameNS('DAV:', 'getetag')[0]?.textContent?.trim() ?? '';
+      const label = prop?.getElementsByTagNameNS('http://nextcloud.org/ns', 'version-label')[0]?.textContent?.trim() ?? '';
+      const authorText = prop?.getElementsByTagNameNS('http://nextcloud.org/ns', 'version-author')[0]?.textContent?.trim() ?? '';
+      const previewText = prop?.getElementsByTagNameNS('http://nextcloud.org/ns', 'has-preview')[0]?.textContent?.trim().toLowerCase() ?? '';
+      versions.push({
+        versionId, href, lastModified, size,
+        label,
+        author: authorText || null,
+        mimeType,
+        etag,
+        hasPreview: previewText === 'true' || previewText === '1',
+      });
     }
     // Newest first (descending by lastModified).
     versions.sort((a, b) => b.lastModified - a.lastModified);
