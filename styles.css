@@ -735,3 +735,41 @@
     font-size: 9px;
   }
 }
+
+
+/* Version-history-only display controls. New dialogs default to wrapped text; turning wrapping off
+   keeps each logical line on one visual line and exposes horizontal scrolling. */
+.ncs-version-view-controls {
+  display: flex;
+  justify-content: flex-end;
+  margin: 4px 0 8px;
+}
+
+.ncs-version-view-controls button {
+  min-height: 30px;
+}
+
+.ncs-diff-scroll.is-nowrap {
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+
+.ncs-diff-scroll.is-nowrap .ncs-diff-cell,
+.ncs-version-unified.is-nowrap .ncs-version-unified-text,
+.ncs-blame-list.is-nowrap .ncs-blame-text {
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.ncs-version-unified.is-nowrap .ncs-version-unified-row,
+.ncs-blame-list.is-nowrap .ncs-blame-row {
+  width: max-content;
+  min-width: 100%;
+}
+
+.ncs-version-unified.is-nowrap .ncs-version-unified-text,
+.ncs-blame-list.is-nowrap .ncs-blame-text {
+  min-width: max-content;
+}
