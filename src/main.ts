@@ -3,6 +3,8 @@ import { DavSyncSettings, DEFAULT_SETTINGS, FeatureUnsupportedError } from './ty
 import { NextcloudSyncSettingTab } from './settings/SettingTab';
 import { SyncEngine } from './sync/SyncEngine';
 import { VersionHistoryModal } from './ui/VersionHistoryModal';
+import { VersionCompareModal } from './ui/VersionCompareModal';
+import { LineHistoryModal } from './ui/LineHistoryModal';
 import { SyncStatusModal } from './ui/SyncStatusModal';
 import { StatusFilterState, makeDefaultFilterState, serializeFilter, deserializeFilter } from './ui/statusFilter';
 import { CompareModal } from './ui/CompareModal';
@@ -457,6 +459,20 @@ export default class ObsidianNextcloudsync extends Plugin {
         this.app,
         file.path,
         versions,
+        this.settings.username,
+        (version) => new VersionCompareModal(
+          this.app,
+          file.path,
+          version,
+          this.settings.username,
+          () => engine.compareVersion(file.path, version),
+        ).open(),
+        () => new LineHistoryModal(
+          this.app,
+          file.path,
+          this.settings.username,
+          () => engine.lineHistory(file.path, versions),
+        ).open(),
         (version) => engine.restoreVersion(file.path, version),
       ).open();
     } catch (err) {
