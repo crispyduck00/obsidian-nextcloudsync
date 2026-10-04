@@ -19,7 +19,7 @@ function sizeLabel(bytes: number): string {
 }
 
 function authorLabel(version: FileVersion, currentUserId: string): string {
-  if (!version.author) return 'Unknown author';
+  if (!version.author) return 'Author unavailable';
   return version.author === currentUserId ? 'You' : version.author;
 }
 
@@ -35,7 +35,9 @@ export class VersionHistoryModal extends Modal {
     private readonly filePath: string,
     private readonly versions: FileVersion[],
     private readonly currentUserId: string,
-    private readonly onCompare: (before: FileVersion, after: FileVersion) => void,
+    private readonly onCompare: (
+      before: FileVersion, after: FileVersion, restoreTarget: FileVersion | null,
+    ) => void,
     private readonly onLineHistory: (version: FileVersion) => void,
     private readonly onRestore: (version: FileVersion) => Promise<void>,
   ) {
@@ -60,14 +62,22 @@ export class VersionHistoryModal extends Modal {
       cls: 'setting-item-description',
     });
 
-    const ordered = [...this.versions].sort((a, b) => b.lastModified - a.lastModified);
-    const current = ordered.find((v) => v.isCurrent);
-    const oldest = Math.min(...ordered.map((v) => v.lastModified));
+    const byTime = [...this.versions].sort((a, b) => b.lastModified - a.lastModified);
+    const current = byTime.find((v) => v.isCurrent);
+    // Current is a STATE, not necessarily the newest timestamp: a restored historical revision can
+    // be Current while newer pre-restore revisions remain in history. Pin Current visually without
+    // changing chronological calculations used for "previous" and line provenance.
+    const ordered = current
+      ? [current, ...byTime.filter((version) => version !== current)]
+      : byTime;
+    const oldest = Math.min(...byTime.map((v) => v.lastModified));
     const list = contentEl.createDiv({ cls: 'ncs-version-list' });
 
     for (let index = 0; index < ordered.length; index++) {
       const version = ordered[index];
-      const previous = ordered.slice(index + 1).find((candidate) => !candidate.isCurrent);
+      const previous = byTime.find((candidate) =>
+        !candidate.isCurrent && candidate.lastModified < version.lastModified,
+      );
 
       const card = list.createDiv({ cls: 'ncs-version-card' });
       const title = card.createDiv({ cls: 'ncs-version-title' });
@@ -96,12 +106,15 @@ export class VersionHistoryModal extends Modal {
 
       if (!version.isCurrent && current) {
         const compareCurrent = actions.createEl('button', { text: 'Compare current' });
-        compareCurrent.addEventListener('click', () => this.onCompare(version, current));
+        compareCurrent.addEventListener('click', () => this.onCompare(version, current, version));
       }
 
       if (previous) {
         const comparePrevious = actions.createEl('button', { text: 'Compare previous' });
-        comparePrevious.addEventListener('click', () => this.onCompare(previous, version));
+        comparePrevious.addEventListener(
+          'click',
+          () => this.onCompare(previous, version, version.isCurrent ? null : version),
+        );
       }
 
       const lineHistory = actions.createEl('button', { text: 'Line history' });
