@@ -24,8 +24,8 @@ function authorLabel(version: FileVersion, currentUserId: string): string {
 }
 
 /**
- * Nextcloud-retained file history. The list itself is cheap: version bodies are only fetched when
- * Compare or Line history is opened.
+ * Nextcloud-retained file history. Version bodies stay lazy: only a chosen comparison or Line
+ * history downloads retained content.
  */
 export class VersionHistoryModal extends Modal {
   private readonly restoreGate = new BusyGate();
@@ -35,7 +35,7 @@ export class VersionHistoryModal extends Modal {
     private readonly filePath: string,
     private readonly versions: FileVersion[],
     private readonly currentUserId: string,
-    private readonly onCompare: (version: FileVersion) => void,
+    private readonly onCompare: (before: FileVersion, after: FileVersion) => void,
     private readonly onLineHistory: () => void,
     private readonly onRestore: (version: FileVersion) => Promise<void>,
   ) {
@@ -62,9 +62,15 @@ export class VersionHistoryModal extends Modal {
     const lineButton = intro.createEl('button', { text: 'Line history' });
     lineButton.addEventListener('click', () => this.onLineHistory());
 
-    const oldest = Math.min(...this.versions.map((v) => v.lastModified));
+    const ordered = [...this.versions].sort((a, b) => b.lastModified - a.lastModified);
+    const current = ordered.find((v) => v.isCurrent);
+    const oldest = Math.min(...ordered.map((v) => v.lastModified));
     const list = contentEl.createDiv({ cls: 'ncs-version-list' });
-    for (const version of this.versions) {
+
+    for (let index = 0; index < ordered.length; index++) {
+      const version = ordered[index];
+      const previous = ordered.slice(index + 1).find((candidate) => !candidate.isCurrent);
+
       const card = list.createDiv({ cls: 'ncs-version-card' });
       const title = card.createDiv({ cls: 'ncs-version-title' });
       if (version.label) {
@@ -89,10 +95,18 @@ export class VersionHistoryModal extends Modal {
       }
 
       const actions = card.createDiv({ cls: 'ncs-version-actions' });
-      if (!version.isCurrent) {
-        const compare = actions.createEl('button', { text: 'Compare' });
-        compare.addEventListener('click', () => this.onCompare(version));
 
+      if (!version.isCurrent && current) {
+        const compareCurrent = actions.createEl('button', { text: 'Compare current' });
+        compareCurrent.addEventListener('click', () => this.onCompare(version, current));
+      }
+
+      if (previous) {
+        const comparePrevious = actions.createEl('button', { text: 'Compare previous' });
+        comparePrevious.addEventListener('click', () => this.onCompare(previous, version));
+      }
+
+      if (!version.isCurrent) {
         const restore = actions.createEl('button', { text: 'Restore', cls: 'mod-warning' });
         restore.addEventListener('click', () => void this.restore(version, date));
       }
