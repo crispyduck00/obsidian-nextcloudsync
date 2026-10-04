@@ -439,3 +439,170 @@
 .ncs-compare-mismatch {
   color: var(--color-red);
 }
+
+
+/* ── Nextcloud version history ───────────────────────────────────────────── */
+.ncs-version-history-modal {
+  width: min(760px, 96vw);
+}
+
+.ncs-version-history-intro {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 4px 0 10px;
+}
+
+.ncs-version-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 65vh;
+  overflow-y: auto;
+}
+
+.ncs-version-card {
+  padding: 10px 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s, 6px);
+  background: var(--background-secondary);
+  min-width: 0;
+}
+
+.ncs-version-title {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.ncs-version-current {
+  color: var(--text-accent);
+}
+
+.ncs-version-meta,
+.ncs-version-id {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  overflow-wrap: anywhere;
+}
+
+.ncs-version-id {
+  margin-top: 2px;
+  font-family: var(--font-monospace);
+}
+
+.ncs-version-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+/* Line history is intentionally a single-column/readable view rather than a wide blame table. */
+.ncs-line-history-modal {
+  width: min(900px, 97vw);
+}
+
+.ncs-line-history-note {
+  padding: 8px 10px;
+  margin: 6px 0 10px;
+  border-left: 3px solid var(--interactive-accent);
+  background: var(--background-secondary);
+  font-size: var(--font-ui-smaller);
+}
+
+.ncs-line-history-count {
+  margin-top: 5px;
+  color: var(--text-muted);
+}
+
+.ncs-line-history-warning {
+  margin-top: 5px;
+  color: var(--text-warning);
+}
+
+.ncs-line-history-list {
+  max-height: 68vh;
+  overflow: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s, 6px);
+}
+
+.ncs-line-history-group + .ncs-line-history-group {
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.ncs-line-history-group-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 5px 8px;
+  background: var(--background-secondary);
+}
+
+.ncs-line-history-version {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.ncs-line-history-meta {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  overflow-wrap: anywhere;
+}
+
+.ncs-line-history-row {
+  display: flex;
+  align-items: flex-start;
+  min-width: 0;
+  font-family: var(--font-monospace);
+  font-size: 12px;
+}
+
+.ncs-line-history-gutter {
+  flex: 0 0 42px;
+  width: 42px;
+  padding: 1px 6px;
+  text-align: right;
+  color: var(--text-faint);
+  user-select: none;
+}
+
+.ncs-line-history-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 1px 8px 1px 4px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 600px) {
+  .ncs-version-history-modal,
+  .ncs-line-history-modal {
+    width: 98vw;
+  }
+
+  .ncs-version-card {
+    padding: 9px 10px;
+  }
+
+  .ncs-version-actions button {
+    min-height: 36px;
+  }
+
+  .ncs-line-history-list {
+    max-height: 62vh;
+  }
+
+  .ncs-line-history-gutter {
+    flex-basis: 34px;
+    width: 34px;
+    padding-left: 2px;
+    padding-right: 5px;
+  }
+
+  .ncs-line-history-text {
+    padding-right: 5px;
+  }
+}
