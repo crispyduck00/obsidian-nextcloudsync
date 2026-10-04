@@ -40,6 +40,7 @@ import { ResolutionService } from './resolution/ResolutionService';
 import { ConflictApplier } from './conflict/ConflictApplier';
 import { DirectoryReconciler } from './directory/DirectoryReconciler';
 import { WatchOperations } from './watch/WatchOperations';
+import { SyncActivityGate } from './SyncActivityGate';
 import { MirrorService } from './mirror/MirrorService';
 import { SyncHistoryStore } from '../data/SyncHistoryStore';
 import { IStatusBar } from '../ui/StatusBarItem';
@@ -168,6 +169,8 @@ export class SyncEngine {
 
   /** Watch-mode single-path operations (feature 074). Owns its in-flight and deferred sets. */
   private readonly watch: WatchOperations;
+  /** Shared/exclusive gate: lightweight path operations may overlap each other, never a full sync. */
+  private readonly activityGate = new SyncActivityGate();
 
   /** Mirror from remote: plan, then apply (feature 074). */
   private readonly mirror: MirrorService;
@@ -302,7 +305,8 @@ export class SyncEngine {
       isSystemExcluded: (p) => this.isSystemExcluded(p),
       connect: () => this.connection(),
       renameTracker: () => this.getOrCreateRenameTracker(),
-      isSyncRunning: () => this.running,
+      isSyncRunning: () => this.isSyncRunning(),
+      runNonFullSyncOperation: (fn) => this.activityGate.runShared(fn),
       processFile: (remote, summary) => this.processFileWithRetry(remote, summary),
       queueRetry: (p) => { this.retryQueue.push(p); },
       conflictEncounters: () => this.conflictEncounters,
@@ -373,6 +377,11 @@ export class SyncEngine {
     return isCellularBlocked(this.opts.settings.syncOnWifiOnly, Platform.isIosApp, conn?.type);
   }
 
+  /** True while a full-vault sync session or its final persistence is still active. */
+  isSyncRunning(): boolean {
+    return this.running || this.currentRun !== null;
+  }
+
   async syncManual(opts: { manual?: boolean } = {}): Promise<void> {
     // Mobile has no status bar; sync state (progress + result) is surfaced via NoticeStatusBar,
     // which implements IStatusBar and is driven uniformly for every run. The two early-return
@@ -380,7 +389,7 @@ export class SyncEngine {
     // before any syncing toast is created. Desktop keeps using the status bar (no popups).
     void this.opts.logger?.log(`sync: start (manual=${opts.manual === true})`);
     // Prevent concurrent runs (avoid clashing with watch mode or scheduled sync).
-    if (this.running) {
+    if (this.isSyncRunning()) {
       void this.opts.logger?.log('sync: skipped — already running');
       if (Platform.isMobile) new Notice('⏳ A sync is already in progress.');
       return;
@@ -394,7 +403,9 @@ export class SyncEngine {
     // run the body via a tracked promise so abortAndWait() can await this run's clean wind-down.
     this.running = true;
     this.cancelled = false;
-    const run = this.runSyncSession();
+    // Full sync is exclusive with watch/lightweight operations. Existing lightweight work may
+    // finish first; once this writer is queued, later lightweight work waits behind it.
+    const run = this.activityGate.runExclusive(() => this.runSyncSession());
     this.currentRun = run;
     try {
       await run;

@@ -137,6 +137,7 @@ function build(o: Opts = {}, over: Partial<WatchDeps> = {}) {
       },
     }) as unknown as RenameTracker,
     isSyncRunning: () => o.running === true,
+    runNonFullSyncOperation: async (fn) => await fn(),
     processFile: async (r: RemoteFileInfo, s: SyncSessionSummary) => {
       calls.processed.push(r.path);
       await o.processFile?.(r, s);
