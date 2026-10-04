@@ -12,7 +12,18 @@ function provenanceKey(version: FileVersion): string {
 }
 
 function shortDate(ms: number): string {
-  return new Date(ms).toLocaleDateString(undefined, { month: '2-digit', day: '2-digit' });
+  const date = new Date(ms);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function authorBucket(author: string | null | undefined): number {
+  const value = author ?? 'unknown';
+  let hash = 0;
+  for (let i = 0; i < value.length; i++) hash = ((hash << 5) - hash + value.charCodeAt(i)) | 0;
+  return Math.abs(hash) % 8;
 }
 
 export class LineHistoryModal extends Modal {
@@ -98,19 +109,20 @@ export class LineHistoryModal extends Modal {
     oldestVersionTime: number | null,
   ): void {
     const row = list.createDiv({ cls: 'ncs-blame-row' });
+    row.addClass(`ncs-author-${authorBucket(line.version.author)}`);
     const provenance = row.createDiv({ cls: 'ncs-blame-provenance' });
 
     if (firstInBlock) {
       const isOldest = oldestVersionTime != null && line.version.lastModified === oldestVersionTime;
       const author = authorLabel(line.version, this.currentUserId);
-      provenance.createDiv({
-        text: line.version.isCurrent ? `${author} · Current` : author,
-        cls: 'ncs-blame-author',
-      });
+      provenance.createDiv({ text: author, cls: 'ncs-blame-author' });
       provenance.createDiv({
         text: `${isOldest && !line.version.isCurrent ? '≤ ' : ''}${shortDate(line.version.lastModified)}`,
         cls: 'ncs-blame-date',
       });
+      if (line.version.isCurrent) {
+        provenance.createDiv({ text: 'Current', cls: 'ncs-blame-current' });
+      }
     }
 
     row.createDiv({ text: String(line.lineNumber), cls: 'ncs-blame-line-number' });
