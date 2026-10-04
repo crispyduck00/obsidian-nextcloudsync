@@ -265,14 +265,7 @@ describe('VersionService', () => {
       listVersions: async (fid: string) => { calls.listed.push(fid); return [version]; },
       restoreVersion: async (_v: FileVersion, fid: string) => { calls.restored.push(fid); },
       downloadFile: async () => new TextEncoder().encode('restored body').buffer,
-      statFile: async () => ({
-        path: 'note.md',
-        fileId: 'fid-7',
-        checksum: null,
-        etag: '"restored-etag"',
-        size: 13,
-        lastModified: 123456,
-      }),
+      statFile: async () => null,
     } as unknown as IWebDAVClient;
     const service = new VersionService({
       localAdapter: {
@@ -317,6 +310,15 @@ describe('VersionService', () => {
 
   it('restores on the server, applies the result locally, then converges the state DB', async () => {
     const { service, client, calls } = build(tracked('fid-7'));
+    client.statFile = async () => ({
+      path: 'note.md',
+      fileId: 'fid-7',
+      checksum: null,
+      etag: '"restored-etag"',
+      size: 13,
+      lastModified: 123456,
+    });
+
     await service.restoreVersion(client, NEXTCLOUD, 'note.md', version);
     expect(calls.restored).toEqual(['fid-7']);
     expect(calls.wrote).toEqual(['note.md']);
