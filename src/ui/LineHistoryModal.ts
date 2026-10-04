@@ -75,7 +75,7 @@ export class LineHistoryModal extends Modal {
     }
 
     if (result.lines.length === 0) {
-      contentEl.createEl('p', { text: '(empty file)' });
+      contentEl.createEl('p', { text: '(Empty file)' });
       return;
     }
 
