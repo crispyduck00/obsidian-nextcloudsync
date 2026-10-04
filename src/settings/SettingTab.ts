@@ -88,6 +88,9 @@ export class NextcloudSyncSettingTab extends PluginSettingTab implements Setting
     await this.plugin.saveSettings();
     // Re-arm the auto-sync timer immediately so a new interval takes effect without a reload.
     if (key === 'syncIntervalMinutes') this.plugin.applyAutoSyncInterval();
+    if (key === 'watchOnChangeEnabled' || key === 'syncOnWifiOnly') {
+      this.plugin.reevaluateMobileWatchPolicy();
+    }
   }
 
   // ── SettingDefinitionsHost: actions ────────────────────────────────────────

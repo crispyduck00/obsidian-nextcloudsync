@@ -97,8 +97,10 @@ export interface DavSyncSettings {
   deviceId: string;
   /** Absolute file-size cap (MB). Files exceeding this are skipped with a warning. 0 = unlimited. */
   maxFileSizeMB: number;
-  /** Detect local Markdown edits and sync immediately (watch mode). Disabled on mobile. */
+  /** Detect local vault changes and sync immediately (watch mode). Android supports opt-in foreground watch. */
   watchOnChangeEnabled: boolean;
+  /** One-time migration marker for the release that first enables Android watch mode. */
+  mobileWatchMigrationVersion?: number;
   /**
    * Startup sync delay in seconds, 0–10. 0 = no startup sync; 1–10 = wait that long after startup
    * before syncing. Default 1 (enabled). Folds the former `syncOnStartupEnabled` toggle (feature 034
@@ -206,6 +208,7 @@ export const DEFAULT_SETTINGS: DavSyncSettings = {
   deviceId: '',
   maxFileSizeMB: 0, // 0 = unlimited (desktop default). Mobile gets a safe cap in loadSettings().
   watchOnChangeEnabled: true, // Mobile first-run: false (applied in loadSettings()).
+  mobileWatchMigrationVersion: 0,
   startupSyncDelaySeconds: 1, // 0 = no startup sync; default 1 = enabled with a 1 s delay.
   networkConcurrency: 16, // First-run: overridden by autoNetworkConcurrency() in loadSettings(); persisted value is kept on subsequent loads.
   // Desktop default OFF; mobile's first run flips it ON in loadSettings() (metered data).
