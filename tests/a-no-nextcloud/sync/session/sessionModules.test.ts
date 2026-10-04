@@ -301,6 +301,29 @@ describe('VersionService', () => {
     expect(calls.listed).toEqual(['fid-7']);
   });
 
+  it('adds a synthetic Current entry when the live file is not present in retained versions', async () => {
+    const { service, client } = build(tracked('fid-7'));
+    const retained: FileVersion = {
+      versionId: '100', href: '/v/100', lastModified: 100_000, size: 3, author: 'alice',
+    };
+    client.listVersions = async () => [retained];
+    client.statFile = async () => ({
+      path: 'note.md', size: 7, lastModified: 200_000, etag: '"current-etag"',
+    });
+
+    const listed = await service.listVersions(client, NEXTCLOUD, 'note.md');
+
+    expect(listed).toHaveLength(2);
+    expect(listed[0]).toMatchObject({
+      versionId: 'current-200',
+      lastModified: 200_000,
+      size: 7,
+      etag: '"current-etag"',
+      isCurrent: true,
+    });
+    expect(listed[1]).toMatchObject({ versionId: '100', isCurrent: false });
+  });
+
   it('refuses on a non-Nextcloud server', async () => {
     const { service, client } = build(tracked('fid-7'));
     await expect(service.listVersions(client, PLAIN, 'note.md')).rejects.toThrow(FeatureUnsupportedError);
@@ -349,6 +372,20 @@ describe('VersionService', () => {
     expect(result.afterText).toBe('restored body');
     expect(calls.fetchedVersions).toEqual(['fid-7:v1']);
     expect(calls.downloaded).toEqual(['note.md']);
+  });
+
+  it('builds historical line history only up to the selected retained version', async () => {
+    const { service, client, calls } = build(tracked('fid-7'));
+    const v1: FileVersion = { versionId: 'v1', href: '/v/v1', lastModified: 1, size: 1 };
+    const v2: FileVersion = { versionId: 'v2', href: '/v/v2', lastModified: 2, size: 1 };
+    const current: FileVersion = {
+      versionId: 'current', href: '', lastModified: 3, size: 1, isCurrent: true,
+    };
+
+    await service.lineHistory(client, NEXTCLOUD, 'note.md', [current, v2, v1], v2);
+
+    expect(calls.fetchedVersions).toEqual(['fid-7:v1', 'fid-7:v2']);
+    expect(calls.downloaded).toEqual([]);
   });
 
   it('restores on the server, applies the result locally, then converges the state DB', async () => {
