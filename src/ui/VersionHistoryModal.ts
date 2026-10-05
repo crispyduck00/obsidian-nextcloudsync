@@ -72,6 +72,7 @@ export class VersionHistoryModal extends Modal {
     const oldest = historical.length > 0
       ? Math.min(...historical.map((version) => version.lastModified))
       : Number.NaN;
+    const restoredAnchor = this.versions.find((version) => version.isCurrentRevisionAnchor);
     const list = contentEl.createDiv({ cls: 'ncs-version-list' });
 
     for (const version of ordered) {
@@ -94,8 +95,13 @@ export class VersionHistoryModal extends Modal {
       }
 
       const date = new Date(version.lastModified).toLocaleString();
+      const metaText = version.isCurrent && restoredAnchor
+        ? `Current state · content revision ${new Date(restoredAnchor.lastModified).toLocaleString()} · ${sizeLabel(version.size)}`
+        : version.isCurrentRevisionAnchor
+          ? `Historical position of Current content · ${date} · ${sizeLabel(version.size)}`
+          : `${authorLabel(version, this.currentUserId)} · ${date} · ${sizeLabel(version.size)}`;
       card.createDiv({
-        text: `${authorLabel(version, this.currentUserId)} · ${date} · ${sizeLabel(version.size)}`,
+        text: metaText,
         cls: 'ncs-version-meta',
       });
 
