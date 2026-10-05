@@ -168,6 +168,8 @@ export class LineHistoryModal extends Modal {
       });
       if (line.version.isCurrent) {
         provenance.createDiv({ text: 'Current', cls: 'ncs-blame-current' });
+      } else if (line.version.isCurrentRevisionAnchor) {
+        provenance.createDiv({ text: 'Restored source', cls: 'ncs-blame-current' });
       }
     }
 
