@@ -816,6 +816,10 @@
   gap: 10px;
 }
 
+.ncs-version-browser-modal {
+  width: min(1100px, 96vw);
+}
+
 .ncs-version-browser-modal .modal-content {
   display: flex;
   flex-direction: column;
@@ -824,9 +828,10 @@
 
 .ncs-version-browser-nav {
   display: grid;
-  grid-template-columns: auto minmax(120px, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
+  width: 100%;
   margin: 8px 0;
 }
 
@@ -835,7 +840,11 @@
 }
 
 .ncs-version-browser-slider {
-  width: 100%;
+  display: block;
+  width: 100% !important;
+  max-width: none !important;
+  min-width: 0;
+  margin: 0;
 }
 
 .ncs-version-browser-select {
@@ -874,6 +883,10 @@
 }
 
 @media (max-width: 600px) {
+  .ncs-version-browser-modal {
+    width: 98vw;
+  }
+
   .ncs-version-history-intro {
     align-items: stretch;
     flex-direction: column;
