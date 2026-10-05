@@ -1,6 +1,6 @@
 # Standalone / BRAT repository plan
 
-This document records the intended packaging step after the `fast-nextcloud-sync` integration branch is validated.
+This document records the packaging model for the standalone `fast-nextcloud-sync` repository. The repository has now been created and is used as the BRAT/distribution surface after a validated integration state is promoted from the development fork.
 
 ## Goal
 
