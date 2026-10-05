@@ -11,6 +11,7 @@ function authorLabel(version: FileVersion, currentUserId: string): string {
 function optionLabel(version: FileVersion, currentUserId: string): string {
   if (version.isCurrent) return 'Current';
   const date = new Date(version.lastModified).toLocaleString();
+  if (version.isCurrentRevisionAnchor) return `${date} · Restored source · Current content`;
   return `${date} · ${authorLabel(version, currentUserId)}`;
 }
 
@@ -160,11 +161,17 @@ export class VersionBrowserModal extends Modal {
 
     const meta = contentEl.createDiv({ cls: 'ncs-version-browser-meta' });
     meta.createDiv({
-      text: version.isCurrent ? 'Current' : new Date(version.lastModified).toLocaleString(),
+      text: version.isCurrent
+        ? 'Current'
+        : version.isCurrentRevisionAnchor
+          ? `${new Date(version.lastModified).toLocaleString()} · Restored source revision`
+          : new Date(version.lastModified).toLocaleString(),
       cls: 'ncs-version-browser-version',
     });
     meta.createDiv({
-      text: `${authorLabel(version, this.currentUserId)} · ${version.size} B`,
+      text: version.isCurrentRevisionAnchor
+        ? `Current content at its historical revision position · ${version.size} B`
+        : `${authorLabel(version, this.currentUserId)} · ${version.size} B`,
       cls: 'setting-item-description',
     });
 
@@ -187,7 +194,7 @@ export class VersionBrowserModal extends Modal {
         }
       });
     }
-    if (!version.isCurrent) {
+    if (!version.isCurrent && !version.isCurrentRevisionAnchor) {
       const restore = controls.createEl('button', { text: 'Restore this version', cls: 'mod-warning' });
       restore.addEventListener('click', () => void this.restoreSelected());
     }
