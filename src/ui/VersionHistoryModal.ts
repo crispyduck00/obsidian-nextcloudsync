@@ -79,7 +79,10 @@ export class VersionHistoryModal extends Modal {
 
       const card = list.createDiv({ cls: 'ncs-version-card' });
       const title = card.createDiv({ cls: 'ncs-version-title' });
-      if (version.label) {
+      if (version.isCurrentRevisionAnchor) {
+        title.setText('Restored source revision');
+        title.createSpan({ text: ' · Current content', cls: 'ncs-version-current' });
+      } else if (version.label) {
         title.createSpan({ text: version.label });
         if (version.isCurrent) title.createSpan({ text: ' · Current', cls: 'ncs-version-current' });
       } else if (version.isCurrent) {
@@ -102,7 +105,7 @@ export class VersionHistoryModal extends Modal {
 
       const actions = card.createDiv({ cls: 'ncs-version-actions' });
 
-      if (!version.isCurrent && current) {
+      if (!version.isCurrent && !version.isCurrentRevisionAnchor && current) {
         const compareCurrent = actions.createEl('button', { text: 'Compare current' });
         compareCurrent.addEventListener('click', () => this.onCompare(version, current, version));
       }
@@ -118,7 +121,7 @@ export class VersionHistoryModal extends Modal {
       const lineHistory = actions.createEl('button', { text: 'Line history' });
       lineHistory.addEventListener('click', () => this.onLineHistory(version));
 
-      if (!version.isCurrent) {
+      if (!version.isCurrent && !version.isCurrentRevisionAnchor) {
         const restore = actions.createEl('button', { text: 'Restore', cls: 'mod-warning' });
         restore.addEventListener('click', () => void this.restore(version, date));
       }
