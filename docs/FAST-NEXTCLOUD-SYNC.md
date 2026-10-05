@@ -1,13 +1,13 @@
-# Fast Nextcloud Sync fork
+# Development integration workflow
 
-This branch is the tested integration branch for the `crispyduck00/obsidian-nextcloudsync` fork.
+`integration/all-topics` is the tested integration branch for the `crispyduck00/obsidian-nextcloudsync` development fork. The name **Fast Nextcloud Sync** is reserved for the standalone installable repository/plugin (`crispyduck00/fast-nextcloud-sync`).
 
 ## Purpose
 
 Keep upstream `main` pristine while maintaining independently reviewable fixes and features that can
 be rebased, tested and proposed upstream one topic at a time.
 
-`fast-nextcloud-sync` is the only integration branch. Topic branches are intentionally isolated.
+`integration/all-topics` is the only integration branch. Topic branches are intentionally isolated.
 
 ## Upstream base
 
@@ -20,7 +20,7 @@ be rebased, tested and proposed upstream one topic at a time.
 - `main` — pristine upstream mirror
 - `fixes/*` — isolated bug fixes, normally based directly on `main`
 - `features/*` — isolated features, normally based directly on `main`
-- `fast-nextcloud-sync` — tested integration of selected fixes and features
+- `integration/all-topics` — tested integration of selected fixes and features
 - `backup/*` — temporary safety references retained during branch reconstruction
 - `validation/*` — temporary CI-only branches, safe to remove after validation
 
@@ -131,7 +131,7 @@ When upstream publishes a new version:
 1. Fast-forward fork `main` to `upstream/main`.
 2. Rebase/test each `fixes/*` and `features/*` branch independently.
 3. Drop any fix that upstream has already incorporated.
-4. Rebuild `fast-nextcloud-sync` from the remaining tested topics.
+4. Rebuild `integration/all-topics` from the remaining tested topics.
 5. Run full integration validation.
 6. Perform a short real-device smoke test.
 
