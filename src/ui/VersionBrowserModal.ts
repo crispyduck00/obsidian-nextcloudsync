@@ -111,9 +111,9 @@ export class VersionBrowserModal extends Modal {
     previous.addEventListener('click', () => void this.select(this.selectedIndex - 1));
 
     const slider = nav.createEl('input', {
-      type: 'range',
       cls: 'ncs-version-browser-slider',
       attr: {
+        type: 'range',
         min: '0',
         max: String(Math.max(0, this.timeline.length - 1)),
         step: '1',
@@ -131,7 +131,7 @@ export class VersionBrowserModal extends Modal {
     this.timeline.forEach((item, index) => {
       const option = selector.createEl('option', {
         text: optionLabel(item, this.currentUserId),
-        value: String(index),
+        attr: { value: String(index) },
       });
       option.selected = index === this.selectedIndex;
     });
