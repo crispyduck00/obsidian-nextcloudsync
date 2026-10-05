@@ -17,7 +17,7 @@ function optionLabel(version: FileVersion, currentUserId: string): string {
 export class VersionBrowserModal extends Modal {
   private readonly timeline: FileVersion[];
   private readonly cache = new Map<string, string>();
-  private readonly renderComponent = new Component();
+  private renderComponent = new Component();
   private selectedIndex: number;
   private renderedMode: boolean;
   private requestId = 0;
@@ -179,6 +179,9 @@ export class VersionBrowserModal extends Modal {
       if (requestId !== this.requestId) return;
       body.empty();
       if (this.renderedMode && this.filePath.toLowerCase().endsWith('.md')) {
+        this.renderComponent.unload();
+        this.renderComponent = new Component();
+        this.renderComponent.load();
         body.addClass('markdown-preview-view');
         await MarkdownRenderer.render(this.app, text, body, this.filePath, this.renderComponent);
       } else {
