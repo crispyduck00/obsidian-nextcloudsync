@@ -16,7 +16,7 @@ That experiment grew into a fork:
 
 https://github.com/crispyduck00/obsidian-nextcloudsync
 
-The fork keeps its `main` branch aligned with upstream. Each feature/fix is developed independently from upstream/main and documented with a Draft PR. The combined build lives only on `fast-nextcloud-sync`.
+The fork keeps its `main` branch aligned with upstream. Each feature/fix is developed independently from upstream/main and documented with a Draft PR. The combined build lives only on `integration/all-topics`.
 
 The main experimental additions are:
 
@@ -31,7 +31,7 @@ I am not posting this with the expectation that the whole fork should be merged 
 
 The fork overview is here:
 
-https://github.com/crispyduck00/obsidian-nextcloudsync/blob/fast-nextcloud-sync/FORK.md
+https://github.com/crispyduck00/obsidian-nextcloudsync/blob/integration/all-topics/FORK.md
 
 Relevant Draft PRs in the fork include:
 
