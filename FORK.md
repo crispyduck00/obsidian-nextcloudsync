@@ -155,7 +155,6 @@ While testing the faster paths, several small edge cases were isolated into inde
 - persisting mirror state before reporting success
 - live emptiness checks before recursive watch-triggered remote folder deletion
 - converging StateDB to the server's real identity after a version restore
-- avoiding duplicate Secret scan push/PR runs and cancelling superseded runs
 
 Each of these remains documented in its own Draft PR.
 
