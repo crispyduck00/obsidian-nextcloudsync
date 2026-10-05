@@ -526,6 +526,31 @@ export interface FileVersion {
   lastModified: number;
   /** Size in bytes. */
   size: number;
+  /** Optional user-defined Nextcloud version label. */
+  label?: string;
+  /** Nextcloud user id recorded as the author of this retained version. */
+  author?: string | null;
+  /** MIME type reported for the retained version. */
+  mimeType?: string;
+  /** Version ETag, when exposed by the server. */
+  etag?: string;
+  /** Whether Nextcloud reports that a preview can be generated. */
+  hasPreview?: boolean;
+  /**
+   * True when this DAV version represents the current remote file. Nextcloud includes the current
+   * revision in the versions collection; consumers must download it through the normal files DAV
+   * endpoint rather than treating it as a restorable historical snapshot.
+   */
+  isCurrent?: boolean;
+  /**
+   * Synthetic, non-restorable historical placement of the live Current content.
+   *
+   * Core Nextcloud can consume the restored source version (moving it back to the live file) while
+   * preserving that old revision's mtime. If newer retained versions still exist, Current therefore
+   * has two roles: the live state "now", and evidence of the historical content at that older
+   * revision time. This flag marks the latter UI/provenance anchor; it is not a retained DAV version.
+   */
+  isCurrentRevisionAnchor?: boolean;
 }
 
 // Custom errors
