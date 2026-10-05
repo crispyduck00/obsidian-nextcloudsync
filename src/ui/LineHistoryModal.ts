@@ -106,14 +106,15 @@ export class LineHistoryModal extends Modal {
     }
 
     const note = contentEl.createDiv({ cls: 'ncs-line-history-note' });
-    note.createEl('strong', { text: 'Based on available Nextcloud versions. ' });
+    note.createEl('strong', { text: 'Based on available Nextcloud history. ' });
     note.createSpan({
       text:
-        'The author and date identify the retained version in which each current line can first be traced. ' +
+        'The author and date identify the earliest available history state in which each target line can be traced. ' +
+        'After a restore, Current content can also anchor its preserved historical revision time. ' +
         'This is not proof of the original line author; pruned intermediate versions cannot be reconstructed.',
     });
     note.createDiv({
-      text: `${result.versionCount} available version${result.versionCount === 1 ? '' : 's'} used.`,
+      text: `${result.versionCount} history state${result.versionCount === 1 ? '' : 's'} used.`,
       cls: 'ncs-line-history-count',
     });
     if (result.approximate) {
