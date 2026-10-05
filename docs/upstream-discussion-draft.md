@@ -16,7 +16,7 @@ That experiment grew into a fork:
 
 https://github.com/crispyduck00/obsidian-nextcloudsync
 
-The fork keeps its `main` branch aligned with upstream. Each feature/fix is developed independently from upstream/main and documented with a Draft PR. The combined build lives only on `fast-nextcloud-sync`.
+The fork keeps its `main` branch aligned with upstream. Each feature/fix is developed independently from upstream/main and documented with a Draft PR. The combined build lives only on `integration/all-topics`.
 
 The main experimental additions are:
 
@@ -31,21 +31,23 @@ I am not posting this with the expectation that the whole fork should be merged 
 
 The fork overview is here:
 
-https://github.com/crispyduck00/obsidian-nextcloudsync/blob/fast-nextcloud-sync/FORK.md
+https://github.com/crispyduck00/obsidian-nextcloudsync/blob/integration/all-topics/FORK.md
 
 Relevant Draft PRs in the fork include:
 
-- Client Push: #13
-- Android foreground watch: #14
-- Android status: #15
-- Version history/browser: #16
-- Restore-state convergence: #17
+- Client Push: https://github.com/crispyduck00/obsidian-nextcloudsync/pull/13
+- Android foreground watch: https://github.com/crispyduck00/obsidian-nextcloudsync/pull/14
+- Android status: https://github.com/crispyduck00/obsidian-nextcloudsync/pull/15
+- Version history/browser: https://github.com/crispyduck00/obsidian-nextcloudsync/pull/16
+- Restore-state convergence: https://github.com/crispyduck00/obsidian-nextcloudsync/pull/17
 
 One future idea I am considering is moving away from inline conflict markers toward **explicit conflict files**. The idea would be to keep a canonical file plus a device/time-named conflict copy that synchronizes like an ordinary file, so every client can see unresolved conflict state, including for binary files. A UI could then help resolve those copies without making the unresolved state device-local.
 
 The fork is primarily for my own/family use, but I have now also published a separate BRAT-friendly build with its own plugin ID so it can be installed independently without colliding with the official plugin:
 
 https://github.com/crispyduck00/fast-nextcloud-sync
+
+Current stable test release: https://github.com/crispyduck00/fast-nextcloud-sync/releases/tag/0.1.1
 
 The standalone build is mainly a convenient distribution channel for my family/testing, but if somebody else finds it useful they are welcome to try it, report issues, contribute improvements, or even help maintain it. I cannot promise long-term maintenance or a release cadence.
 

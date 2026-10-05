@@ -27,6 +27,10 @@ be rebased, tested and proposed upstream one topic at a time.
 A feature may have a functional dependency on a fix, but the feature branch must not be stacked on
 that fix branch. Dependencies are documented in the corresponding draft PR.
 
+### CI workflow note
+
+The development fork keeps `main` identical to upstream, including upstream-owned GitHub Actions workflows. Topic branches therefore inherit those workflows unchanged. A topic with an open Draft PR may legitimately receive both a `push` and a `pull_request` workflow run. Fork-only CI-noise changes are not kept as product `fixes/*` topics; correctness and upstream-aligned branch history take priority over eliminating duplicate successful CI runs.
+
 ## Integrated features
 
 ### Client Push
@@ -113,16 +117,19 @@ and visually biased to the right.
 - `fixes/watch-folder-delete-safety`
   - prevents recursive Watch deletion of a remote directory unless live emptiness is proven
 
+- `fixes/version-restore-state-convergence`
+  - records the server's real remote identity, mtime and file ID after a version restore so the next sync does not falsely merge/re-upload the restored file
+
 ## Validation
 
-Final integration validation on 2026-10-04 passed:
+Integration validation through 2026-10-05 includes:
 
 - `pnpm build`
 - `pnpm lint`
 - full `pnpm test`
 - secret scan
 
-The final integration includes all current `features/*` and `fixes/*` topic heads.
+The integration branch includes all currently selected `features/*`, `fixes/*`, and maintained fork-documentation topic heads. Version History restore/browser/Line History behavior was also exercised interactively on desktop and Android during the 2026-10-05 update.
 
 ## Upstream workflow
 

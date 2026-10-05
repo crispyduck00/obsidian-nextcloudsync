@@ -128,6 +128,12 @@ Current functionality includes:
   - lazy loading and in-modal caching
   - restore from the selected version
 - restore from History, Compare and Line History
+- first-class Version History entry points using the same `history` icon:
+  - desktop ribbon
+  - mobile Open menu
+  - command palette / hotkey
+  - mobile-toolbar pin
+  - file context / mobile long-press menu
 
 The Line History is intentionally described as **retained-version provenance**, not Git blame. If Nextcloud has pruned intermediate versions, those states cannot be reconstructed.
 
