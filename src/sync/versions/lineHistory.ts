@@ -104,7 +104,11 @@ export function reconstructLineHistory(snapshots: VersionSnapshot[]): LineHistor
     return { lines: [], versionCount: 0, oldestVersionTime: null, approximate: false };
   }
 
-  const ordered = [...snapshots].sort((a, b) => a.version.lastModified - b.version.lastModified);
+  // The caller supplies the LOGICAL state lineage. Do not sort by mtime here: Current may
+  // legitimately carry an old restored timestamp while still being the final state. Re-sorting
+  // would move Current into the historical chain and make later retained snapshots become the
+  // apparent target, surfacing lines that are not present in Current at all.
+  const ordered = snapshots;
   let previousLines = splitLines(ordered[0].text);
   let attribution: FileVersion[] = previousLines.map(() => ordered[0].version);
   let approximate = false;

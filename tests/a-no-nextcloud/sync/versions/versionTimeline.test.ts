@@ -20,6 +20,20 @@ describe('versionTimeline', () => {
       .toEqual([v1, v2, v3, current]);
   });
 
+  it('places a restored Current anchor at its historical position and Current at the end', () => {
+    const anchorVersion: FileVersion = {
+      ...v('current-anchor', 1),
+      isCurrentRevisionAnchor: true,
+    };
+    const b = v('b', 2);
+    const c = v('c', 3);
+    const d = v('d', 4);
+    const current = v('current', 1, true);
+
+    expect(chronologicalVersionTimeline([current, d, b, anchorVersion, c]))
+      .toEqual([anchorVersion, b, c, d, current]);
+  });
+
   it('pins Current first for display while retaining newest-to-oldest history', () => {
     const current = v('current', 2, true);
     const v3 = v('v3', 4);

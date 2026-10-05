@@ -329,6 +329,38 @@ describe('VersionService', () => {
     expect(listed[1]).toMatchObject({ versionId: '100', isCurrent: false });
   });
 
+  it('adds a historical anchor when restored Current has an older mtime than retained history', async () => {
+    const { service, client } = build(tracked('fid-7'));
+    client.listVersions = async () => [
+      { versionId: '300', href: '/v/300', lastModified: 300_000, size: 9, author: 'andi' },
+      { versionId: '200', href: '/v/200', lastModified: 200_000, size: 7, author: 'andi' },
+    ];
+    client.statFile = async () => ({
+      path: 'note.md',
+      fileId: 'fid-7',
+      checksum: null,
+      size: 5,
+      lastModified: 100_000,
+      etag: '"restored-current"',
+    });
+
+    const listed = await service.listVersions(client, NEXTCLOUD, 'note.md');
+    const current = listed.find((v) => v.isCurrent)!;
+    const historicalAnchor = listed.find((v) => v.isCurrentRevisionAnchor)!;
+
+    expect(current).toMatchObject({
+      versionId: 'current-100',
+      lastModified: 100_000,
+      isCurrent: true,
+    });
+    expect(historicalAnchor).toMatchObject({
+      versionId: 'current-anchor-100',
+      lastModified: 100_000,
+      isCurrent: false,
+      isCurrentRevisionAnchor: true,
+    });
+  });
+
   it('refuses on a non-Nextcloud server', async () => {
     const { service, client } = build(tracked('fid-7'));
     await expect(service.listVersions(client, PLAIN, 'note.md')).rejects.toThrow(FeatureUnsupportedError);
@@ -424,6 +456,84 @@ describe('VersionService', () => {
 
     expect(calls.fetchedVersions).toEqual(['fid-7:v1', 'fid-7:v2', 'fid-7:v3']);
     expect(calls.downloaded).toEqual(['note.md']);
+  });
+
+  it('uses the restored Current anchor as provenance before a later historical target', async () => {
+    const { service, client, calls } = build(tracked('fid-7'));
+    const restoredAnchor: FileVersion = {
+      versionId: 'current-anchor-100',
+      href: '',
+      lastModified: 100,
+      size: 1,
+      isCurrentRevisionAnchor: true,
+    };
+    const later: FileVersion = {
+      versionId: 'v2',
+      href: '/v/v2',
+      lastModified: 200,
+      size: 1,
+    };
+    const current: FileVersion = {
+      versionId: 'current-100',
+      href: '',
+      lastModified: 100,
+      size: 1,
+      isCurrent: true,
+    };
+
+    client.downloadFile = async (path: string) => {
+      calls.downloaded.push(path);
+      return new TextEncoder().encode('base\nold line').buffer;
+    };
+    client.getVersionContent = async (v: FileVersion, fid: string) => {
+      calls.fetchedVersions.push(`${fid}:${v.versionId}`);
+      return new TextEncoder().encode('base\nold line\nnew line').buffer;
+    };
+
+    const result = await service.lineHistory(
+      client,
+      NEXTCLOUD,
+      'note.md',
+      [current, later, restoredAnchor],
+      later,
+    );
+
+    expect(result.lines.map((line) => [line.text, line.version.versionId])).toEqual([
+      ['base', 'current-anchor-100'],
+      ['old line', 'current-anchor-100'],
+      ['new line', 'v2'],
+    ]);
+    expect(calls.downloaded).toEqual(['note.md']);
+    expect(calls.fetchedVersions).toEqual(['fid-7:v2']);
+  });
+
+  it('stops Current provenance at the matching restored historical state', async () => {
+    const { service, client } = build(tracked('fid-7'));
+    const restoredAnchor: FileVersion = {
+      versionId: 'current-anchor-100', href: '', lastModified: 100, size: 1,
+      isCurrentRevisionAnchor: true,
+    };
+    const later: FileVersion = {
+      versionId: 'v2', href: '/v/v2', lastModified: 200, size: 1,
+    };
+    const current: FileVersion = {
+      versionId: 'current-100', href: '', lastModified: 100, size: 1, isCurrent: true,
+    };
+
+    client.downloadFile = async () => new TextEncoder().encode('base\nold line').buffer;
+    client.getVersionContent = async () =>
+      new TextEncoder().encode('base\nold line\nnew line').buffer;
+
+    const result = await service.lineHistory(
+      client,
+      NEXTCLOUD,
+      'note.md',
+      [current, later, restoredAnchor],
+      current,
+    );
+
+    expect(result.lines.map((line) => line.text)).toEqual(['base', 'old line']);
+    expect(result.lines.every((line) => line.version.isCurrentRevisionAnchor)).toBe(true);
   });
 
   it('restores on the server, applies the result locally, then converges the state DB', async () => {
