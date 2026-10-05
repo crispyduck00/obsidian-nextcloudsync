@@ -45,7 +45,7 @@ describe('retained Nextcloud line history', () => {
     expect(result.lines[1].version.author).toBe('conny');
   });
 
-  it('sorts snapshots chronologically before reconstructing provenance', () => {
+  it('preserves the caller supplied logical lineage instead of re-sorting by mtime', () => {
     const a = version('1', 1000, 'andi');
     const b = version('2', 2000, 'conny');
 
@@ -54,6 +54,23 @@ describe('retained Nextcloud line history', () => {
       snap(a, 'a'),
     ]);
 
-    expect(result.lines.map((l) => l.version.versionId)).toEqual(['1', '2']);
+    expect(result.lines.map((l) => [l.text, l.version.versionId])).toEqual([
+      ['a', '2'],
+    ]);
+  });
+
+  it('keeps restored Current as the final target even when its mtime is older than retained history', () => {
+    const old = version('old', 1000, 'andi');
+    const later = version('later', 3000, 'andi');
+    const current = { ...version('current', 1000, 'andi'), isCurrent: true };
+
+    const result = reconstructLineHistory([
+      snap(old, 'kept\nold-only'),
+      snap(later, 'kept\nlater-only'),
+      snap(current, 'kept\nrestored-only'),
+    ]);
+
+    expect(result.lines.map((l) => l.text)).toEqual(['kept', 'restored-only']);
+    expect(result.lines.some((l) => l.text === 'later-only')).toBe(false);
   });
 });
