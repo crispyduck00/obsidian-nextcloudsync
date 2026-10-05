@@ -11,6 +11,7 @@ import { withLocalSignature } from '../../data/localSignature';
 import { sha256 } from '../../util/hash';
 import { remoteIdOf } from '../remoteIdentity';
 import { LineHistoryResult, reconstructLineHistory, VersionSnapshot } from './lineHistory';
+import { chronologicalVersionTimeline } from './versionTimeline';
 
 export interface VersionDeps {
   localAdapter: Pick<LocalAdapter, 'stat' | 'atomicWriteBinary'>;
@@ -101,15 +102,16 @@ export class VersionService {
       throw new Error('Line history is available for text files only.');
     }
     const fileId = this.requireFileId(features, path);
-    const orderedAll = [...listedVersions].sort((a, b) => a.lastModified - b.lastModified);
-    const targetIndex = orderedAll.findIndex((version) =>
+    const timeline = chronologicalVersionTimeline(listedVersions);
+    const targetIndex = timeline.findIndex((version) =>
       version.versionId === targetVersion.versionId && version.isCurrent === targetVersion.isCurrent,
     );
     if (targetIndex < 0) throw new Error('Selected version is no longer available.');
 
-    // "Line history" for a historical version means provenance as the file looked AT THAT retained
-    // snapshot, so later snapshots/current must not influence attribution.
-    const ordered = orderedAll.slice(0, targetIndex + 1);
+    // Historical targets stop at that retained revision. Current is different: it is the latest
+    // STATE even when a restore gave it an old mtime, so its lineage always includes every retained
+    // historical snapshot followed by the live Current body.
+    const ordered = timeline.slice(0, targetIndex + 1);
     const snapshots: VersionSnapshot[] = [];
     for (const version of ordered) {
       const data = await this.readVersionData(client, path, fileId, version);
@@ -118,6 +120,18 @@ export class VersionService {
       await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
     }
     return reconstructLineHistory(snapshots);
+  }
+
+  /** Read one retained revision (or Current) as text for the read-only version browser. */
+  async readVersionText(
+    client: IWebDAVClient, features: NextcloudFeatures, path: string, version: FileVersion,
+  ): Promise<string> {
+    if (!this.deps.isTextEligible(path)) {
+      throw new Error('Version browser is available for text files only.');
+    }
+    const fileId = this.requireFileId(features, path);
+    const data = await this.readVersionData(client, path, fileId, version);
+    return new TextDecoder().decode(data);
   }
 
   /** Restore the specified historical version, apply it locally, and update the state DB. */

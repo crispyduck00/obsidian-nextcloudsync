@@ -1,6 +1,7 @@
 import { App, Modal, Notice } from 'obsidian';
 import { FileVersion } from '../types';
 import { confirmModal } from './ConfirmModal';
+import { displayVersionTimeline, previousVersionInTimeline } from '../sync/versions/versionTimeline';
 
 export class BusyGate {
   private busy = false;
@@ -39,6 +40,7 @@ export class VersionHistoryModal extends Modal {
       before: FileVersion, after: FileVersion, restoreTarget: FileVersion | null,
     ) => void,
     private readonly onLineHistory: (version: FileVersion) => void,
+    private readonly onBrowse: () => void,
     private readonly onRestore: (version: FileVersion) => Promise<void>,
   ) {
     super(app);
@@ -61,22 +63,19 @@ export class VersionHistoryModal extends Modal {
       text: 'History is based on the versions currently retained by Nextcloud.',
       cls: 'setting-item-description',
     });
+    const browse = intro.createEl('button', { text: 'Version browser' });
+    browse.addEventListener('click', () => this.onBrowse());
 
-    const byTime = [...this.versions].sort((a, b) => b.lastModified - a.lastModified);
-    const current = byTime.find((v) => v.isCurrent);
-    // Current is a STATE, not necessarily the newest timestamp: a restored historical revision can
-    // be Current while newer pre-restore revisions remain in history. Pin Current visually without
-    // changing chronological calculations used for "previous" and line provenance.
-    const ordered = current
-      ? [current, ...byTime.filter((version) => version !== current)]
-      : byTime;
-    const oldest = Math.min(...byTime.map((v) => v.lastModified));
+    const ordered = displayVersionTimeline(this.versions);
+    const current = ordered.find((version) => version.isCurrent);
+    const historical = ordered.filter((version) => !version.isCurrent);
+    const oldest = historical.length > 0
+      ? Math.min(...historical.map((version) => version.lastModified))
+      : Number.NaN;
     const list = contentEl.createDiv({ cls: 'ncs-version-list' });
 
     for (const version of ordered) {
-      const previous = byTime.find((candidate) =>
-        !candidate.isCurrent && candidate.lastModified < version.lastModified,
-      );
+      const previous = previousVersionInTimeline(this.versions, version);
 
       const card = list.createDiv({ cls: 'ncs-version-card' });
       const title = card.createDiv({ cls: 'ncs-version-title' });
