@@ -35,6 +35,35 @@ The branch layout is deliberate.
 
 This makes it possible to keep the practical all-features build while still preserving changes in a form that can be reviewed, discussed, or proposed upstream individually.
 
+## Development and distribution workflow
+
+The development fork and the installable plugin deliberately have different roles.
+
+The intended workflow is:
+
+1. keep `main` aligned with upstream,
+2. develop one feature/fix at a time on an isolated topic branch from `main`,
+3. document each topic with a Draft PR,
+4. integrate validated topics into `fast-nextcloud-sync`,
+5. run build, lint, tests, secret scans and real-device checks there,
+6. promote that validated integration state to the standalone plugin repository,
+7. apply only the small standalone identity/package/documentation layer,
+8. publish BRAT-friendly releases from the standalone repository.
+
+That means this repository is where experimentation and upstream-oriented development happen; the standalone repository is the distribution surface.
+
+## AI-assisted development
+
+A substantial part of the fork-specific code, tests, documentation and review work has been produced with the assistance of AI coding tools.
+
+That is intentional and is disclosed openly.
+
+AI output is not treated as authoritative by itself. Changes are directed and reviewed by the maintainer, kept in isolated topic branches, covered by automated tests where practical, integrated only after validation, and exercised on real desktop/Android clients against Nextcloud.
+
+AI assistance can still introduce incorrect assumptions or subtle bugs. The branch structure, Draft PRs, tests, logs, conservative fallbacks and real-world testing are used to make such problems easier to detect and isolate.
+
+The fork should therefore be viewed as **AI-assisted, human-directed and tested**, not as code claimed to have been written or verified entirely by hand.
+
 ## Main additions in this fork
 
 ### Nextcloud Client Push
