@@ -542,6 +542,15 @@ export interface FileVersion {
    * endpoint rather than treating it as a restorable historical snapshot.
    */
   isCurrent?: boolean;
+  /**
+   * Synthetic, non-restorable historical placement of the live Current content.
+   *
+   * Core Nextcloud can consume the restored source version (moving it back to the live file) while
+   * preserving that old revision's mtime. If newer retained versions still exist, Current therefore
+   * has two roles: the live state "now", and evidence of the historical content at that older
+   * revision time. This flag marks the latter UI/provenance anchor; it is not a retained DAV version.
+   */
+  isCurrentRevisionAnchor?: boolean;
 }
 
 // Custom errors
