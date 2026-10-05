@@ -4,7 +4,9 @@
 >
 > **Branch model:** `main` tracks upstream; independent `features/*` / `fixes/*` topics are documented by Draft PRs; `fast-nextcloud-sync` is their integration branch.
 >
-> See **[FORK.md](FORK.md)** for the motivation, architecture, feature overview, multi-user / Team Folder notes, future conflict-file ideas, installation status, attribution, and license details.
+> See **[FORK.md](FORK.md)** for the motivation, architecture, feature overview, multi-user / Team Folder notes, future conflict-file ideas, AI-assisted development disclosure, attribution, and license details.
+>
+> The installable/BRAT-facing build lives separately at **[crispyduck00/fast-nextcloud-sync](https://github.com/crispyduck00/fast-nextcloud-sync)**. This repository remains the development fork used for upstream tracking, isolated feature/fix branches, Draft PRs, and integration testing.
 >
 > Many thanks to **Daisuke ITO (@siosig)** for the original project and its careful reliability-focused design.
 
