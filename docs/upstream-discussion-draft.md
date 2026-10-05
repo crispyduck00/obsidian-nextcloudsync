@@ -43,7 +43,15 @@ Relevant Draft PRs in the fork include:
 
 One future idea I am considering is moving away from inline conflict markers toward **explicit conflict files**. The idea would be to keep a canonical file plus a device/time-named conflict copy that synchronizes like an ordinary file, so every client can see unresolved conflict state, including for binary files. A UI could then help resolve those copies without making the unresolved state device-local.
 
-The fork is currently primarily for my own/family use. I also plan a separate BRAT-friendly repository with a different plugin ID so it can be installed independently without colliding with the official plugin.
+The fork is primarily for my own/family use, but I have now also published a separate BRAT-friendly build with its own plugin ID so it can be installed independently without colliding with the official plugin:
+
+https://github.com/crispyduck00/fast-nextcloud-sync
+
+The standalone build is mainly a convenient distribution channel for my family/testing, but if somebody else finds it useful they are welcome to try it, report issues, contribute improvements, or even help maintain it. I cannot promise long-term maintenance or a release cadence.
+
+For transparency: a substantial part of my fork-specific code, tests, and documentation was produced with AI coding assistance. I direct the work, keep every feature/fix isolated, review the resulting changes, run the automated test suite, and test the integrated build on real desktop/Android clients against Nextcloud. I still treat it as experimental software and do not consider AI output authoritative by itself.
+
+If useful parts fit upstream, I would be very happy for them to be merged wholly or partially rather than remaining fork-only.
 
 Again, many thanks for the upstream project. The fork exists because it provided a strong base to experiment on, not because I wanted to replace it.
 
