@@ -40,6 +40,27 @@ export class VersionBrowserModal extends Modal {
     this.renderComponent.load();
     this.modalEl.addClass('ncs-version-browser-modal');
     this.setTitle('Version browser');
+
+    const shouldKeepNativeArrowBehavior = (event: KeyboardEvent): boolean => {
+      const target = event.target;
+      return target instanceof HTMLInputElement
+        || target instanceof HTMLSelectElement
+        || target instanceof HTMLTextAreaElement
+        || (target instanceof HTMLElement && target.isContentEditable);
+    };
+    this.scope.register([], 'ArrowLeft', (event) => {
+      if (shouldKeepNativeArrowBehavior(event)) return;
+      event.preventDefault();
+      void this.select(this.selectedIndex - 1);
+      return false;
+    });
+    this.scope.register([], 'ArrowRight', (event) => {
+      if (shouldKeepNativeArrowBehavior(event)) return;
+      event.preventDefault();
+      void this.select(this.selectedIndex + 1);
+      return false;
+    });
+
     void this.render();
   }
 
