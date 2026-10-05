@@ -121,7 +121,7 @@ export class VersionBrowserModal extends Modal {
         'aria-label': 'Version timeline',
       },
     });
-    slider.addEventListener('input', () => void this.select(Number(slider.value)));
+    slider.addEventListener('change', () => void this.select(Number(slider.value)));
 
     const next = nav.createEl('button', { text: '→', attr: { 'aria-label': 'Next version' } });
     next.disabled = this.selectedIndex === this.timeline.length - 1;
