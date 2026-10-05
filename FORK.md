@@ -18,7 +18,9 @@ The desired experience is:
 
 That led first to low-latency Nextcloud Client Push and foreground Android watch-mode work. While integrating and testing those changes across several devices, a number of smaller edge cases also became visible. Those are kept as isolated fixes rather than being folded invisibly into the integration branch.
 
-The result is the **fast-nextcloud-sync** integration branch: upstream plus a set of independently reviewable feature and fix branches.
+The result is the **integration/all-topics** branch: upstream plus a set of independently reviewable feature, fix, and fork-documentation branches.
+
+The name deliberately does **not** reuse "Fast Nextcloud Sync": that name is reserved for the standalone installable repository/plugin, so "integration/all-topics" always means the combined development branch in this repository.
 
 ## Repository structure
 
@@ -29,8 +31,8 @@ The branch layout is deliberate.
 - Every fix is developed on its own `fixes/*` branch, created directly from `main`.
 - Documentation specific to this fork lives on an isolated `docs/*` topic branch.
 - Every topic branch has a Draft PR against this fork's `main` documenting motivation, scope, behavior, dependencies, and validation.
-- `fast-nextcloud-sync` is integration-only: it is built from upstream plus the topic branches.
-- Functional fixes are not supposed to exist only on `fast-nextcloud-sync`. If integration exposes a bug, the change belongs in the relevant topic branch first and is then merged back into the integration branch.
+- `integration/all-topics` is integration-only: it is built from upstream plus the topic branches.
+- Functional fixes are not supposed to exist only on `integration/all-topics`. If integration exposes a bug, the change belongs in the relevant topic branch first and is then merged back into the integration branch.
 - Temporary validation/freeze branches are disposable and should not be treated as part of the maintained branch set.
 
 This makes it possible to keep the practical all-features build while still preserving changes in a form that can be reviewed, discussed, or proposed upstream individually.
@@ -44,7 +46,7 @@ The intended workflow is:
 1. keep `main` aligned with upstream,
 2. develop one feature/fix at a time on an isolated topic branch from `main`,
 3. document each topic with a Draft PR,
-4. integrate validated topics into `fast-nextcloud-sync`,
+4. integrate validated topics into `integration/all-topics`,
 5. run build, lint, tests, secret scans and real-device checks there,
 6. promote that validated integration state to the standalone plugin repository,
 7. apply only the small standalone identity/package/documentation layer,
@@ -169,9 +171,16 @@ Using separate Nextcloud users also preserves useful server-side authorship wher
 
 Nextcloud Group Folders use a different version backend from ordinary user storage.
 
-In testing, restoring a normal personal-file revision can make that old revision the live current file with its old timestamp and author metadata. Group Folder restore can instead copy the selected content into a new live current state, while the retained historical revision remains separately visible.
+In testing, restoring a normal personal-file revision can make that old revision the live current file with its historical mtime. Core Nextcloud can consume the restored source from retained version storage while newer pre-restore revisions remain. Group Folder restore uses a different backend and can keep the historical source separately visible while producing a distinct live Current state.
 
-The fork therefore does not invent restore provenance. It displays the metadata Nextcloud actually exposes and treats Current as the final logical state for comparison and Line History.
+The fork therefore separates two concepts:
+
+- **Current** = the live state now, always the logical final state.
+- **Historical/provenance position** = where the Current content can be traced in the available version timeline.
+
+When core restore has consumed the historical source but Current still carries its old revision time, the UI may add a non-restorable virtual **Restored source revision** at that historical position. The same content can therefore appear once historically and once as Current. This is intentional and allows Version Browser and Line History to preserve chronology without pretending that Nextcloud still stores a restorable copy.
+
+Line History must show only lines present in the selected target state. Later pre-restore states may contribute historical context, but their later-only/deleted lines must never leak into restored Current.
 
 ## Server-side Client Push
 
@@ -226,7 +235,7 @@ The standalone distribution repository now exists at:
 - plugin ID: `fast-nextcloud-sync`
 - display name: **Fast Nextcloud Sync**
 
-That repository is the installable/BRAT-facing copy of a validated `fast-nextcloud-sync` integration state, with only the small identity/package/documentation layer changed.
+That repository is the installable/BRAT-facing copy of a validated `integration/all-topics` integration state, with only the small identity/package/documentation layer changed.
 
 The standalone plugin is primarily made for personal/family use and experimentation. It may also be useful to others, but there is **no guarantee of long-term maintenance, support, compatibility, or release cadence**.
 
