@@ -18,7 +18,7 @@ Plugin identity:
 - **display name:** `Fast Nextcloud Sync`
 - **description:** clearly identify it as an unofficial fork of Nextcloud Sync focused on low-latency push/watch behavior and enhanced Nextcloud integration
 
-The exact name/ID should be finalized before the repository is created. Once users have installed a plugin under an ID, changing it later is disruptive.
+The plugin ID is intentionally distinct from upstream so the standalone build can be installed independently. It should now be treated as stable; changing it after users install the plugin would be disruptive.
 
 ## Source baseline
 
