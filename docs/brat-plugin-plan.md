@@ -8,13 +8,11 @@ Create a separate, installable plugin repository for personal/family testing thr
 
 The development fork remains useful for upstream tracking and isolated topic branches. The standalone repository is the distribution surface.
 
-## Proposed repository
+## Repository
 
-Suggested repository name:
+[`crispyduck00/fast-nextcloud-sync`](https://github.com/crispyduck00/fast-nextcloud-sync)
 
-`crispyduck00/fast-nextcloud-sync`
-
-Suggested plugin identity:
+Plugin identity:
 
 - **manifest id:** `fast-nextcloud-sync`
 - **display name:** `Fast Nextcloud Sync`
