@@ -1,3 +1,15 @@
+> [!IMPORTANT]
+> **This repository is an unofficial fork of [siosig/obsidian-nextcloudsync](https://github.com/siosig/obsidian-nextcloudsync).**
+> The upstream project remains the foundation and source of the sync engine. This fork adds an integration branch focused on lower-latency Client Push, optional Android foreground watch, enhanced version-history UX, and isolated sync/recovery fixes.
+>
+> **Branch model:** `main` tracks upstream; independent `features/*` / `fixes/*` topics are documented by Draft PRs; `fast-nextcloud-sync` is their integration branch.
+>
+> See **[FORK.md](FORK.md)** for the motivation, architecture, feature overview, multi-user / Team Folder notes, future conflict-file ideas, installation status, attribution, and license details.
+>
+> Many thanks to **Daisuke ITO (@siosig)** for the original project and its careful reliability-focused design.
+
+---
+
 # Nextcloud Sync for Obsidian
 
 **Good news for anyone working across multiple desktops and mobile devices.**
