@@ -14,6 +14,11 @@ import { confirmModal } from './ui/ConfirmModal';
 import { openMirrorFromRemoteModal } from './ui/MirrorFromRemoteModal';
 import { registerSyncRibbon } from './ui/syncRibbon';
 import { registerMirrorRibbon, registerStatusCommands } from './ui/statusEntryPoints';
+import {
+  registerVersionHistoryEntryPoints,
+  VERSION_HISTORY_ICON,
+  VERSION_HISTORY_LABEL,
+} from './ui/versionHistoryEntryPoints';
 import { FileLogger } from './util/FileLogger';
 import { onAppResume, makeResumeSyncHandler } from './util/appResume';
 import { isSyncTmpPath, LocalAdapter } from './data/LocalAdapter';
@@ -136,17 +141,9 @@ export default class ObsidianNextcloudsync extends Plugin {
     registerMirrorRibbon(this);
     registerStatusCommands(this);
 
-    this.addCommand({
-      id: 'show-version-history',
-      name: 'Show version history',
-      checkCallback: (checking: boolean) => {
-        const file = this.app.workspace.getActiveFile();
-        if (!file || !this.syncEngine) return false;
-        if (checking) return true;
-        void this.showVersionHistory(file);
-        return true;
-      },
-    });
+    // Version history is a first-class file tool: one click in the desktop ribbon, two taps via
+    // mobile Open menu, or one tap when the command is pinned to Obsidian's mobile toolbar.
+    registerVersionHistoryEntryPoints(this);
 
     // Explorer "Compare with remote" context-menu item. Always available when a single file is
     // selected and the sync engine is configured.
@@ -155,6 +152,10 @@ export default class ObsidianNextcloudsync extends Plugin {
       // deps, and the layout collapses to a single column on narrow screens.
       if (!(file instanceof TFile)) return; // single file only
       if (!this.syncEngine) return;          // engine must be configured
+      menu.addItem(item => item
+        .setTitle(VERSION_HISTORY_LABEL)
+        .setIcon(VERSION_HISTORY_ICON)
+        .onClick(() => { void this.showVersionHistory(file); }));
       menu.addItem(item => item
         .setTitle('Compare with remote')
         .setIcon('git-compare')
@@ -451,6 +452,23 @@ export default class ObsidianNextcloudsync extends Plugin {
   }
 
   /** Fetch the server-side version history of the active note and show the modal (US2). */
+  /**
+   * Shared active-file entry point for ribbon/command/mobile toolbar. Unlike a checkCallback this
+   * stays visible and explains why it cannot open, instead of silently disappearing.
+   */
+  openVersionHistoryForActiveFile(): void {
+    const file = this.app.workspace.getActiveFile();
+    if (!(file instanceof TFile)) {
+      new Notice('No active file for version history.', 4000);
+      return;
+    }
+    if (!this.syncEngine) {
+      new Notice('Configure the server settings first.', 5000);
+      return;
+    }
+    void this.showVersionHistory(file);
+  }
+
   private async showVersionHistory(file: TFile): Promise<void> {
     const engine = this.syncEngine;
     if (!engine) return;
