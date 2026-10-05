@@ -50,22 +50,45 @@ export class VersionService {
       return { ...version, isCurrent: false };
     });
 
-    if (found) return marked;
+    const withCurrent = found
+      ? marked
+      : [{
+          versionId: `current-${currentRevision}`,
+          href: '',
+          lastModified: current.lastModified,
+          size: current.size,
+          author: null,
+          label: '',
+          mimeType: '',
+          etag: current.etag ?? undefined,
+          isCurrent: true,
+        }, ...marked];
 
-    // After a restore (and on some Nextcloud backends) the live file is not necessarily returned as
-    // a retained DAV version with the same timestamp. Still expose exactly one Current entry: it is
-    // the real remote file and is read through the normal files endpoint, never restored.
-    return [{
-      versionId: `current-${currentRevision}`,
+    return this.addCurrentRevisionAnchor(withCurrent);
+  }
+
+  /**
+   * A restore can make an old revision the live Current state while newer pre-restore revisions
+   * remain retained. Core files_versions may consume the restored source file, so that old state
+   * otherwise disappears from chronological browsing/provenance. Represent its historical position
+   * with a virtual, non-restorable anchor backed by the live Current body.
+   */
+  private addCurrentRevisionAnchor(versions: FileVersion[]): FileVersion[] {
+    const current = versions.find((version) => version.isCurrent);
+    if (!current) return versions;
+    const newerHistoricalExists = versions.some((version) =>
+      !version.isCurrent && version.lastModified > current.lastModified,
+    );
+    if (!newerHistoricalExists) return versions;
+
+    const anchor: FileVersion = {
+      ...current,
+      versionId: `current-anchor-${Math.floor(current.lastModified / 1000)}`,
+      isCurrent: false,
+      isCurrentRevisionAnchor: true,
       href: '',
-      lastModified: current.lastModified,
-      size: current.size,
-      author: null,
-      label: '',
-      mimeType: '',
-      etag: current.etag ?? undefined,
-      isCurrent: true,
-    }, ...marked];
+    };
+    return [...versions, anchor];
   }
 
   /** Compare two retained revisions (or one retained revision with current). Read-only. */
@@ -112,12 +135,35 @@ export class VersionService {
     // historical snapshot followed by the live Current body.
     const ordered = timeline.slice(0, targetIndex + 1);
     const snapshots: VersionSnapshot[] = [];
+    let liveCurrentText: string | null = null;
     for (const version of ordered) {
-      const data = await this.readVersionData(client, path, fileId, version);
-      snapshots.push({ version, text: new TextDecoder().decode(data) });
+      let text: string;
+      if (version.isCurrentRevisionAnchor && liveCurrentText !== null) {
+        text = liveCurrentText;
+      } else {
+        const data = await this.readVersionData(client, path, fileId, version);
+        text = new TextDecoder().decode(data);
+        if (version.isCurrent) liveCurrentText = text;
+      }
+      snapshots.push({ version, text });
       // Yield between downloads/diffs so opening history for a deep file does not monopolize Android.
       await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
     }
+
+    if (targetVersion.isCurrent) {
+      const currentSnapshot = snapshots[snapshots.length - 1];
+      if (currentSnapshot?.version.isCurrent) {
+        // A restored Current may exactly equal an older retained (Group Folders) or virtual
+        // current-revision state (core user storage). Line provenance describes where the CURRENT
+        // content can first be traced, not every state transition that happened after that content
+        // existed. In that case stop at the earliest exact historical match.
+        const matchIndex = snapshots.findIndex((snapshot, index) =>
+          index < snapshots.length - 1 && snapshot.text === currentSnapshot.text,
+        );
+        if (matchIndex >= 0) return reconstructLineHistory(snapshots.slice(0, matchIndex + 1));
+      }
+    }
+
     return reconstructLineHistory(snapshots);
   }
 
@@ -137,7 +183,7 @@ export class VersionService {
   async restoreVersion(
     client: IWebDAVClient, features: NextcloudFeatures, path: string, version: FileVersion,
   ): Promise<void> {
-    if (version.isCurrent) return;
+    if (version.isCurrent || version.isCurrentRevisionAnchor) return;
     const fileId = this.requireFileId(features, path);
 
     await client.restoreVersion(version, fileId);
@@ -156,7 +202,9 @@ export class VersionService {
   private readVersionData(
     client: IWebDAVClient, path: string, fileId: string, version: FileVersion,
   ): Promise<ArrayBuffer> {
-    return version.isCurrent ? client.downloadFile(path) : client.getVersionContent(version, fileId);
+    return version.isCurrent || version.isCurrentRevisionAnchor
+      ? client.downloadFile(path)
+      : client.getVersionContent(version, fileId);
   }
 
   private requireFileId(features: NextcloudFeatures, path: string): string {
