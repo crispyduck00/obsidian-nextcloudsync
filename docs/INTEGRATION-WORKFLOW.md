@@ -27,6 +27,10 @@ be rebased, tested and proposed upstream one topic at a time.
 A feature may have a functional dependency on a fix, but the feature branch must not be stacked on
 that fix branch. Dependencies are documented in the corresponding draft PR.
 
+### CI workflow note
+
+The development fork keeps `main` identical to upstream, including upstream-owned GitHub Actions workflows. Topic branches therefore inherit those workflows unchanged. A topic with an open Draft PR may legitimately receive both a `push` and a `pull_request` workflow run. Fork-only CI-noise changes are not kept as product `fixes/*` topics; correctness and upstream-aligned branch history take priority over eliminating duplicate successful CI runs.
+
 ## Integrated features
 
 ### Client Push
@@ -115,9 +119,6 @@ and visually biased to the right.
 
 - `fixes/version-restore-state-convergence`
   - records the server's real remote identity, mtime and file ID after a version restore so the next sync does not falsely merge/re-upload the restored file
-
-- `fixes/secret-scan-duplication`
-  - scans topic branches through pull requests, keeps push scans on main/integration, and cancels superseded runs to avoid duplicate failure-notification noise
 
 ## Validation
 
