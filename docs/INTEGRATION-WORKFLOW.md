@@ -113,16 +113,22 @@ and visually biased to the right.
 - `fixes/watch-folder-delete-safety`
   - prevents recursive Watch deletion of a remote directory unless live emptiness is proven
 
+- `fixes/version-restore-state-convergence`
+  - records the server's real remote identity, mtime and file ID after a version restore so the next sync does not falsely merge/re-upload the restored file
+
+- `fixes/secret-scan-duplication`
+  - scans topic branches through pull requests, keeps push scans on main/integration, and cancels superseded runs to avoid duplicate failure-notification noise
+
 ## Validation
 
-Final integration validation on 2026-10-04 passed:
+Integration validation through 2026-10-05 includes:
 
 - `pnpm build`
 - `pnpm lint`
 - full `pnpm test`
 - secret scan
 
-The final integration includes all current `features/*` and `fixes/*` topic heads.
+The integration branch includes all currently selected `features/*`, `fixes/*`, and maintained fork-documentation topic heads. Version History restore/browser/Line History behavior was also exercised interactively on desktop and Android during the 2026-10-05 update.
 
 ## Upstream workflow
 
