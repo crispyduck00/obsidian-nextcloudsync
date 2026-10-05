@@ -1318,6 +1318,12 @@ export class SyncEngine {
     return this.versions.lineHistory(client, features, path, versions, targetVersion);
   }
 
+  /** @see VersionService.readVersionText */
+  async readVersionText(path: string, version: FileVersion): Promise<string> {
+    const { client, features } = await this.ensureClient();
+    return this.versions.readVersionText(client, features, path, version);
+  }
+
   /** @see VersionService.restoreVersion */
   async restoreVersion(path: string, version: FileVersion): Promise<void> {
     const { client, features } = await this.ensureClient();
