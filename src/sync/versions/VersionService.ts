@@ -138,12 +138,12 @@ export class VersionService {
     let liveCurrentText: string | null = null;
     for (const version of ordered) {
       let text: string;
-      if (version.isCurrentRevisionAnchor && liveCurrentText !== null) {
+      if ((version.isCurrent || version.isCurrentRevisionAnchor) && liveCurrentText !== null) {
         text = liveCurrentText;
       } else {
         const data = await this.readVersionData(client, path, fileId, version);
         text = new TextDecoder().decode(data);
-        if (version.isCurrent) liveCurrentText = text;
+        if (version.isCurrent || version.isCurrentRevisionAnchor) liveCurrentText = text;
       }
       snapshots.push({ version, text });
       // Yield between downloads/diffs so opening history for a deep file does not monopolize Android.
