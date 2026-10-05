@@ -216,19 +216,23 @@ The fork should not be read as criticism of the upstream project. It exists prec
 
 ## Installation and BRAT
 
-This fork repository is currently the development/integration source.
+This repository is the **development/integration fork**.
 
-Its upstream-derived manifest still uses the upstream plugin ID (`nextcloud-sync`). Installing it directly alongside the official plugin would therefore conflict.
+Its upstream-derived manifest intentionally still uses the upstream plugin ID (`nextcloud-sync`), because the code here stays close to upstream. Installing this development fork directly alongside the official plugin would therefore conflict.
 
-A separate distributable repository is planned for easier family/testing deployment through **BRAT**, with:
+The standalone distribution repository now exists at:
 
-- its own plugin ID and display name
-- releases/build artifacts suitable for BRAT
-- the integrated `fast-nextcloud-sync` code as its source baseline
-- the same MIT license and upstream attribution
-- an explicit note that it is an unofficial fork, not the upstream/community-plugin release
+- repository: [`crispyduck00/fast-nextcloud-sync`](https://github.com/crispyduck00/fast-nextcloud-sync)
+- plugin ID: `fast-nextcloud-sync`
+- display name: **Fast Nextcloud Sync**
 
-Until that repository exists, treat this repository primarily as source/development material.
+That repository is the installable/BRAT-facing copy of a validated `fast-nextcloud-sync` integration state, with only the small identity/package/documentation layer changed.
+
+The standalone plugin is primarily made for personal/family use and experimentation. It may also be useful to others, but there is **no guarantee of long-term maintenance, support, compatibility, or release cadence**.
+
+Contributions, testing, improvements, and continued maintenance by interested users are welcome. Useful parts may also be proposed or merged upstream, wholly or partially, when they fit the upstream project's design.
+
+If the standalone build proves useful and maintainable, submitting it later as a separate Obsidian Community Plugin can be considered. Until then, BRAT is the preferred distribution/testing path.
 
 ## License
 
