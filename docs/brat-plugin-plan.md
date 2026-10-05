@@ -22,7 +22,7 @@ The plugin ID is intentionally distinct from upstream so the standalone build ca
 
 ## Source baseline
 
-Use the validated `fast-nextcloud-sync` integration tree as the code baseline.
+Use the validated `integration/all-topics` integration tree as the code baseline.
 
 Do not use the development fork's `main` branch as the standalone source: that branch intentionally tracks upstream without the integrated fork features.
 
@@ -77,7 +77,7 @@ A practical workflow:
 
 1. update/rebase the development fork's `main` from upstream
 2. recreate or update independent topic branches as necessary
-3. merge the validated topics into `fast-nextcloud-sync`
+3. merge the validated topics into `integration/all-topics`
 4. run the complete validation matrix there
 5. update the standalone repository from that validated integration tree
 6. re-apply only the small standalone identity/package layer
