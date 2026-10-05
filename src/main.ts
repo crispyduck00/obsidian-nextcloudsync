@@ -5,6 +5,7 @@ import { SyncEngine } from './sync/SyncEngine';
 import { VersionHistoryModal } from './ui/VersionHistoryModal';
 import { VersionCompareModal } from './ui/VersionCompareModal';
 import { LineHistoryModal } from './ui/LineHistoryModal';
+import { VersionBrowserModal } from './ui/VersionBrowserModal';
 import { SyncStatusModal } from './ui/SyncStatusModal';
 import { StatusFilterState, makeDefaultFilterState, serializeFilter, deserializeFilter } from './ui/statusFilter';
 import { CompareModal } from './ui/CompareModal';
@@ -488,6 +489,17 @@ export default class ObsidianNextcloudsync extends Plugin {
                 historyModal.close();
               }
             : undefined,
+        ).open(),
+        () => new VersionBrowserModal(
+          this.app,
+          file.path,
+          versions,
+          this.settings.username,
+          (version) => engine.readVersionText(file.path, version),
+          async (version) => {
+            await engine.restoreVersion(file.path, version);
+            historyModal.close();
+          },
         ).open(),
         (version) => engine.restoreVersion(file.path, version),
       );
