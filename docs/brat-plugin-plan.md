@@ -1,6 +1,6 @@
 # Standalone / BRAT repository plan
 
-This document records the intended packaging step after the `fast-nextcloud-sync` integration branch is validated.
+This document records the packaging model for the standalone `fast-nextcloud-sync` repository. The repository has now been created and is used as the BRAT/distribution surface after a validated integration state is promoted from the development fork.
 
 ## Goal
 
@@ -8,19 +8,17 @@ Create a separate, installable plugin repository for personal/family testing thr
 
 The development fork remains useful for upstream tracking and isolated topic branches. The standalone repository is the distribution surface.
 
-## Proposed repository
+## Repository
 
-Suggested repository name:
+[`crispyduck00/fast-nextcloud-sync`](https://github.com/crispyduck00/fast-nextcloud-sync)
 
-`crispyduck00/fast-nextcloud-sync`
-
-Suggested plugin identity:
+Plugin identity:
 
 - **manifest id:** `fast-nextcloud-sync`
 - **display name:** `Fast Nextcloud Sync`
 - **description:** clearly identify it as an unofficial fork of Nextcloud Sync focused on low-latency push/watch behavior and enhanced Nextcloud integration
 
-The exact name/ID should be finalized before the repository is created. Once users have installed a plugin under an ID, changing it later is disruptive.
+The plugin ID is intentionally distinct from upstream so the standalone build can be installed independently. It should now be treated as stable; changing it after users install the plugin would be disruptive.
 
 ## Source baseline
 

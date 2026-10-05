@@ -35,6 +35,35 @@ The branch layout is deliberate.
 
 This makes it possible to keep the practical all-features build while still preserving changes in a form that can be reviewed, discussed, or proposed upstream individually.
 
+## Development and distribution workflow
+
+The development fork and the installable plugin deliberately have different roles.
+
+The intended workflow is:
+
+1. keep `main` aligned with upstream,
+2. develop one feature/fix at a time on an isolated topic branch from `main`,
+3. document each topic with a Draft PR,
+4. integrate validated topics into `fast-nextcloud-sync`,
+5. run build, lint, tests, secret scans and real-device checks there,
+6. promote that validated integration state to the standalone plugin repository,
+7. apply only the small standalone identity/package/documentation layer,
+8. publish BRAT-friendly releases from the standalone repository.
+
+That means this repository is where experimentation and upstream-oriented development happen; the standalone repository is the distribution surface.
+
+## AI-assisted development
+
+A substantial part of the fork-specific code, tests, documentation and review work has been produced with the assistance of AI coding tools.
+
+That is intentional and is disclosed openly.
+
+AI output is not treated as authoritative by itself. Changes are directed and reviewed by the maintainer, kept in isolated topic branches, covered by automated tests where practical, integrated only after validation, and exercised on real desktop/Android clients against Nextcloud.
+
+AI assistance can still introduce incorrect assumptions or subtle bugs. The branch structure, Draft PRs, tests, logs, conservative fallbacks and real-world testing are used to make such problems easier to detect and isolate.
+
+The fork should therefore be viewed as **AI-assisted, human-directed and tested**, not as code claimed to have been written or verified entirely by hand.
+
 ## Main additions in this fork
 
 ### Nextcloud Client Push
@@ -187,19 +216,23 @@ The fork should not be read as criticism of the upstream project. It exists prec
 
 ## Installation and BRAT
 
-This fork repository is currently the development/integration source.
+This repository is the **development/integration fork**.
 
-Its upstream-derived manifest still uses the upstream plugin ID (`nextcloud-sync`). Installing it directly alongside the official plugin would therefore conflict.
+Its upstream-derived manifest intentionally still uses the upstream plugin ID (`nextcloud-sync`), because the code here stays close to upstream. Installing this development fork directly alongside the official plugin would therefore conflict.
 
-A separate distributable repository is planned for easier family/testing deployment through **BRAT**, with:
+The standalone distribution repository now exists at:
 
-- its own plugin ID and display name
-- releases/build artifacts suitable for BRAT
-- the integrated `fast-nextcloud-sync` code as its source baseline
-- the same MIT license and upstream attribution
-- an explicit note that it is an unofficial fork, not the upstream/community-plugin release
+- repository: [`crispyduck00/fast-nextcloud-sync`](https://github.com/crispyduck00/fast-nextcloud-sync)
+- plugin ID: `fast-nextcloud-sync`
+- display name: **Fast Nextcloud Sync**
 
-Until that repository exists, treat this repository primarily as source/development material.
+That repository is the installable/BRAT-facing copy of a validated `fast-nextcloud-sync` integration state, with only the small identity/package/documentation layer changed.
+
+The standalone plugin is primarily made for personal/family use and experimentation. It may also be useful to others, but there is **no guarantee of long-term maintenance, support, compatibility, or release cadence**.
+
+Contributions, testing, improvements, and continued maintenance by interested users are welcome. Useful parts may also be proposed or merged upstream, wholly or partially, when they fit the upstream project's design.
+
+If the standalone build proves useful and maintainable, submitting it later as a separate Obsidian Community Plugin can be considered. Until then, BRAT is the preferred distribution/testing path.
 
 ## License
 
