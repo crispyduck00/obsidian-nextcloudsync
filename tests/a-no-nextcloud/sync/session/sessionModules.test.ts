@@ -379,6 +379,24 @@ describe('VersionService', () => {
     expect(calls.downloaded).toEqual(['note.md']);
   });
 
+  it('reads retained and current version bodies through the correct endpoints', async () => {
+    const { service, client, calls } = build(tracked('fid-7'));
+    const historical: FileVersion = {
+      versionId: 'v1', href: '/v/v1', lastModified: 1, size: 1,
+    };
+    const current: FileVersion = {
+      versionId: 'current', href: '', lastModified: 2, size: 1, isCurrent: true,
+    };
+
+    await expect(service.readVersionText(client, NEXTCLOUD, 'note.md', historical))
+      .resolves.toBe('version-v1');
+    await expect(service.readVersionText(client, NEXTCLOUD, 'note.md', current))
+      .resolves.toBe('restored body');
+
+    expect(calls.fetchedVersions).toEqual(['fid-7:v1']);
+    expect(calls.downloaded).toEqual(['note.md']);
+  });
+
   it('builds historical line history only up to the selected retained version', async () => {
     const { service, client, calls } = build(tracked('fid-7'));
     const v1: FileVersion = { versionId: 'v1', href: '/v/v1', lastModified: 1, size: 1 };
@@ -391,6 +409,21 @@ describe('VersionService', () => {
 
     expect(calls.fetchedVersions).toEqual(['fid-7:v1', 'fid-7:v2']);
     expect(calls.downloaded).toEqual([]);
+  });
+
+  it('treats Current as the final line-history state even when its mtime is older', async () => {
+    const { service, client, calls } = build(tracked('fid-7'));
+    const v1: FileVersion = { versionId: 'v1', href: '/v/v1', lastModified: 10, size: 1 };
+    const v2: FileVersion = { versionId: 'v2', href: '/v/v2', lastModified: 20, size: 1 };
+    const v3: FileVersion = { versionId: 'v3', href: '/v/v3', lastModified: 30, size: 1 };
+    const current: FileVersion = {
+      versionId: 'current-old-mtime', href: '', lastModified: 10, size: 1, isCurrent: true,
+    };
+
+    await service.lineHistory(client, NEXTCLOUD, 'note.md', [current, v3, v1, v2], current);
+
+    expect(calls.fetchedVersions).toEqual(['fid-7:v1', 'fid-7:v2', 'fid-7:v3']);
+    expect(calls.downloaded).toEqual(['note.md']);
   });
 
   it('restores on the server, applies the result locally, then converges the state DB', async () => {
