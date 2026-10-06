@@ -77,6 +77,21 @@ Adds a compact Android action-strip sync indicator:
 The current layout keeps the tap target unchanged while making the foreground icon slightly smaller
 and visually biased to the right.
 
+### Enhanced Nextcloud Version History
+
+Branch: `features/version-history`
+
+Adds a richer UI around versions retained by Nextcloud:
+- version metadata and author information when exposed by Nextcloud
+- Compare current / Compare previous
+- desktop side-by-side and mobile unified diff views
+- retained-version Line History
+- read-only Version Browser with timeline navigation and Markdown Rendered / Source modes
+- restore entry points from history, compare, line history, and the browser
+- logical Current-state handling across ordinary storage and Team / Group Folder restore semantics
+
+Line History is retained-version provenance rather than Git blame; pruned intermediate versions cannot be reconstructed.
+
 ## Integrated fixes
 
 - `fixes/sync-activity-coordination`
