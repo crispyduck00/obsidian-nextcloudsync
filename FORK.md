@@ -66,6 +66,24 @@ AI assistance can still introduce incorrect assumptions or subtle bugs. The bran
 
 The fork should therefore be viewed as **AI-assisted, human-directed and tested**, not as code claimed to have been written or verified entirely by hand.
 
+## Demo
+
+The integrated fork is exercised on real Windows and Android Obsidian clients against Nextcloud.
+
+![Fast Nextcloud Sync demo](docs/assets/fast-nextcloud-sync-demo.gif)
+
+The short demo shows low-latency Desktop ↔ Android synchronization and briefly opens the enhanced Nextcloud Version History.
+
+### Compact Android sync status
+
+<img src="docs/assets/mobile-sync-status.png" width="360" alt="Fast Nextcloud Sync compact Android sync status">
+
+### Version comparison
+
+![Fast Nextcloud Sync version comparison](docs/assets/version-history-diff.png)
+
+These media are illustrative examples from the integrated fork. The standalone installable build is published in [crispyduck00/fast-nextcloud-sync](https://github.com/crispyduck00/fast-nextcloud-sync).
+
 ## Main additions in this fork
 
 ### Nextcloud Client Push

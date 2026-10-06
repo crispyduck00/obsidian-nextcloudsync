@@ -18,6 +18,22 @@ https://github.com/crispyduck00/obsidian-nextcloudsync
 
 The fork keeps its `main` branch aligned with upstream. Each feature/fix is developed independently from upstream/main and documented with a Draft PR. The combined build lives only on `integration/all-topics`.
 
+A short demo of the integrated build:
+
+![Fast Nextcloud Sync demo](https://raw.githubusercontent.com/crispyduck00/obsidian-nextcloudsync/integration/all-topics/docs/assets/fast-nextcloud-sync-demo.gif)
+
+The demo shows real Desktop ↔ Android synchronization through Nextcloud and briefly opens the enhanced Version History.
+
+Mobile sync status:
+
+<img src="https://raw.githubusercontent.com/crispyduck00/obsidian-nextcloudsync/integration/all-topics/docs/assets/mobile-sync-status.png" width="360" alt="Fast Nextcloud Sync compact Android sync status">
+
+Version comparison:
+
+![Fast Nextcloud Sync version comparison](https://raw.githubusercontent.com/crispyduck00/obsidian-nextcloudsync/integration/all-topics/docs/assets/version-history-diff.png)
+
+For the final Discussion post, the original MP4 can also be attached directly so the sync latency is easier to inspect than in the compact GIF.
+
 The main experimental additions are:
 
 - **Nextcloud Client Push / notify_push**: remote notifications trigger targeted reconciliation when the pushed file ID can be resolved safely, with fallback to the normal authoritative full reconciliation for unknown/structural cases.
