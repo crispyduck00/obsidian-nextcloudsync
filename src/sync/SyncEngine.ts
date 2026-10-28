@@ -212,7 +212,12 @@ export class SyncEngine {
       queueRetry: (p) => { this.retryQueue.push(p); },
       logger: opts.logger,
     });
-    this.versions = new VersionService({ localAdapter: opts.localAdapter, stateDB: opts.stateDB });
+    this.versions = new VersionService({
+      localAdapter: opts.localAdapter,
+      stateDB: opts.stateDB,
+      mergeBase: this.mergeBase,
+      flushMergeBase: () => this.opts.baseStore?.flush() ?? Promise.resolve(),
+    });
     this.deletion = new DeletionService({
       app: opts.app,
       stateDB: opts.stateDB,
@@ -1508,4 +1513,3 @@ export class SyncEngine {
     });
   }
 }
-
