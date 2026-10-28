@@ -247,13 +247,16 @@ Tests: `WOV-1` (`watchOverlap.test.ts`) / `WOV-2` (`writeWhileEditing.test.ts`).
 
 ### §5.7c Watch and Wi-Fi only on mobile (`MWM-1` to `MWM-6`)
 
-- Watch runs according to the value of `watchOnChangeEnabled` regardless of the platform. The runtime platform guard (the former `G7-2` `isWatchModeActive`) was removed. The origin of the value (switched ON on this device, or a copied setting) is not distinguished.
+Fork adaptation: `MWM-1` keeps Desktop enabled, allows explicit Android foreground Watch and keeps iOS gated off. Existing Android opt-in settings survive this upstream update. Plugin events are filtered before lifecycle recovery; suspension/network uncertainty still uses normal full reconciliation. See `docs/topics/features-mobile-watch.md`.
+
+
+- Desktop Watch follows `watchOnChangeEnabled`. Android adds explicit opt-in and foreground lifecycle recovery; iOS remains gated off. The one-time Android migration is not repeated for a previously opted-in device.
 - Rationale: watch reacts at the moment of editing, and at that moment the app is always in the foreground. Changes lost to an interruption are detected as differences by the next full sync (startup, resume, or manual).
 - The initial mobile default remains OFF (opt-in; §15).
 - The 6 operations (`syncSingleFile` / `deleteSingleFile` / `renameSingleFile` / `createSingleFolder` / `deleteSingleFolder` / `renameSingleFolder`) evaluate, at their entry, the same Wi-Fi only decision as a full sync (`SyncEngine.isBlockedByWifiOnly` -> `isCellularBlocked`, port `WatchDeps.isBlockedByWifiOnly`). While blocked on cellular, they touch none of the lock, StateDB, network, pending queue or notification, and leave only one log line `watch: skipped <op> <target> — Wi-Fi only is on and the connection is cellular`.
 - A skipped change is put on neither the retry queue nor the pending set. The scan of the next full sync picks it up (a rename converges as deletion of the old path plus upload of the new path, and is not propagated as a MOVE).
 - The Wi-Fi only decision itself is unchanged (it stops only when the connection is known to be cellular; it does not stop when undeterminable, on iOS, or on desktop).
-- The settings-screen description does not branch by platform.
+- The settings-screen description explains Android foreground/best-effort behavior and the iOS gate.
 - Tests: `MWM-1` (`settingDefinitions.test.ts`) / `MWM-2` (`watchWifiOnlyGate.test.ts`) / `MWM-3` (b-1 `mobileWatchWifiOnly.b1.test.ts`) / `MWM-4` (b-3 `mobileWatch.b3.test.ts`) / `MWM-5` (`watchWifiOnlyWiring.test.ts`) / `MWM-6` (`mobileFirstRunDefaults.test.ts`).
 
 ### §5.8 Sync on foreground resume (`RSY-1` to `RSY-4`, `RMO-1`, GitHub discussion #44, issue #49)

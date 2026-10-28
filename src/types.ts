@@ -69,6 +69,12 @@ export interface DavSyncSettings {
   maxFileSizeMB: number;
   /** Watch mode: sync local edits immediately. */
   watchOnChangeEnabled: boolean;
+  /** Use Nextcloud Client Push (notify_push) as a best-effort remote-change trigger. */
+  useClientPush: boolean;
+  /** Optional WebSocket endpoint override. Empty = auto-detect from Nextcloud capabilities. */
+  clientPushUrlOverride: string;
+  /** One-time Android foreground-watch opt-in boundary. */
+  mobileWatchMigrationVersion?: number;
   /** Startup sync delay in seconds, 0-10; 0 = no startup sync. */
   startupSyncDelaySeconds: number;
   /** Number of concurrent WebDAV requests. Derived from device RAM on first run if not persisted. */
@@ -121,6 +127,9 @@ export const DEFAULT_SETTINGS: DavSyncSettings = {
   deviceId: '',
   maxFileSizeMB: 0, // desktop default; mobile gets a cap in loadSettings()
   watchOnChangeEnabled: true,
+  useClientPush: false,
+  clientPushUrlOverride: '',
+  mobileWatchMigrationVersion: 0,
   startupSyncDelaySeconds: 1,
   networkConcurrency: 16, // overridden on first run by autoNetworkConcurrency()
   // Mobile's first run flips this ON (metered data).
@@ -414,6 +423,31 @@ export interface FileVersion {
   lastModified: number;
   /** Size in bytes. */
   size: number;
+  /** Optional user-defined Nextcloud version label. */
+  label?: string;
+  /** Nextcloud user id recorded as the author of this retained version. */
+  author?: string | null;
+  /** MIME type reported for the retained version. */
+  mimeType?: string;
+  /** Version ETag, when exposed by the server. */
+  etag?: string;
+  /** Whether Nextcloud reports that a preview can be generated. */
+  hasPreview?: boolean;
+  /**
+   * True when this DAV version represents the current remote file. Nextcloud includes the current
+   * revision in the versions collection; consumers must download it through the normal files DAV
+   * endpoint rather than treating it as a restorable historical snapshot.
+   */
+  isCurrent?: boolean;
+  /**
+   * Synthetic, non-restorable historical placement of the live Current content.
+   *
+   * Core Nextcloud can consume the restored source version (moving it back to the live file) while
+   * preserving that old revision's mtime. If newer retained versions still exist, Current therefore
+   * has two roles: the live state "now", and evidence of the historical content at that older
+   * revision time. This flag marks the latter UI/provenance anchor; it is not a retained DAV version.
+   */
+  isCurrentRevisionAnchor?: boolean;
 }
 
 export class SyncTokenExpiredError extends Error {

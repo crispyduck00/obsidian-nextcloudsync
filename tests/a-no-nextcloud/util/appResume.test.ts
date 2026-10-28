@@ -1,8 +1,12 @@
 // [SPEC:RSY-1] [SPEC:RSY-2] [SPEC:RSY-3] Sync when the app returns to the foreground (discussion #44).
 //
-// Mobile has no periodic sync or watch mode (the OS suspends background timers), so coming back to the app
-// is the only trigger that does not depend on background execution. A trigger firing on every app switch
-// would cost data and battery for nothing, so the cooldown is tested as hard as the trigger.
+// Mobile has no reliable periodic background sync. Android may opt into foreground-only Watch, but
+// that deliberately does not promise work while suspended and does not replace remote catch-up.
+// Coming back to the app is the one moment when the app is provably alive and the user is looking at
+// it, which makes Resume the authoritative lifecycle trigger that does not depend on background work.
+//
+// The whole risk of this feature is the second half: a trigger that fires on every app switch would
+// cost the user data and battery for nothing. So the cooldown is tested as hard as the trigger.
 import {
   onAppResume,
   shouldSyncOnResume,

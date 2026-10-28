@@ -10,7 +10,7 @@ import { StateDB } from '../../data/StateDB';
 import { MergeBaseStore } from '../../data/MergeBaseStore';
 import { IWebDAVClient } from '../../network/IWebDAVClient';
 import { IUploadStrategy } from '../upload/IUploadStrategy';
-import { ConflictResolver, hasOrphanMarker, MergeConfig } from '../ConflictResolver';
+import { ConflictResolver, hasOrphanMarker, hasCompleteMarkerSet, MergeConfig } from '../ConflictResolver';
 import { SyncJournal } from '../session/SyncJournal';
 import { MergeBaseRecorder } from '../session/MergeBaseRecorder';
 import { TransferService } from '../transfer/TransferService';
@@ -196,10 +196,15 @@ export class ConflictApplier {
       identical = bytesEqual(localData, remoteData);
     }
     if (!identical) return { converged: false, remoteData };
+    const state = convergedState(remote, localHash, localStat, this.deps.stateDB.getFile(path));
+    // Only previously conflicted text needs a marker check. Binary convergence stays decode-free.
+    if (this.deps.stateDB.getFile(path)?.isConflicted) {
+      state.isConflicted = hasCompleteMarkerSet(new TextDecoder().decode(localData));
+    }
     this.deps.stateDB.setFile(await withLocalSignature(
-      this.deps.localAdapter, convergedState(remote, localHash, localStat), remote.lastModified,
+      this.deps.localAdapter, state, remote.lastModified,
     ));
-    this.deps.mergeBase.recordBytes(path, localData);
+    if (!state.isConflicted) this.deps.mergeBase.recordBytes(path, localData);
     await this.deps.creationTime?.align(conn.client, remote, localStat);
     void this.deps.logger?.log(`conflict: content identical to the remote → state converged, no transfer → ${path}`);
     return { converged: true };

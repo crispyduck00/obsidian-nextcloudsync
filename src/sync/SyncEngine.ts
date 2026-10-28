@@ -35,14 +35,19 @@ import { SyncJournal } from './session/SyncJournal';
 import { MergeBaseRecorder } from './session/MergeBaseRecorder';
 import { withLocalSignature } from '../data/localSignature';
 import { TransferService } from './transfer/TransferService';
-import { VersionService } from './versions/VersionService';
+import { VersionService, VersionComparison } from './versions/VersionService';
+import { LineHistoryResult } from './versions/lineHistory';
 import { remoteIdOf } from './remoteIdentity';
 import { checksumProvesIdentical, convergedState } from './identity/contentIdentity';
 import { DeletionService } from './deletion/DeletionService';
 import { ResolutionService } from './resolution/ResolutionService';
 import { ConflictApplier } from './conflict/ConflictApplier';
+import { hasCompleteMarkerSet } from './ConflictResolver';
 import { DirectoryReconciler } from './directory/DirectoryReconciler';
 import { WatchOperations } from './watch/WatchOperations';
+import { SyncActivityGate } from './SyncActivityGate';
+import { RemotePushReconciler, type RemoteBatchReconcileResult, type RemotePushBatch } from './push/RemotePushReconciler';
+import type { ClientPushScopeResult } from './push/PushSyncScheduler';
 import { MirrorService } from './mirror/MirrorService';
 import { SyncHistoryStore } from '../data/SyncHistoryStore';
 import { IStatusBar } from '../ui/StatusBarItem';
@@ -86,6 +91,9 @@ interface SyncEngineOptions {
   // Clean sides of marker-conflicted notes, so force-resolution restores real content instead of markers (docs/spec.md §6.4).
   cleanSideStore?: CleanSideStore;
   statusBar: IStatusBar;
+  /** Optional status surface for lightweight watch operations. */
+  lightweightStatusBar?: IStatusBar;
+  /** Persisted per-file sync-history log for the status dialog. Optional (absent in some tests). */
   historyStore?: SyncHistoryStore;
   webdavFactory: WebDAVFactory;
   pluginDir: string;
@@ -115,7 +123,7 @@ export class SyncEngine {
   // Set by requestStop(): workers stop pulling new work, while the run's finally block still saves state.
   private cancelled = false;
   // Lets abortAndWait() await a running sync's wind-down (including its final state save) before a reset.
-  private currentRun: Promise<void> | null = null;
+  private currentRun: Promise<boolean> | null = null;
   private readonly journal: SyncJournal;
 
   private readonly mergeBase: MergeBaseRecorder;
@@ -134,6 +142,10 @@ export class SyncEngine {
   private readonly directories: DirectoryReconciler;
 
   private readonly watch: WatchOperations;
+  /** Shared/exclusive gate: lightweight path operations may overlap each other, never a full sync. */
+  private readonly activityGate = new SyncActivityGate();
+  /** Resolves notify_push IDs and delegates only safe known-file work to the existing classifier. */
+  private readonly remotePush: RemotePushReconciler;
 
   private readonly mirror: MirrorService;
   private syncProgress = { processed: 0, total: 0 };
@@ -212,7 +224,17 @@ export class SyncEngine {
       queueRetry: (p) => { this.retryQueue.push(p); },
       logger: opts.logger,
     });
-    this.versions = new VersionService({ localAdapter: opts.localAdapter, stateDB: opts.stateDB });
+    this.versions = new VersionService({
+      localAdapter: opts.localAdapter,
+      stateDB: opts.stateDB,
+      mergeBase: this.mergeBase,
+      flushMergeBase: () => this.opts.baseStore?.flush() ?? Promise.resolve(),
+      // Markdown is always a mergeable text type in the sync engine even though `md` is
+      // intentionally not stored in autoMergeFileTypes. Version compare/line history must mirror
+      // that same policy: Markdown + every user-configured Auto Merge File type.
+      isTextEligible: (path) => path.toLowerCase().endsWith('.md')
+        || isTextEligible(path, this.opts.settings.autoMergeFileTypes),
+    });
     this.deletion = new DeletionService({
       app: opts.app,
       stateDB: opts.stateDB,
@@ -280,7 +302,7 @@ export class SyncEngine {
       localAdapter: opts.localAdapter,
       stateDB: opts.stateDB,
       historyStore: opts.historyStore,
-      statusBar: opts.statusBar,
+      statusBar: opts.lightweightStatusBar ?? opts.statusBar,
       journal: this.journal,
       mergeBase: this.mergeBase,
       transfer: this.transfer,
@@ -291,10 +313,19 @@ export class SyncEngine {
       connect: () => this.connection(),
       renameTracker: () => this.getOrCreateRenameTracker(),
       isBlockedByWifiOnly: () => this.isBlockedByWifiOnly(),
-      isSyncRunning: () => this.running,
+      isSyncRunning: () => this.isSyncRunning(),
+      runNonFullSyncOperation: (fn) => this.activityGate.runShared(fn),
       processFile: (remote, summary) => this.processFileWithRetry(remote, summary),
       queueRetry: (p) => { this.retryQueue.push(p); },
+      retryQueueLength: () => this.retryQueue.length,
       conflictEncounters: () => this.conflictEncounters,
+      logger: opts.logger,
+    });
+    this.remotePush = new RemotePushReconciler({
+      isPluginPath: (p) => this.plugins.isPluginPath(p),
+      stateDB: opts.stateDB,
+      isFullSyncRunning: () => this.isSyncRunning(),
+      reconcileFile: (path, expectedRemoteFileId) => this.watch.reconcileRemoteFile(path, expectedRemoteFileId),
       logger: opts.logger,
     });
     this.remoteListing = new RemoteListingSource({
@@ -381,27 +412,93 @@ export class SyncEngine {
     return isCellularBlocked(this.opts.settings.syncOnWifiOnly, Platform.isIosApp, conn?.type);
   }
 
+  /** Whether a new Android foreground-watch operation may use the current network. */
+  canRunWatchSync(): boolean {
+    if (typeof navigator === 'undefined') return true;
+    if (navigator.onLine === false) return false;
+    return !this.isBlockedByWifiOnly();
+  }
+
+  /** True while a full-vault sync session or its final persistence is active. */
+  isSyncRunning(): boolean {
+    return this.running || this.currentRun !== null;
+  }
+
+  /**
+   * Client Push scope gate. Only a positively changed Nextcloud vault-root ETag is eligible for
+   * targeted reconciliation. An unchanged root is ignored; every uncertain/stale-baseline case uses
+   * the ordinary full sync. The changed result carries the CURRENT root ETag only as batch-local push
+   * context; this method never updates StateDB, so only a real full scan advances the authoritative
+   * stored root ETag.
+   */
+  async shouldReconcileClientPush(): Promise<ClientPushScopeResult> {
+    // Preserve the existing Wi-Fi-only behavior without making a new network request on cellular.
+    if (this.isBlockedByWifiOnly()) return { kind: 'full-sync' };
+
+    // Do not create/connect a client just for the optimization. The first ordinary sync establishes
+    // the client and the root-ETag baseline; until then a push follows the original full-sync path.
+    const client = this.client;
+    if (!client || this.features?.isNextcloud !== true) return { kind: 'full-sync' };
+
+    // A token-capable server can advance StateDB without a real full scan, while remoteRootEtag is
+    // deliberately updated only by full scans. Avoid using a potentially stale baseline there.
+    if (this.opts.stateDB.getSyncToken()) return { kind: 'full-sync' };
+
+    const stored = this.opts.stateDB.getRemoteRootEtag();
+    if (stored == null) return { kind: 'full-sync' };
+
+    const root = client.getRootInfo
+      ? await client.getRootInfo()
+      : { etag: await client.getRootEtag(), fileId: null };
+    if (root.etag == null) return { kind: 'full-sync' };
+    if (root.etag !== stored) {
+      void this.opts.logger?.log(`client-push: vault root ETag changed (${stored} → ${root.etag}) → reconciliation required`);
+      return { kind: 'targeted', rootFileId: root.fileId?.trim() || null, rootEtag: root.etag };
+    }
+
+    void this.opts.logger?.log(`client-push: vault root ETag unchanged (${root.etag})`);
+    return { kind: 'ignore' };
+  }
+
   async syncManual(opts: { manual?: boolean } = {}): Promise<void> {
-    // Mobile has no status bar; NoticeStatusBar surfaces state there. The early returns below need explicit
-    // notices because they exit before any toast exists.
+    await this.syncManualWithResult(opts);
+  }
+
+  /** Client Push fallback needs to know whether an authoritative full-sync attempt really completed. */
+  async syncForClientPush(): Promise<boolean> {
+    return this.syncManualWithResult();
+  }
+
+  private async syncManualWithResult(opts: { manual?: boolean } = {}): Promise<boolean> {
+    // Mobile has no status bar; sync state (progress + result) is surfaced via NoticeStatusBar,
+    // which implements IStatusBar and is driven uniformly for every run. The two early-return
+    // guidance notices below still need an explicit mobile notice because those paths return
+    // before any syncing toast is created. Desktop keeps using the status bar (no popups).
     void this.opts.logger?.log(`sync: start (manual=${opts.manual === true})`);
-    if (this.running) {
+    // Prevent concurrent runs (avoid clashing with watch mode or scheduled sync).
+    if (this.isSyncRunning()) {
       void this.opts.logger?.log('sync: skipped — already running');
-      if (Platform.isMobile) new Notice('⏳ A sync is already in progress.');
-      return;
+      // Automatic triggers (startup / interval / resume) may legitimately race another full sync.
+      // That is a normal no-op, not something that should interrupt a mobile user with a toast.
+      // Keep the guidance only for an explicit user-initiated "Sync now" action.
+      if (Platform.isMobile && opts.manual === true) new Notice('⏳ A sync is already in progress.');
+      return false;
     }
     if (this.isBlockedByWifiOnly()) { // "Wi-Fi only" enabled and on cellular
       void this.opts.logger?.log('sync: skipped — Wi-Fi-only and on cellular');
       if (Platform.isMobile) new Notice('Sync skipped — you are on cellular and Wi-Fi only sync is on.', 6000);
-      return;
+      return false;
     }
     // Set the balking flag synchronously (before any await) so a concurrent call still balks.
     this.running = true;
     this.cancelled = false;
-    const run = this.runSyncSession(opts.manual === true);
+    // Full sync is exclusive with watch/lightweight operations. Existing lightweight work may
+    // finish first; once this writer is queued, later lightweight work waits behind it.
+    const run = this.activityGate.runExclusive(() => this.runSyncSession(opts.manual === true));
     this.currentRun = run;
+    let completed = false;
     try {
-      await run;
+      completed = await run;
     } finally {
       this.currentRun = null;
       // The run is over, so deferred watch edits can be evaluated. Best-effort: a failure must not propagate out of "Sync now".
@@ -411,14 +508,15 @@ export class SyncEngine {
         console.warn('[SyncEngine] Deferred watch-mode sync failed:', err);
       }
     }
+    return completed;
   }
 
-  private async runSyncSession(manual: boolean): Promise<void> {
+  private async runSyncSession(manual: boolean): Promise<boolean> {
     // Created before the try so catch/finally can reference them even if the first step fails.
     const summary = this.initSummary();
     this.journal.beginRun(summary.startedAt);
 
-    const cancelled = false;
+    let completed = false;
     try {
       // Connect INSIDE the try: if ensureClient() threw or hung outside it, the finally that clears `running` would be
       // skipped and the engine would balk forever as "already running".
@@ -436,6 +534,7 @@ export class SyncEngine {
       } else {
         await this.incrementalSync(summary);
       }
+      completed = !this.cancelled;
     } catch (err) {
       console.error('[SyncEngine] Sync failed:', err);
       void this.opts.logger?.log(`sync: FAILED — ${(err as Error).message}`, 'error');
@@ -449,7 +548,7 @@ export class SyncEngine {
 
       void this.opts.logger?.log(
         `sync: done up=${summary.uploadedCount} down=${summary.downloadedCount} ` +
-        `del=${summary.deletedCount} merged=${summary.mergedCount} conflicted=${summary.conflictedCount} err=${summary.errorCount} cancelled=${cancelled}`,
+        `del=${summary.deletedCount} merged=${summary.mergedCount} conflicted=${summary.conflictedCount} err=${summary.errorCount} cancelled=${this.cancelled}`,
       );
       this.logSessionErrors(summary);
       summary.completedAt = Date.now();
@@ -464,6 +563,7 @@ export class SyncEngine {
       );
       // Result display is owned by the status bar surface (StatusBarItem / NoticeStatusBar) via setSyncComplete.
     }
+    return completed;
   }
 
   // A changed sync scope (or a state saved before the fingerprint existed) makes the stored root ETag
@@ -516,6 +616,40 @@ export class SyncEngine {
     }
   }
 
+  /**
+   * Mobile Watch structural recovery.
+   *
+   * Normally an ordinary full sync that started after the uncertain event (resume/startup/push/
+   * manual) is authoritative enough, so await it instead of racing a second run. When the structural
+   * event itself occurred DURING the current scan, requireFreshAfterCurrent=true: that scan may
+   * already have passed the affected path, so wait for it to settle and then use/start a successor.
+   * Either way this is the ordinary full-sync path; Watch owns no separate merge/reconcile rules.
+   */
+  async syncForWatchRecovery(requireFreshAfterCurrent = false): Promise<boolean> {
+    const current = this.currentRun;
+    if (current) {
+      try {
+        const completed = await current;
+        if (!requireFreshAfterCurrent) return completed;
+      } catch {
+        if (!requireFreshAfterCurrent) return false;
+        // A structural event occurred during the failed run; retry below with a fresh full sync.
+      }
+
+      // Another authoritative run may have started after the old one settled (resume/push/manual).
+      // Because that successor necessarily began after the structural event, it is fresh enough.
+      const successor = this.currentRun;
+      if (successor) {
+        try {
+          return await successor;
+        } catch {
+          return false;
+        }
+      }
+    }
+    return this.syncManualWithResult();
+  }
+
   private logSessionErrors(summary: SyncSessionSummary): void {
     this.journal.logSessionErrors(summary);
   }
@@ -526,6 +660,30 @@ export class SyncEngine {
     return this.watch.syncSingleFile(path);
   }
 
+  /** Reconcile notify_push IDs without advancing the collection sync token. */
+  reconcileRemoteFileIds(batch: RemotePushBatch): Promise<RemoteBatchReconcileResult> {
+    return this.remotePush.reconcileFileIds(batch);
+  }
+
+  /**
+   * Android foreground-watch wrapper around the SAME upstream single-file operation.
+   *
+   * WatchOperations intentionally contains NetworkError and queues the path for the next ordinary
+   * sync. Mobile additionally wants to retry promptly when connectivity returns while the app stays
+   * open, so report whether this attempt added retry work without changing the classifier itself.
+   */
+  async syncSingleFileForMobileWatch(path: string): Promise<boolean> {
+    const retryCount = (): number => this.retryQueue.reduce(
+      (count, queued) => count + (queued === path ? 1 : 0),
+      0,
+    );
+    const retriesBefore = retryCount();
+    await this.watch.syncSingleFile(path);
+    return retryCount() <= retriesBefore;
+  }
+
+
+  /** @see WatchOperations.drainPending */
   private drainWatchPending(): Promise<void> {
     return this.watch.drainPending();
   }
@@ -534,20 +692,67 @@ export class SyncEngine {
     return this.watch.deleteSingleFile(path);
   }
 
+  /**
+   * Mobile result wrapper for a local file deletion. A guarded delete may legitimately restore the
+   * remote file when another device changed it; that is converged too. What needs structural recovery
+   * is the state where the tracked entry remains AND the local path is still absent (e.g. transport
+   * failure swallowed by the upstream watch method).
+   */
+  async deleteSingleFileForMobileWatch(path: string): Promise<boolean> {
+    const trackedBefore = this.opts.stateDB.getFile(path);
+    await this.watch.deleteSingleFile(path);
+    if (!trackedBefore || !this.opts.stateDB.getFile(path)) return true;
+    return (await this.opts.localAdapter.stat(path)) != null;
+  }
+
+  /** @see WatchOperations.renameSingleFile */
   renameSingleFile(oldPath: string, newPath: string): Promise<void> {
     return this.watch.renameSingleFile(oldPath, newPath);
   }
 
+  /**
+   * Mobile result wrapper for MOVE. A tracked rename is converged only when the existing StateDB
+   * identity moved with it. Untracked renames are intentionally conservative: a full reconcile is
+   * safer than guessing whether a pre-first-sync/new local file ever existed remotely.
+   */
+  async renameSingleFileForMobileWatch(oldPath: string, newPath: string): Promise<boolean> {
+    const trackedBefore = this.opts.stateDB.getFile(oldPath);
+    await this.watch.renameSingleFile(oldPath, newPath);
+    if (!trackedBefore) return false;
+    return this.opts.stateDB.getFile(oldPath) == null && this.opts.stateDB.getFile(newPath) != null;
+  }
+
+  /** @see WatchOperations.createSingleFolder */
   createSingleFolder(path: string): Promise<void> {
     return this.watch.createSingleFolder(path);
   }
 
+  async createSingleFolderForMobileWatch(path: string): Promise<boolean> {
+    await this.watch.createSingleFolder(path);
+    return this.opts.stateDB.getDir(path) != null;
+  }
+
+  /** @see WatchOperations.deleteSingleFolder */
   deleteSingleFolder(path: string): Promise<void> {
     return this.watch.deleteSingleFolder(path);
   }
 
+  async deleteSingleFolderForMobileWatch(path: string): Promise<boolean> {
+    const trackedBefore = this.opts.stateDB.getDir(path);
+    await this.watch.deleteSingleFolder(path);
+    return !trackedBefore || this.opts.stateDB.getDir(path) == null;
+  }
+
+  /** @see WatchOperations.renameSingleFolder */
   renameSingleFolder(oldPath: string, newPath: string): Promise<void> {
     return this.watch.renameSingleFolder(oldPath, newPath);
+  }
+
+  async renameSingleFolderForMobileWatch(oldPath: string, newPath: string): Promise<boolean> {
+    const trackedBefore = this.opts.stateDB.getDir(oldPath);
+    await this.watch.renameSingleFolder(oldPath, newPath);
+    if (!trackedBefore) return false;
+    return this.opts.stateDB.getDir(oldPath) == null && this.opts.stateDB.getDir(newPath) != null;
   }
 
   startAutoSync(intervalMinutes: number): void {
@@ -643,6 +848,8 @@ export class SyncEngine {
     if (run) {
       try { await run; } catch { /* runSyncSession swallows its own errors */ }
     }
+    // A restore also changes StateDB and the local file. Maintenance must wait for its save, too.
+    await this.activityGate.runExclusive(() => undefined);
   }
 
   // Resets only the tracking index; no vault or remote file is touched, so the next sync runs as a first sync.
@@ -1006,7 +1213,12 @@ export class SyncEngine {
     if (localStat && (remoteChanged || localChanged)
         && localStat.size === remote.size && checksumProvesIdentical(remote, localHash)) {
       void this.opts.logger?.log(`sync: content identical to the remote (checksum) → state converged, no transfer → ${remote.path}`);
-      this.opts.stateDB.setFile(await this.withLocalSignature(convergedState(remote, localHash, localStat), remote.lastModified));
+      const state = convergedState(remote, localHash, localStat, base);
+      if (base?.isConflicted) {
+        try { state.isConflicted = hasCompleteMarkerSet(await this.opts.localAdapter.read(remote.path)); }
+        catch { state.isConflicted = true; }
+      }
+      this.opts.stateDB.setFile(await this.withLocalSignature(state, remote.lastModified));
       await this.creationTime.align(this.client!, remote, localStat);
       return;
     }
@@ -1021,9 +1233,36 @@ export class SyncEngine {
         await this.handleConflict(remote.path, base, remote, remoteId, idType, summary);
         return;
       }
-      // Converged: clear a stale conflict flag so the conflict count does not stay stuck.
+      const remoteFileIdChanged =
+        remote.fileId !== null &&
+        base?.remoteFileId !== remote.fileId;
+
+      let keepConflict = false;
       if (base?.isConflicted) {
-        this.opts.stateDB.setFile({ ...base, isConflicted: false });
+        try {
+          const localContent = await this.opts.localAdapter.read(remote.path);
+          keepConflict = hasCompleteMarkerSet(localContent);
+          if (keepConflict) {
+            void this.opts.logger?.log(
+              `sync: converged marker content remains an unresolved conflict → ${remote.path}`,
+            );
+          }
+        } catch (err) {
+          // Never hide a conflict because verification itself failed. A later reconciliation can
+          // retry the read, while unrelated remote identity metadata may still be refreshed below.
+          keepConflict = true;
+          void this.opts.logger?.log(
+            `sync: could not verify conflicted content; keeping conflict flag → ${remote.path}: ${(err as Error).message}`,
+          );
+        }
+      }
+
+      if (base && (base.isConflicted !== keepConflict || remoteFileIdChanged)) {
+        this.opts.stateDB.setFile({
+          ...base,
+          remoteFileId: remote.fileId ?? base.remoteFileId,
+          isConflicted: keepConflict,
+        });
       }
       await this.creationTime.align(this.client!, remote, localStat);
       return;
@@ -1127,9 +1366,34 @@ export class SyncEngine {
     return this.versions.listVersions(client, features, path);
   }
 
-  async restoreVersion(path: string, version: FileVersion): Promise<void> {
+  /** @see VersionService.compareVersions */
+  async compareVersions(
+    path: string, before: FileVersion, after: FileVersion,
+  ): Promise<VersionComparison> {
     const { client, features } = await this.ensureClient();
-    return this.versions.restoreVersion(client, features, path, version);
+    return this.versions.compareVersions(client, features, path, before, after);
+  }
+
+  /** @see VersionService.lineHistory */
+  async lineHistory(
+    path: string, versions: FileVersion[], targetVersion: FileVersion,
+  ): Promise<LineHistoryResult> {
+    const { client, features } = await this.ensureClient();
+    return this.versions.lineHistory(client, features, path, versions, targetVersion);
+  }
+
+  /** @see VersionService.readVersionText */
+  async readVersionText(path: string, version: FileVersion): Promise<string> {
+    const { client, features } = await this.ensureClient();
+    return this.versions.readVersionText(client, features, path, version);
+  }
+
+  /** @see VersionService.restoreVersion */
+  async restoreVersion(path: string, version: FileVersion): Promise<void> {
+    return this.activityGate.runExclusive(async () => {
+      const { client, features } = await this.ensureClient();
+      await this.versions.restoreVersion(client, features, path, version);
+    });
   }
 
   private acquireLock(path: string): Promise<string | null> {
@@ -1508,4 +1772,3 @@ export class SyncEngine {
     });
   }
 }
-

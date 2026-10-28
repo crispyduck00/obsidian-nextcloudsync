@@ -22,6 +22,7 @@ function build(opts: { blocked: boolean; running?: boolean }): Harness {
   const client = {
     statFile: jest.fn(async () => null),
     createDirectory: jest.fn(async () => undefined),
+    isRemoteDirEmpty: jest.fn(async () => true),
     deleteCollection: jest.fn(async () => undefined),
     moveFile: jest.fn(async () => undefined),
   };
@@ -44,7 +45,7 @@ function build(opts: { blocked: boolean; running?: boolean }): Harness {
   const newSummary = jest.spyOn(journal, 'newSummary');
   const recordError = jest.spyOn(journal, 'recordError');
   const mergeBase = { record: jest.fn(), drop: jest.fn() };
-  const transfer = { uploadFile: jest.fn(async () => undefined) };
+  const transfer = { acquireLock: jest.fn(async () => null), releaseLock: jest.fn(async () => undefined), uploadFile: jest.fn(async () => undefined) };
   const deletion = { deleteLocallyMissing: jest.fn(async () => 'deleted') };
   const resolution = { dropCleanSnapshot: jest.fn() };
   const isSystemExcluded = jest.fn(() => false);
@@ -62,12 +63,16 @@ function build(opts: { blocked: boolean; running?: boolean }): Harness {
     localAdapter, stateDB, historyStore, statusBar, journal, mergeBase, transfer, deletion, resolution,
     isSystemExcluded, isPluginPath: noPluginPath, connect, renameTracker, isBlockedByWifiOnly, isSyncRunning, processFile,
     queueRetry, conflictEncounters, logger, notify,
+    runNonFullSyncOperation: async <T>(fn: () => Promise<T>) => fn(),
   } as unknown as WatchDeps;
 
   // Every port that would leave a trace. isSystemExcluded, isBlockedByWifiOnly and logger.log are
   // left out on purpose: the gate itself is allowed (and required) to consult them.
   const mocks: Record<string, jest.Mock> = {
     statFile: client.statFile,
+    remoteEmpty: client.isRemoteDirEmpty,
+    acquireLock: transfer.acquireLock,
+    releaseLock: transfer.releaseLock,
     createDirectory: client.createDirectory,
     deleteCollection: client.deleteCollection,
     moveFile: client.moveFile,
