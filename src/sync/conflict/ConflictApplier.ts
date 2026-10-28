@@ -197,7 +197,7 @@ export class ConflictApplier {
     }
     if (!identical) return { converged: false, remoteData };
     this.deps.stateDB.setFile(await withLocalSignature(
-      this.deps.localAdapter, convergedState(remote, localHash, localStat), remote.lastModified,
+      this.deps.localAdapter, convergedState(remote, localHash, localStat, this.deps.stateDB.getFile(path)), remote.lastModified,
     ));
     this.deps.mergeBase.recordBytes(path, localData);
     await this.deps.creationTime?.align(conn.client, remote, localStat);

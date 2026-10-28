@@ -1006,7 +1006,7 @@ export class SyncEngine {
     if (localStat && (remoteChanged || localChanged)
         && localStat.size === remote.size && checksumProvesIdentical(remote, localHash)) {
       void this.opts.logger?.log(`sync: content identical to the remote (checksum) → state converged, no transfer → ${remote.path}`);
-      this.opts.stateDB.setFile(await this.withLocalSignature(convergedState(remote, localHash, localStat), remote.lastModified));
+      this.opts.stateDB.setFile(await this.withLocalSignature(convergedState(remote, localHash, localStat, base), remote.lastModified));
       await this.creationTime.align(this.client!, remote, localStat);
       return;
     }
@@ -1021,9 +1021,19 @@ export class SyncEngine {
         await this.handleConflict(remote.path, base, remote, remoteId, idType, summary);
         return;
       }
-      // Converged: clear a stale conflict flag so the conflict count does not stay stuck.
-      if (base?.isConflicted) {
-        this.opts.stateDB.setFile({ ...base, isConflicted: false });
+      // Both sides match what we last synced → the file has converged. Refresh metadata that can
+      // safely be learned from the current remote object, and clear a stale conflict flag if needed.
+      // A missing fileId (standard WebDAV) must never erase an identity already known from Nextcloud.
+      const remoteFileIdChanged =
+        remote.fileId !== null &&
+        base?.remoteFileId !== remote.fileId;
+
+      if (base && (base.isConflicted || remoteFileIdChanged)) {
+        this.opts.stateDB.setFile({
+          ...base,
+          remoteFileId: remote.fileId ?? base.remoteFileId,
+          isConflicted: false,
+        });
       }
       await this.creationTime.align(this.client!, remote, localStat);
       return;
@@ -1508,4 +1518,3 @@ export class SyncEngine {
     });
   }
 }
-
