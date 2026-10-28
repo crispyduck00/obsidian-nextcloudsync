@@ -35,7 +35,8 @@ import { SyncJournal } from './session/SyncJournal';
 import { MergeBaseRecorder } from './session/MergeBaseRecorder';
 import { withLocalSignature } from '../data/localSignature';
 import { TransferService } from './transfer/TransferService';
-import { VersionService } from './versions/VersionService';
+import { VersionService, VersionComparison } from './versions/VersionService';
+import { LineHistoryResult } from './versions/lineHistory';
 import { remoteIdOf } from './remoteIdentity';
 import { checksumProvesIdentical, convergedState } from './identity/contentIdentity';
 import { DeletionService } from './deletion/DeletionService';
@@ -212,7 +213,15 @@ export class SyncEngine {
       queueRetry: (p) => { this.retryQueue.push(p); },
       logger: opts.logger,
     });
-    this.versions = new VersionService({ localAdapter: opts.localAdapter, stateDB: opts.stateDB });
+    this.versions = new VersionService({
+      localAdapter: opts.localAdapter,
+      stateDB: opts.stateDB,
+      // Markdown is always a mergeable text type in the sync engine even though `md` is
+      // intentionally not stored in autoMergeFileTypes. Version compare/line history must mirror
+      // that same policy: Markdown + every user-configured Auto Merge File type.
+      isTextEligible: (path) => path.toLowerCase().endsWith('.md')
+        || isTextEligible(path, this.opts.settings.autoMergeFileTypes),
+    });
     this.deletion = new DeletionService({
       app: opts.app,
       stateDB: opts.stateDB,
@@ -1127,6 +1136,29 @@ export class SyncEngine {
     return this.versions.listVersions(client, features, path);
   }
 
+  /** @see VersionService.compareVersions */
+  async compareVersions(
+    path: string, before: FileVersion, after: FileVersion,
+  ): Promise<VersionComparison> {
+    const { client, features } = await this.ensureClient();
+    return this.versions.compareVersions(client, features, path, before, after);
+  }
+
+  /** @see VersionService.lineHistory */
+  async lineHistory(
+    path: string, versions: FileVersion[], targetVersion: FileVersion,
+  ): Promise<LineHistoryResult> {
+    const { client, features } = await this.ensureClient();
+    return this.versions.lineHistory(client, features, path, versions, targetVersion);
+  }
+
+  /** @see VersionService.readVersionText */
+  async readVersionText(path: string, version: FileVersion): Promise<string> {
+    const { client, features } = await this.ensureClient();
+    return this.versions.readVersionText(client, features, path, version);
+  }
+
+  /** @see VersionService.restoreVersion */
   async restoreVersion(path: string, version: FileVersion): Promise<void> {
     const { client, features } = await this.ensureClient();
     return this.versions.restoreVersion(client, features, path, version);
@@ -1508,4 +1540,3 @@ export class SyncEngine {
     });
   }
 }
-
