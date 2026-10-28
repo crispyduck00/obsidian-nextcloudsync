@@ -1,5 +1,12 @@
 import { NextcloudFeatures, RemoteFileInfo, RemoteDirInfo, SyncChanges, FileVersion, VaultRootOutcome } from '../types';
 
+export interface RemoteRootInfo {
+  /** Vault-root collection ETag, or null when unavailable. */
+  etag: string | null;
+  /** Nextcloud oc:fileid for the vault-root collection, or null when unavailable/unsupported. */
+  fileId: string | null;
+}
+
 export interface IWebDAVClient {
   connect(): Promise<NextcloudFeatures>;
   /**
@@ -22,7 +29,20 @@ export interface IWebDAVClient {
    * (standard WebDAV always returns null). Never throws: any failure, including an unreadable body, yields null.
    */
   getRootEtag(): Promise<string | null>;
-  /** Lists the directories (collections) beneath `path`, recursively; the base folder itself is excluded. Same unreadable-body contract as {@link getFiles}. */
+  /**
+   * Optional richer variant of {@link getRootEtag}. Nextcloud returns the root ETag and oc:fileid
+   * from the same Depth:0 PROPFIND so Client Push can identify root-folder propagation without an
+   * extra request. Standard WebDAV clients may omit this method. Implementations must not throw.
+   */
+  getRootInfo?(): Promise<RemoteRootInfo>;
+  /**
+   * List the directories (WebDAV collections) beneath `path` (recursive). Surfaced
+   * separately from {@link getFiles} so directories are first-class entities the engine
+   * can prune when they become empty. The base folder itself is excluded.
+   *
+   * Same unreadable-body contract as {@link getFiles} (upstream change): a 207 whose body cannot be
+   * parsed as a listing throws RemoteListingUnreadableError rather than resolving to [].
+   */
   getDirectories(path: string): Promise<RemoteDirInfo[]>;
   /**
    * True iff the collection at `path` has no children (one Depth:1 probe). Data-loss guard before

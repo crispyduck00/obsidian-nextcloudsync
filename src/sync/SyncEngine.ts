@@ -43,6 +43,8 @@ import { ResolutionService } from './resolution/ResolutionService';
 import { ConflictApplier } from './conflict/ConflictApplier';
 import { DirectoryReconciler } from './directory/DirectoryReconciler';
 import { WatchOperations } from './watch/WatchOperations';
+import { RemotePushReconciler, type RemoteBatchReconcileResult, type RemotePushBatch } from './push/RemotePushReconciler';
+import type { ClientPushScopeResult } from './push/PushSyncScheduler';
 import { MirrorService } from './mirror/MirrorService';
 import { SyncHistoryStore } from '../data/SyncHistoryStore';
 import { IStatusBar } from '../ui/StatusBarItem';
@@ -115,7 +117,7 @@ export class SyncEngine {
   // Set by requestStop(): workers stop pulling new work, while the run's finally block still saves state.
   private cancelled = false;
   // Lets abortAndWait() await a running sync's wind-down (including its final state save) before a reset.
-  private currentRun: Promise<void> | null = null;
+  private currentRun: Promise<boolean> | null = null;
   private readonly journal: SyncJournal;
 
   private readonly mergeBase: MergeBaseRecorder;
@@ -134,6 +136,8 @@ export class SyncEngine {
   private readonly directories: DirectoryReconciler;
 
   private readonly watch: WatchOperations;
+  /** Resolves notify_push IDs and delegates only safe known-file work to the existing classifier. */
+  private readonly remotePush: RemotePushReconciler;
 
   private readonly mirror: MirrorService;
   private syncProgress = { processed: 0, total: 0 };
@@ -294,7 +298,15 @@ export class SyncEngine {
       isSyncRunning: () => this.running,
       processFile: (remote, summary) => this.processFileWithRetry(remote, summary),
       queueRetry: (p) => { this.retryQueue.push(p); },
+      retryQueueLength: () => this.retryQueue.length,
       conflictEncounters: () => this.conflictEncounters,
+      logger: opts.logger,
+    });
+    this.remotePush = new RemotePushReconciler({
+      isPluginPath: (p) => this.plugins.isPluginPath(p),
+      stateDB: opts.stateDB,
+      isFullSyncRunning: () => this.isSyncRunning(),
+      reconcileFile: (path, expectedRemoteFileId) => this.watch.reconcileRemoteFile(path, expectedRemoteFileId),
       logger: opts.logger,
     });
     this.remoteListing = new RemoteListingSource({
@@ -381,27 +393,81 @@ export class SyncEngine {
     return isCellularBlocked(this.opts.settings.syncOnWifiOnly, Platform.isIosApp, conn?.type);
   }
 
+  /** True while a full-vault sync session is running. Used by external trigger schedulers. */
+  isSyncRunning(): boolean {
+    return this.running;
+  }
+
+  /**
+   * Client Push scope gate. Only a positively changed Nextcloud vault-root ETag is eligible for
+   * targeted reconciliation. An unchanged root is ignored; every uncertain/stale-baseline case uses
+   * the ordinary full sync. The changed result carries the CURRENT root ETag only as batch-local push
+   * context; this method never updates StateDB, so only a real full scan advances the authoritative
+   * stored root ETag.
+   */
+  async shouldReconcileClientPush(): Promise<ClientPushScopeResult> {
+    // Preserve the existing Wi-Fi-only behavior without making a new network request on cellular.
+    if (this.isBlockedByWifiOnly()) return { kind: 'full-sync' };
+
+    // Do not create/connect a client just for the optimization. The first ordinary sync establishes
+    // the client and the root-ETag baseline; until then a push follows the original full-sync path.
+    const client = this.client;
+    if (!client || this.features?.isNextcloud !== true) return { kind: 'full-sync' };
+
+    // A token-capable server can advance StateDB without a real full scan, while remoteRootEtag is
+    // deliberately updated only by full scans. Avoid using a potentially stale baseline there.
+    if (this.opts.stateDB.getSyncToken()) return { kind: 'full-sync' };
+
+    const stored = this.opts.stateDB.getRemoteRootEtag();
+    if (stored == null) return { kind: 'full-sync' };
+
+    const root = client.getRootInfo
+      ? await client.getRootInfo()
+      : { etag: await client.getRootEtag(), fileId: null };
+    if (root.etag == null) return { kind: 'full-sync' };
+    if (root.etag !== stored) {
+      void this.opts.logger?.log(`client-push: vault root ETag changed (${stored} → ${root.etag}) → reconciliation required`);
+      return { kind: 'targeted', rootFileId: root.fileId?.trim() || null, rootEtag: root.etag };
+    }
+
+    void this.opts.logger?.log(`client-push: vault root ETag unchanged (${root.etag})`);
+    return { kind: 'ignore' };
+  }
+
   async syncManual(opts: { manual?: boolean } = {}): Promise<void> {
-    // Mobile has no status bar; NoticeStatusBar surfaces state there. The early returns below need explicit
-    // notices because they exit before any toast exists.
+    await this.syncManualWithResult(opts);
+  }
+
+  /** Client Push fallback needs to know whether an authoritative full-sync attempt really completed. */
+  async syncForClientPush(): Promise<boolean> {
+    return this.syncManualWithResult();
+  }
+
+  private async syncManualWithResult(opts: { manual?: boolean } = {}): Promise<boolean> {
+    // Mobile has no status bar; sync state (progress + result) is surfaced via NoticeStatusBar,
+    // which implements IStatusBar and is driven uniformly for every run. The two early-return
+    // guidance notices below still need an explicit mobile notice because those paths return
+    // before any syncing toast is created. Desktop keeps using the status bar (no popups).
     void this.opts.logger?.log(`sync: start (manual=${opts.manual === true})`);
-    if (this.running) {
+    // Prevent concurrent runs (avoid clashing with watch mode or scheduled sync).
+    if (this.isSyncRunning()) {
       void this.opts.logger?.log('sync: skipped — already running');
       if (Platform.isMobile) new Notice('⏳ A sync is already in progress.');
-      return;
+      return false;
     }
     if (this.isBlockedByWifiOnly()) { // "Wi-Fi only" enabled and on cellular
       void this.opts.logger?.log('sync: skipped — Wi-Fi-only and on cellular');
       if (Platform.isMobile) new Notice('Sync skipped — you are on cellular and Wi-Fi only sync is on.', 6000);
-      return;
+      return false;
     }
     // Set the balking flag synchronously (before any await) so a concurrent call still balks.
     this.running = true;
     this.cancelled = false;
     const run = this.runSyncSession(opts.manual === true);
     this.currentRun = run;
+    let completed = false;
     try {
-      await run;
+      completed = await run;
     } finally {
       this.currentRun = null;
       // The run is over, so deferred watch edits can be evaluated. Best-effort: a failure must not propagate out of "Sync now".
@@ -411,14 +477,15 @@ export class SyncEngine {
         console.warn('[SyncEngine] Deferred watch-mode sync failed:', err);
       }
     }
+    return completed;
   }
 
-  private async runSyncSession(manual: boolean): Promise<void> {
+  private async runSyncSession(manual: boolean): Promise<boolean> {
     // Created before the try so catch/finally can reference them even if the first step fails.
     const summary = this.initSummary();
     this.journal.beginRun(summary.startedAt);
 
-    const cancelled = false;
+    let completed = false;
     try {
       // Connect INSIDE the try: if ensureClient() threw or hung outside it, the finally that clears `running` would be
       // skipped and the engine would balk forever as "already running".
@@ -436,6 +503,7 @@ export class SyncEngine {
       } else {
         await this.incrementalSync(summary);
       }
+      completed = !this.cancelled;
     } catch (err) {
       console.error('[SyncEngine] Sync failed:', err);
       void this.opts.logger?.log(`sync: FAILED — ${(err as Error).message}`, 'error');
@@ -449,7 +517,7 @@ export class SyncEngine {
 
       void this.opts.logger?.log(
         `sync: done up=${summary.uploadedCount} down=${summary.downloadedCount} ` +
-        `del=${summary.deletedCount} merged=${summary.mergedCount} conflicted=${summary.conflictedCount} err=${summary.errorCount} cancelled=${cancelled}`,
+        `del=${summary.deletedCount} merged=${summary.mergedCount} conflicted=${summary.conflictedCount} err=${summary.errorCount} cancelled=${this.cancelled}`,
       );
       this.logSessionErrors(summary);
       summary.completedAt = Date.now();
@@ -464,6 +532,7 @@ export class SyncEngine {
       );
       // Result display is owned by the status bar surface (StatusBarItem / NoticeStatusBar) via setSyncComplete.
     }
+    return completed;
   }
 
   // A changed sync scope (or a state saved before the fingerprint existed) makes the stored root ETag
@@ -526,6 +595,12 @@ export class SyncEngine {
     return this.watch.syncSingleFile(path);
   }
 
+  /** Reconcile notify_push IDs without advancing the collection sync token. */
+  reconcileRemoteFileIds(batch: RemotePushBatch): Promise<RemoteBatchReconcileResult> {
+    return this.remotePush.reconcileFileIds(batch);
+  }
+
+  /** @see WatchOperations.drainPending */
   private drainWatchPending(): Promise<void> {
     return this.watch.drainPending();
   }
@@ -1508,4 +1583,3 @@ export class SyncEngine {
     });
   }
 }
-
