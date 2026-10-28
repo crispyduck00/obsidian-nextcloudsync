@@ -38,6 +38,9 @@ export interface Connection {
   uploadStrategy: IUploadStrategy;
 }
 
+/** Result of one remote-triggered single-file reconciliation. */
+export type RemoteFileReconcileResult = 'done' | 'deferred' | 'plugin-pending' | 'busy' | 'full-sync';
+
 export interface WatchDeps {
   localAdapter: Pick<LocalAdapter, 'stat' | 'readBinary'>;
   stateDB: Pick<StateDB, 'getFile' | 'deleteFile' | 'getDir' | 'setDir' | 'deleteDir' | 'requestSave' | 'getLastSyncTime'>;
@@ -59,12 +62,16 @@ export interface WatchDeps {
   // network, no local write, no StateDB change.
   isBlockedByWifiOnly(): boolean;
   isSyncRunning(): boolean;
+  /** Supplied by the independent activity-coordination fix when composed. */
+  runNonFullSyncOperation?<T>(fn: () => Promise<T>): Promise<T>;
   // The full sync's per-file classifier, so watch mode and "Sync now" run the same decision code and reach
   // identical results.
   processFile(remote: RemoteFileInfo, summary: SyncSessionSummary): Promise<void>;
   // Outbound port: this path needs another attempt on the next sync.
   queueRetry(path: string): void;
-  // How many conflicts the engine has encountered so far (see notifyWatchOutcome).
+  /** Number of paths currently waiting for an ordinary-sync retry. */
+  retryQueueLength?(): number;
+  /** How many conflicts the engine has encountered so far (see notifyWatchOutcome). */
   conflictEncounters(): number;
   logger?: Pick<FileLogger, 'log'>;
   // Injected so the outcome rules can be exercised without an Obsidian runtime.
@@ -130,6 +137,83 @@ export class WatchOperations {
     // The early exits stay OUTSIDE the lock: neither touches shared state and a no-op must not queue behind real work.
     return this.withPathLock(path, () => this.syncSingleFileLocked(path));
   }
+
+  /**
+   * Reconcile ONE file named by Nextcloud Client Push. Unlike syncSingleFile, this intentionally does
+   * not use the local-unchanged fast path: the trigger itself says the REMOTE side may have changed.
+   * The path lock is shared with local watch operations so a local edit and a remote push for the
+   * same note cannot classify against half-written state.
+   */
+  async reconcileRemoteFile(path: string, expectedRemoteFileId: string): Promise<RemoteFileReconcileResult> {
+    if (this.deps.isPluginPath(path)) return 'plugin-pending';
+    if (this.deps.isSystemExcluded(path)) return 'done';
+    return this.withPathLock(path, () => this.reconcileRemoteFileLocked(path, expectedRemoteFileId));
+  }
+
+  private async reconcileRemoteFileLocked(
+    path: string,
+    expectedRemoteFileId: string,
+  ): Promise<RemoteFileReconcileResult> {
+    // If the full sync requested exclusivity first, let the push scheduler retain this ID and retry
+    // afterwards. If we acquire shared activity first, the full sync gate waits for us.
+    if (this.deps.isSyncRunning()) return 'busy';
+    const work = (): Promise<RemoteFileReconcileResult> => this.reconcileRemoteFileActive(path, expectedRemoteFileId);
+    return this.deps.runNonFullSyncOperation ? this.deps.runNonFullSyncOperation(work) : work();
+  }
+
+  private async reconcileRemoteFileActive(
+    path: string,
+    expectedRemoteFileId: string,
+  ): Promise<RemoteFileReconcileResult> {
+    const summary = this.deps.journal.newSummary();
+    const conflictsBefore = this.deps.conflictEncounters();
+    const retriesBefore = this.deps.retryQueueLength?.() ?? 0;
+    let result: RemoteFileReconcileResult = 'done';
+    this.begin();
+    try {
+      const conn = await this.deps.connect();
+      const remote = await conn.client.statFile(path);
+      if (!remote) {
+        // A known file disappeared at its old path: delete vs rename/move is ambiguous from one
+        // file-ID notification alone. The ordinary full sync already has safe deletion/rename logic.
+        void this.deps.logger?.log(`client-push: ${path} no longer exists at tracked path → full reconciliation`);
+        result = 'full-sync';
+      } else if (remote.fileId !== expectedRemoteFileId) {
+        // The old path may have been re-used after a rename. Never classify a different Nextcloud
+        // object under stale StateDB identity; let the full scan/rename tracker repair the mapping.
+        void this.deps.logger?.log(
+          `client-push: file id mismatch at ${path} (expected ${expectedRemoteFileId}, got ${remote.fileId ?? 'none'}) → full reconciliation`,
+        );
+        result = 'full-sync';
+      } else {
+        void this.deps.logger?.log(`client-push: remote state fetched → classifying ${path}`);
+        await this.deps.processFile(remote, summary);
+        this.deps.stateDB.requestSave();
+        await this.deps.historyStore?.save();
+
+        // processFileWithRetry intentionally contains many failures instead of throwing, and a
+        // remote->local write can also be deferred while the user is typing. Neither outcome may
+        // certify the push root ETag as fully processed. The ordinary sync/retry queue remains the
+        // authority for that unresolved work.
+        if (summary.errorCount > 0 || summary.conflictedCount > 0 || (this.deps.retryQueueLength?.() ?? retriesBefore) > retriesBefore) {
+          result = 'deferred';
+        }
+      }
+    } catch (err) {
+      // Match watch-mode failure semantics: keep the path for the next ordinary sync on transport
+      // failure, record the error, and never bypass the established classifier with an ad-hoc write.
+      console.warn(`[SyncEngine] Remote push reconcile failed for ${path}:`, err);
+      void this.deps.logger?.log(`client-push: FAILED ${path} — ${(err as Error).message}`, 'error');
+      this.deps.journal.recordError(summary, path, err);
+      if (err instanceof NetworkError) this.deps.queueRetry(path);
+      result = 'deferred';
+    } finally {
+      this.end();
+    }
+    this.notifyWatchOutcome(path, summary, conflictsBefore);
+    return result;
+  }
+
 
   private async syncSingleFileLocked(path: string): Promise<void> {
     // Never run alongside a full sync: defer the path and re-evaluate it when the run finishes. Deferring, not
