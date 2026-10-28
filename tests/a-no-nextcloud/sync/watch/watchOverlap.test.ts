@@ -83,6 +83,7 @@ function buildRacy() {
     renameTracker: () => ({}) as unknown as RenameTracker,
     isBlockedByWifiOnly: () => false,
     isSyncRunning: () => false,
+    runNonFullSyncOperation: async (fn) => await fn(),
     // Stands in for the real classifier. It reproduces the two facts that matter: the decision is
     // taken from (base vs local) and (base vs remote), and the upload changes the server BEFORE the
     // new baseline is recorded.

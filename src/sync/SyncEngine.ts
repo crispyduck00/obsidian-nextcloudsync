@@ -43,6 +43,7 @@ import { ResolutionService } from './resolution/ResolutionService';
 import { ConflictApplier } from './conflict/ConflictApplier';
 import { DirectoryReconciler } from './directory/DirectoryReconciler';
 import { WatchOperations } from './watch/WatchOperations';
+import { SyncActivityGate } from './SyncActivityGate';
 import { MirrorService } from './mirror/MirrorService';
 import { SyncHistoryStore } from '../data/SyncHistoryStore';
 import { IStatusBar } from '../ui/StatusBarItem';
@@ -134,6 +135,8 @@ export class SyncEngine {
   private readonly directories: DirectoryReconciler;
 
   private readonly watch: WatchOperations;
+  /** Shared/exclusive gate: lightweight path operations may overlap each other, never a full sync. */
+  private readonly activityGate = new SyncActivityGate();
 
   private readonly mirror: MirrorService;
   private syncProgress = { processed: 0, total: 0 };
@@ -291,7 +294,8 @@ export class SyncEngine {
       connect: () => this.connection(),
       renameTracker: () => this.getOrCreateRenameTracker(),
       isBlockedByWifiOnly: () => this.isBlockedByWifiOnly(),
-      isSyncRunning: () => this.running,
+      isSyncRunning: () => this.isSyncRunning(),
+      runNonFullSyncOperation: (fn) => this.activityGate.runShared(fn),
       processFile: (remote, summary) => this.processFileWithRetry(remote, summary),
       queueRetry: (p) => { this.retryQueue.push(p); },
       conflictEncounters: () => this.conflictEncounters,
@@ -381,11 +385,17 @@ export class SyncEngine {
     return isCellularBlocked(this.opts.settings.syncOnWifiOnly, Platform.isIosApp, conn?.type);
   }
 
+  /** True while a full-vault sync session or its final persistence is still active. */
+  isSyncRunning(): boolean {
+    return this.running || this.currentRun !== null;
+  }
+
   async syncManual(opts: { manual?: boolean } = {}): Promise<void> {
     // Mobile has no status bar; NoticeStatusBar surfaces state there. The early returns below need explicit
     // notices because they exit before any toast exists.
     void this.opts.logger?.log(`sync: start (manual=${opts.manual === true})`);
-    if (this.running) {
+    // Prevent concurrent runs (avoid clashing with watch mode or scheduled sync).
+    if (this.isSyncRunning()) {
       void this.opts.logger?.log('sync: skipped — already running');
       if (Platform.isMobile) new Notice('⏳ A sync is already in progress.');
       return;
@@ -398,7 +408,9 @@ export class SyncEngine {
     // Set the balking flag synchronously (before any await) so a concurrent call still balks.
     this.running = true;
     this.cancelled = false;
-    const run = this.runSyncSession(opts.manual === true);
+    // Full sync is exclusive with watch/lightweight operations. Existing lightweight work may
+    // finish first; once this writer is queued, later lightweight work waits behind it.
+    const run = this.activityGate.runExclusive(() => this.runSyncSession(opts.manual === true));
     this.currentRun = run;
     try {
       await run;
@@ -643,6 +655,8 @@ export class SyncEngine {
     if (run) {
       try { await run; } catch { /* runSyncSession swallows its own errors */ }
     }
+    // A restore also changes StateDB and the local file. Maintenance must wait for its save, too.
+    await this.activityGate.runExclusive(() => undefined);
   }
 
   // Resets only the tracking index; no vault or remote file is touched, so the next sync runs as a first sync.
@@ -1128,8 +1142,10 @@ export class SyncEngine {
   }
 
   async restoreVersion(path: string, version: FileVersion): Promise<void> {
-    const { client, features } = await this.ensureClient();
-    return this.versions.restoreVersion(client, features, path, version);
+    return this.activityGate.runExclusive(async () => {
+      const { client, features } = await this.ensureClient();
+      await this.versions.restoreVersion(client, features, path, version);
+    });
   }
 
   private acquireLock(path: string): Promise<string | null> {
@@ -1508,4 +1524,3 @@ export class SyncEngine {
     });
   }
 }
-

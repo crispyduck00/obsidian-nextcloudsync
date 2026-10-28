@@ -62,6 +62,7 @@ function build(opts: { blocked: boolean; running?: boolean }): Harness {
     localAdapter, stateDB, historyStore, statusBar, journal, mergeBase, transfer, deletion, resolution,
     isSystemExcluded, isPluginPath: noPluginPath, connect, renameTracker, isBlockedByWifiOnly, isSyncRunning, processFile,
     queueRetry, conflictEncounters, logger, notify,
+    runNonFullSyncOperation: async <T>(fn: () => Promise<T>) => fn(),
   } as unknown as WatchDeps;
 
   // Every port that would leave a trace. isSystemExcluded, isBlockedByWifiOnly and logger.log are
