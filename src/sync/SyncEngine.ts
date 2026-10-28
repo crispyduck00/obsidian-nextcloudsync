@@ -86,6 +86,9 @@ interface SyncEngineOptions {
   // Clean sides of marker-conflicted notes, so force-resolution restores real content instead of markers (docs/spec.md §6.4).
   cleanSideStore?: CleanSideStore;
   statusBar: IStatusBar;
+  /** Optional status surface for lightweight watch operations. */
+  lightweightStatusBar?: IStatusBar;
+  /** Persisted per-file sync-history log for the status dialog. Optional (absent in some tests). */
   historyStore?: SyncHistoryStore;
   webdavFactory: WebDAVFactory;
   pluginDir: string;
@@ -115,7 +118,7 @@ export class SyncEngine {
   // Set by requestStop(): workers stop pulling new work, while the run's finally block still saves state.
   private cancelled = false;
   // Lets abortAndWait() await a running sync's wind-down (including its final state save) before a reset.
-  private currentRun: Promise<void> | null = null;
+  private currentRun: Promise<boolean> | null = null;
   private readonly journal: SyncJournal;
 
   private readonly mergeBase: MergeBaseRecorder;
@@ -280,7 +283,7 @@ export class SyncEngine {
       localAdapter: opts.localAdapter,
       stateDB: opts.stateDB,
       historyStore: opts.historyStore,
-      statusBar: opts.statusBar,
+      statusBar: opts.lightweightStatusBar ?? opts.statusBar,
       journal: this.journal,
       mergeBase: this.mergeBase,
       transfer: this.transfer,
@@ -381,27 +384,47 @@ export class SyncEngine {
     return isCellularBlocked(this.opts.settings.syncOnWifiOnly, Platform.isIosApp, conn?.type);
   }
 
+  /** Whether a new Android foreground-watch operation may use the current network. */
+  canRunWatchSync(): boolean {
+    if (typeof navigator === 'undefined') return true;
+    if (navigator.onLine === false) return false;
+    return !this.isBlockedByWifiOnly();
+  }
+
+  /** True while a full-vault sync session or its final persistence is active. */
+  isSyncRunning(): boolean {
+    return this.running || this.currentRun !== null;
+  }
+
   async syncManual(opts: { manual?: boolean } = {}): Promise<void> {
-    // Mobile has no status bar; NoticeStatusBar surfaces state there. The early returns below need explicit
-    // notices because they exit before any toast exists.
+    await this.syncManualWithResult(opts);
+  }
+
+  private async syncManualWithResult(opts: { manual?: boolean } = {}): Promise<boolean> {
+    // Mobile has no status bar; sync state (progress + result) is surfaced via NoticeStatusBar,
+    // which implements IStatusBar and is driven uniformly for every run. The two early-return
+    // guidance notices below still need an explicit mobile notice because those paths return
+    // before any syncing toast is created. Desktop keeps using the status bar (no popups).
     void this.opts.logger?.log(`sync: start (manual=${opts.manual === true})`);
-    if (this.running) {
+    // Prevent concurrent runs (avoid clashing with watch mode or scheduled sync).
+    if (this.isSyncRunning()) {
       void this.opts.logger?.log('sync: skipped — already running');
       if (Platform.isMobile) new Notice('⏳ A sync is already in progress.');
-      return;
+      return false;
     }
     if (this.isBlockedByWifiOnly()) { // "Wi-Fi only" enabled and on cellular
       void this.opts.logger?.log('sync: skipped — Wi-Fi-only and on cellular');
       if (Platform.isMobile) new Notice('Sync skipped — you are on cellular and Wi-Fi only sync is on.', 6000);
-      return;
+      return false;
     }
     // Set the balking flag synchronously (before any await) so a concurrent call still balks.
     this.running = true;
     this.cancelled = false;
     const run = this.runSyncSession(opts.manual === true);
     this.currentRun = run;
+    let completed = false;
     try {
-      await run;
+      completed = await run;
     } finally {
       this.currentRun = null;
       // The run is over, so deferred watch edits can be evaluated. Best-effort: a failure must not propagate out of "Sync now".
@@ -411,14 +434,15 @@ export class SyncEngine {
         console.warn('[SyncEngine] Deferred watch-mode sync failed:', err);
       }
     }
+    return completed;
   }
 
-  private async runSyncSession(manual: boolean): Promise<void> {
+  private async runSyncSession(manual: boolean): Promise<boolean> {
     // Created before the try so catch/finally can reference them even if the first step fails.
     const summary = this.initSummary();
     this.journal.beginRun(summary.startedAt);
 
-    const cancelled = false;
+    let completed = false;
     try {
       // Connect INSIDE the try: if ensureClient() threw or hung outside it, the finally that clears `running` would be
       // skipped and the engine would balk forever as "already running".
@@ -436,6 +460,7 @@ export class SyncEngine {
       } else {
         await this.incrementalSync(summary);
       }
+      completed = !this.cancelled;
     } catch (err) {
       console.error('[SyncEngine] Sync failed:', err);
       void this.opts.logger?.log(`sync: FAILED — ${(err as Error).message}`, 'error');
@@ -449,7 +474,7 @@ export class SyncEngine {
 
       void this.opts.logger?.log(
         `sync: done up=${summary.uploadedCount} down=${summary.downloadedCount} ` +
-        `del=${summary.deletedCount} merged=${summary.mergedCount} conflicted=${summary.conflictedCount} err=${summary.errorCount} cancelled=${cancelled}`,
+        `del=${summary.deletedCount} merged=${summary.mergedCount} conflicted=${summary.conflictedCount} err=${summary.errorCount} cancelled=${this.cancelled}`,
       );
       this.logSessionErrors(summary);
       summary.completedAt = Date.now();
@@ -464,6 +489,7 @@ export class SyncEngine {
       );
       // Result display is owned by the status bar surface (StatusBarItem / NoticeStatusBar) via setSyncComplete.
     }
+    return completed;
   }
 
   // A changed sync scope (or a state saved before the fingerprint existed) makes the stored root ETag
@@ -516,6 +542,40 @@ export class SyncEngine {
     }
   }
 
+  /**
+   * Mobile Watch structural recovery.
+   *
+   * Normally an ordinary full sync that started after the uncertain event (resume/startup/push/
+   * manual) is authoritative enough, so await it instead of racing a second run. When the structural
+   * event itself occurred DURING the current scan, requireFreshAfterCurrent=true: that scan may
+   * already have passed the affected path, so wait for it to settle and then use/start a successor.
+   * Either way this is the ordinary full-sync path; Watch owns no separate merge/reconcile rules.
+   */
+  async syncForWatchRecovery(requireFreshAfterCurrent = false): Promise<boolean> {
+    const current = this.currentRun;
+    if (current) {
+      try {
+        const completed = await current;
+        if (!requireFreshAfterCurrent) return completed;
+      } catch {
+        if (!requireFreshAfterCurrent) return false;
+        // A structural event occurred during the failed run; retry below with a fresh full sync.
+      }
+
+      // Another authoritative run may have started after the old one settled (resume/push/manual).
+      // Because that successor necessarily began after the structural event, it is fresh enough.
+      const successor = this.currentRun;
+      if (successor) {
+        try {
+          return await successor;
+        } catch {
+          return false;
+        }
+      }
+    }
+    return this.syncManualWithResult();
+  }
+
   private logSessionErrors(summary: SyncSessionSummary): void {
     this.journal.logSessionErrors(summary);
   }
@@ -526,6 +586,25 @@ export class SyncEngine {
     return this.watch.syncSingleFile(path);
   }
 
+  /**
+   * Android foreground-watch wrapper around the SAME upstream single-file operation.
+   *
+   * WatchOperations intentionally contains NetworkError and queues the path for the next ordinary
+   * sync. Mobile additionally wants to retry promptly when connectivity returns while the app stays
+   * open, so report whether this attempt added retry work without changing the classifier itself.
+   */
+  async syncSingleFileForMobileWatch(path: string): Promise<boolean> {
+    const retryCount = (): number => this.retryQueue.reduce(
+      (count, queued) => count + (queued === path ? 1 : 0),
+      0,
+    );
+    const retriesBefore = retryCount();
+    await this.watch.syncSingleFile(path);
+    return retryCount() <= retriesBefore;
+  }
+
+
+  /** @see WatchOperations.drainPending */
   private drainWatchPending(): Promise<void> {
     return this.watch.drainPending();
   }
@@ -534,20 +613,67 @@ export class SyncEngine {
     return this.watch.deleteSingleFile(path);
   }
 
+  /**
+   * Mobile result wrapper for a local file deletion. A guarded delete may legitimately restore the
+   * remote file when another device changed it; that is converged too. What needs structural recovery
+   * is the state where the tracked entry remains AND the local path is still absent (e.g. transport
+   * failure swallowed by the upstream watch method).
+   */
+  async deleteSingleFileForMobileWatch(path: string): Promise<boolean> {
+    const trackedBefore = this.opts.stateDB.getFile(path);
+    await this.watch.deleteSingleFile(path);
+    if (!trackedBefore || !this.opts.stateDB.getFile(path)) return true;
+    return (await this.opts.localAdapter.stat(path)) != null;
+  }
+
+  /** @see WatchOperations.renameSingleFile */
   renameSingleFile(oldPath: string, newPath: string): Promise<void> {
     return this.watch.renameSingleFile(oldPath, newPath);
   }
 
+  /**
+   * Mobile result wrapper for MOVE. A tracked rename is converged only when the existing StateDB
+   * identity moved with it. Untracked renames are intentionally conservative: a full reconcile is
+   * safer than guessing whether a pre-first-sync/new local file ever existed remotely.
+   */
+  async renameSingleFileForMobileWatch(oldPath: string, newPath: string): Promise<boolean> {
+    const trackedBefore = this.opts.stateDB.getFile(oldPath);
+    await this.watch.renameSingleFile(oldPath, newPath);
+    if (!trackedBefore) return false;
+    return this.opts.stateDB.getFile(oldPath) == null && this.opts.stateDB.getFile(newPath) != null;
+  }
+
+  /** @see WatchOperations.createSingleFolder */
   createSingleFolder(path: string): Promise<void> {
     return this.watch.createSingleFolder(path);
   }
 
+  async createSingleFolderForMobileWatch(path: string): Promise<boolean> {
+    await this.watch.createSingleFolder(path);
+    return this.opts.stateDB.getDir(path) != null;
+  }
+
+  /** @see WatchOperations.deleteSingleFolder */
   deleteSingleFolder(path: string): Promise<void> {
     return this.watch.deleteSingleFolder(path);
   }
 
+  async deleteSingleFolderForMobileWatch(path: string): Promise<boolean> {
+    const trackedBefore = this.opts.stateDB.getDir(path);
+    await this.watch.deleteSingleFolder(path);
+    return !trackedBefore || this.opts.stateDB.getDir(path) == null;
+  }
+
+  /** @see WatchOperations.renameSingleFolder */
   renameSingleFolder(oldPath: string, newPath: string): Promise<void> {
     return this.watch.renameSingleFolder(oldPath, newPath);
+  }
+
+  async renameSingleFolderForMobileWatch(oldPath: string, newPath: string): Promise<boolean> {
+    const trackedBefore = this.opts.stateDB.getDir(oldPath);
+    await this.watch.renameSingleFolder(oldPath, newPath);
+    if (!trackedBefore) return false;
+    return this.opts.stateDB.getDir(oldPath) == null && this.opts.stateDB.getDir(newPath) != null;
   }
 
   startAutoSync(intervalMinutes: number): void {
@@ -1508,4 +1634,3 @@ export class SyncEngine {
     });
   }
 }
-

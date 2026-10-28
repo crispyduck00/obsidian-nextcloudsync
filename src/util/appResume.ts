@@ -1,6 +1,21 @@
-// Sync when the app returns to the foreground (docs/spec.md §5.8). Registered on every platform:
-// mobile suspends background timers, and a slept desktop has the same gap. The cooldown keeps app
-// switching from spending data and battery.
+/**
+ * Syncing when the app comes back to the foreground (upstream change, GitHub discussion #44).
+ *
+ * Mobile has no reliable periodic background sync. Android may now opt into foreground-only watch,
+ * but that accelerates local changes while the app is alive; it deliberately does not promise
+ * background execution and cannot replace an authoritative catch-up after a suspension. Without
+ * Client Push, an Obsidian left in the background still needs this trigger to notice another
+ * device's remote changes.
+ *
+ * Coming back to the foreground is the one moment when the app is provably running and the user is
+ * provably looking at it, which makes it the only trigger that does not depend on background
+ * execution working. It is registered on every platform rather than only on mobile: a desktop machine
+ * that slept has the same hole (its interval timer did not tick while it was asleep), and not
+ * branching on the platform is the simpler shape.
+ *
+ * The risk is entirely in the other direction — a trigger that fires on every app switch would spend
+ * the user's data and battery for nothing — so the cooldown below is the part that matters.
+ */
 
 // Minimum gap between syncs for this trigger. Deliberately not a setting: short enough that a real
 // "was away, came back" case syncs, long enough that glancing at a notification costs nothing.

@@ -371,26 +371,18 @@ describe('[SPEC:DSD-5] predicates reflect platform and sign-in state', () => {
     expect(isDisabled(rowNamed(makeHost({ isIosApp: false }), 'Sync on Wi-Fi only'))).toBe(false);
   });
 
-  const everyPlatform = (): SettingDefinitionsHost[] => [
-    makeHost({ isMobile: false, isIosApp: false }),
-    makeHost({ isMobile: true, isIosApp: false }),
-    makeHost({ isMobile: true, isIosApp: true }),
-  ];
-
-  it('[SPEC:MWM-1] keeps "Sync on file change" enabled on every platform', () => {
-    for (const host of everyPlatform()) {
-      expect(isDisabled(rowNamed(host, 'Sync on file change'))).toBe(false);
-    }
+  it('[SPEC:MWM-1] enables "Sync on file change" on Android but keeps it disabled on iOS', () => {
+    expect(isDisabled(rowNamed(makeHost({ isMobile: true, isIosApp: false }), 'Sync on file change'))).toBe(false);
+    expect(isDisabled(rowNamed(makeHost({ isMobile: true, isIosApp: true }), 'Sync on file change'))).toBe(true);
+    expect(isDisabled(rowNamed(makeHost({ isMobile: false, isIosApp: false }), 'Sync on file change'))).toBe(false);
   });
 
-  it('[SPEC:MWM-1] describes "Sync on file change" the same way on every platform', () => {
-    const descs = everyPlatform().map((host) => rowNamed(host, 'Sync on file change').desc);
-    expect(descs[1]).toBe(descs[0]);
-    expect(descs[2]).toBe(descs[0]);
-    const desc = String(descs[0]);
-    expect(desc).not.toContain('Desktop only');
-    expect(desc).toContain('only while Obsidian is open');
-    expect(desc).toContain('Sync on Wi-Fi only');
+  it('describes Android watch as foreground, best-effort and Wi-Fi-only aware', () => {
+    const row = rowNamed(makeHost({ isMobile: true, isIosApp: false }), 'Sync on file change');
+    expect(row.desc).toContain('foreground');
+    expect(row.desc).toContain('best-effort');
+    expect(row.desc).toContain('Wi-Fi-only');
+    expect(row.desc).toContain('Off by default');
   });
 
   it('disables "Sync now" until the credentials are complete', () => {
