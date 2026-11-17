@@ -59,8 +59,13 @@ export interface WatchDeps {
   // network, no local write, no StateDB change.
   isBlockedByWifiOnly(): boolean;
   isSyncRunning(): boolean;
-  // The full sync's per-file classifier, so watch mode and "Sync now" run the same decision code and reach
-  // identical results.
+  /** Run one lightweight operation under the engine's shared activity gate. */
+  runNonFullSyncOperation<T>(fn: () => Promise<T>): Promise<T>;
+  /**
+   * The full sync's per-file classifier. Injected as a port rather than imported: upstream change (C-3)
+   * settled that watch mode and "Sync now" must reach identical results, which means watch mode runs
+   * the same decision code instead of a second copy of it.
+   */
   processFile(remote: RemoteFileInfo, summary: SyncSessionSummary): Promise<void>;
   // Outbound port: this path needs another attempt on the next sync.
   queueRetry(path: string): void;
@@ -139,6 +144,10 @@ export class WatchOperations {
       void this.deps.logger?.log(`watch: full sync in progress → deferred ${path}`);
       return;
     }
+    return this.deps.runNonFullSyncOperation(() => this.syncSingleFileActive(path));
+  }
+
+  private async syncSingleFileActive(path: string): Promise<void> {
     const stat = await this.deps.localAdapter.stat(path);
     if (!stat) return; // already deleted before the debounce fired
     const base = this.deps.stateDB.getFile(path);
@@ -204,6 +213,12 @@ export class WatchOperations {
       void this.deps.logger?.log(`watch: full sync in progress → deletion of ${path} left to the running scan`);
       return;
     }
+    return this.deps.runNonFullSyncOperation(() => this.deleteSingleFileActive(path));
+  }
+
+  private async deleteSingleFileActive(path: string): Promise<void> {
+    const base = this.deps.stateDB.getFile(path);
+    if (!base) return; // not tracked — nothing to do on remote
     const conn = await this.deps.connect();
     const summary = this.deps.journal.newSummary();
     const conflictsBefore = this.deps.conflictEncounters();
@@ -235,35 +250,39 @@ export class WatchOperations {
   }
 
   private async renameSingleFileLocked(oldPath: string, newPath: string): Promise<void> {
-    await this.deps.connect();
-    const rt = this.deps.renameTracker();
-    this.begin();
-    try {
-      await rt.applyLocalRename(oldPath, newPath);
-      this.deps.stateDB.requestSave();
-    } catch (err) {
-      console.warn(`[SyncEngine] Single-file rename failed ${oldPath} → ${newPath}:`, err);
-    } finally {
-      this.end();
-    }
+    return this.deps.runNonFullSyncOperation(async () => {
+      await this.deps.connect();
+      const rt = this.deps.renameTracker();
+      this.begin();
+      try {
+        await rt.applyLocalRename(oldPath, newPath);
+        this.deps.stateDB.requestSave(); // coalesced watch-mode save (P0-B)
+      } catch (err) {
+        console.warn(`[SyncEngine] Single-file rename failed ${oldPath} → ${newPath}:`, err);
+      } finally {
+        this.end();
+      }
+    });
   }
 
   // MKCOL is idempotent (405 swallowed), which also makes it safe against a stray download-created-folder event.
   async createSingleFolder(path: string): Promise<void> {
     if (this.deps.isSystemExcluded(path) || this.deps.isPluginPath(path)) return;
     if (this.skippedOnCellular('folder-create', path)) return;
-    const conn = await this.deps.connect();
-    this.begin();
-    try {
-      await conn.client.createDirectory(path);
-      this.deps.stateDB.setDir({ path, remoteFileId: null });
-      this.deps.stateDB.requestSave();
-      void this.deps.logger?.log(`watch: folder created → MKCOL ${path}`);
-    } catch (err) {
-      console.warn(`[SyncEngine] Single-folder create failed for ${path}:`, err);
-    } finally {
-      this.end();
-    }
+    return this.deps.runNonFullSyncOperation(async () => {
+      const conn = await this.deps.connect();
+      this.begin();
+      try {
+        await conn.client.createDirectory(path); // idempotent: existing folder → harmless
+        this.deps.stateDB.setDir({ path, remoteFileId: null });
+        this.deps.stateDB.requestSave(); // coalesced watch-mode save
+        void this.deps.logger?.log(`watch: folder created → MKCOL ${path}`);
+      } catch (err) {
+        console.warn(`[SyncEngine] Single-folder create failed for ${path}:`, err);
+      } finally {
+        this.end();
+      }
+    });
   }
 
   // Only a TRACKED folder is propagated; an untracked one was never on the server. The remote delete routes
@@ -278,22 +297,23 @@ export class WatchOperations {
       void this.deps.logger?.log(`watch: full sync in progress → folder deletion of ${path} left to the running scan`);
       return;
     }
-    const conn = await this.deps.connect();
-    this.begin();
-    let succeeded = false;
-    try {
-      await conn.client.deleteCollection(path); // 404 is handled inside as success
-      void this.deps.logger?.log(`watch: folder deleted → remote collection removed ${path}`);
-      succeeded = true;
-    } catch (err) {
-      console.warn(`[SyncEngine] Single-folder delete failed for ${path}:`, err);
-    } finally {
-      this.end();
-    }
-    // Drop the tracked directory only when the remote delete succeeded; otherwise the next sync re-creates it locally.
-    if (!succeeded) return;
-    this.deps.stateDB.deleteDir(path);
-    this.deps.stateDB.requestSave();
+    return this.deps.runNonFullSyncOperation(async () => {
+      const conn = await this.deps.connect();
+      this.begin();
+      let succeeded = false;
+      try {
+        await conn.client.deleteCollection(path); // trashbin; 404 handled inside as success
+        void this.deps.logger?.log(`watch: folder deleted → remote collection removed ${path}`);
+        succeeded = true;
+      } catch (err) {
+        console.warn(`[SyncEngine] Single-folder delete failed for ${path}:`, err);
+      } finally {
+        this.end();
+      }
+      if (!succeeded) return;
+      this.deps.stateDB.deleteDir(path);
+      this.deps.stateDB.requestSave();
+    });
   }
 
   // The server moves the whole subtree. Child-file rename events fired alongside are handled best-effort by
@@ -302,19 +322,21 @@ export class WatchOperations {
     if (this.deps.isPluginPath(oldPath) || this.deps.isPluginPath(newPath)) return;
     if (this.deps.isSystemExcluded(oldPath) && this.deps.isSystemExcluded(newPath)) return;
     if (this.skippedOnCellular('folder-rename', `${oldPath} → ${newPath}`)) return;
-    const conn = await this.deps.connect();
-    this.begin();
-    try {
-      await conn.client.moveFile(oldPath, newPath);
-      this.deps.stateDB.deleteDir(oldPath);
-      this.deps.stateDB.setDir({ path: newPath, remoteFileId: null });
-      this.deps.stateDB.requestSave();
-      void this.deps.logger?.log(`watch: folder renamed → MOVE ${oldPath} → ${newPath}`);
-    } catch (err) {
-      console.warn(`[SyncEngine] Single-folder rename failed ${oldPath} → ${newPath}:`, err);
-    } finally {
-      this.end();
-    }
+    return this.deps.runNonFullSyncOperation(async () => {
+      const conn = await this.deps.connect();
+      this.begin();
+      try {
+        await conn.client.moveFile(oldPath, newPath); // MOVE works for collections too
+        this.deps.stateDB.deleteDir(oldPath);
+        this.deps.stateDB.setDir({ path: newPath, remoteFileId: null });
+        this.deps.stateDB.requestSave();
+        void this.deps.logger?.log(`watch: folder renamed → MOVE ${oldPath} → ${newPath}`);
+      } catch (err) {
+        console.warn(`[SyncEngine] Single-folder rename failed ${oldPath} → ${newPath}:`, err);
+      } finally {
+        this.end();
+      }
+    });
   }
 
   // Called once the run has finished. The set is drained into a local copy first so re-entry cannot loop.
