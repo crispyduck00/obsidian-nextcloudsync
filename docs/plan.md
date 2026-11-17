@@ -445,11 +445,14 @@ remoteFileId, isConflicted, localMtime?, localSize?, remoteMtime? }`.
 - **Mirror persistence**: the mirror's `persist` saves, in this order, the state DB, the merge bases (flush) and the history. It runs in a
   `finally`, so it also runs when some items failed; a failed save is appended to the result's errors instead of being thrown, so the result is not shown as a success.
 - **`syncScopeFingerprint`** (`SyncState`, optional) is a digest of everything that changes which paths are in scope: `syncConfigFolder`, the
-  `configSync.*` categories, `excludedFolders`, the normalised `syncedCommunityPlugins` (`computeSyncScopeFingerprint`). At the start of a session the
+  `configSync.*` categories, `excludedFolders`, the normalised `syncedCommunityPlugins`, and `maxFileSizeMB` (`computeSyncScopeFingerprint`). At the start of a session the
   engine compares it with the stored value; when it differs or is missing (an old state file) it clears the stored root ETag once, so the next
   scan is a real one instead of a short-circuit, and then stores the new value. `StateDB.getSyncScopeFingerprint()` / `setSyncScopeFingerprint()`
   mark the state dirty like `setRemoteRootEtag`, and `resetVaultIndex` clears the field with the root ETag. The root ETag is also cleared at the end of a
   session when any listed plugin was ignored or a restart is still pending, because those states change without any remote change.
+- **`remoteRootListing`** holds the candidate ETag after reconciliation and the observed metadata for size-skipped remote paths. On a root match,
+  `RemoteListingSource` overlays these paths onto the reconstructed listing. An in-memory generation counter preserves invalidations made during
+  a run. A legacy `remoteRootEtag` triggers a real listing while the file and directory bases are retained.
 - **`ctimeLocalAttempt` / `ctimeRemoteAttempt`** (`FileState`, optional) hold the target creation time, in Unix seconds, of the last local fix the
   platform did not apply and of the last server update the server rejected (docs/spec.md §9.7). `CreationTimeAligner` records one only on an
   `ineffective` / `rejected` / failed attempt, and a planned fix to the same target is then skipped. It removes the field when a fix to the
