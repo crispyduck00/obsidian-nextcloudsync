@@ -14,7 +14,10 @@ export function autoSyncOnStartup(): boolean {
   return true;
 }
 
-// Mobile is off: it does not deliver reliable file-change events and continuous syncing drains battery.
+/**
+ * First-run Watch default. Desktop: true. Mobile: false. Android can explicitly opt into
+ * foreground-only Watch, but the conservative mobile default remains off.
+ */
 export function autoWatchOnChange(): boolean {
   return !Platform.isMobile;
 }
