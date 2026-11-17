@@ -40,7 +40,7 @@ function makeFolderEngine(dir: DirState) {
   };
   const engine = new SyncEngine({
     app: {}, settings: {}, localAdapter: {}, stateDB, statusBar: { setStatus: jest.fn() },
-    webdavFactory: { createClient: jest.fn(async () => ({ client: { deleteCollection }, features: {} })) },
+    webdavFactory: { createClient: jest.fn(async () => ({ client: { deleteCollection, isRemoteDirEmpty: async () => true }, features: {} })) },
     pluginDir: '', configDir: '.obsidian',
   } as never);
   return { engine, dirs, stateDB, deleteCollection };
@@ -105,7 +105,7 @@ describe('[SPEC:G1-2] SyncEngine.deleteSingleFolder — remote delete failure mu
     };
     const engine = new SyncEngine({
       app: {}, settings: {}, localAdapter: {}, stateDB, statusBar: { setStatus: jest.fn() },
-      webdavFactory: { createClient: jest.fn(async () => ({ client: { deleteCollection }, features: {} })) },
+      webdavFactory: { createClient: jest.fn(async () => ({ client: { deleteCollection, isRemoteDirEmpty: async () => true }, features: {} })) },
       pluginDir: '', configDir: '.obsidian',
     } as never);
 
