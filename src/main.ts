@@ -164,7 +164,13 @@ export default class ObsidianNextcloudsync extends Plugin {
       // becomes a spurious upload/MOVE/DELETE storm. SyncEngine marks them in the LocalAdapter
       // ignore list; tmp paths are always filtered.
       const isOwnSyncEvent = (path: string): boolean =>
-        isSyncTmpPath(path) || (this.localAdapter?.shouldIgnore(path) ?? false);
+        isSyncTmpPath(path)
+        || isActiveOwnLog(path, {
+          logsFolder: this.settings.logsFolder,
+          host: this.hostToken(),
+          loggingEnabled: this.settings.loggingEnabled,
+        })
+        || (this.localAdapter?.shouldIgnore(path) ?? false);
 
       // Batches paths over the debounce window so each keystroke does not cost a request.
       const pendingUploads = new Set<string>();
