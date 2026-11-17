@@ -110,7 +110,11 @@ export class StateDB {
   setFile(fileState: FileState): void {
     const prev = this.state.files[fileState.path];
     // Drop a stale index entry if this path's remoteFileId changed (e.g. re-create on the server).
-    if (prev?.remoteFileId && prev.remoteFileId !== fileState.remoteFileId) {
+    if (
+      prev?.remoteFileId &&
+      prev.remoteFileId !== fileState.remoteFileId &&
+      this.fileIdIndex.get(prev.remoteFileId) === fileState.path
+    ) {
       this.fileIdIndex.delete(prev.remoteFileId);
     }
     this.state.files[fileState.path] = fileState;
@@ -119,7 +123,9 @@ export class StateDB {
 
   deleteFile(path: string): void {
     const prev = this.state.files[path];
-    if (prev?.remoteFileId) this.fileIdIndex.delete(prev.remoteFileId);
+    if (prev?.remoteFileId && this.fileIdIndex.get(prev.remoteFileId) === path) {
+      this.fileIdIndex.delete(prev.remoteFileId);
+    }
     delete this.state.files[path];
   }
 
