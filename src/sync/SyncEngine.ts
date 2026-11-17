@@ -30,7 +30,7 @@ import {
   isSystemExcluded as isSystemExcludedPure,
 } from './policy';
 import { LocalScanner } from './scan/LocalScanner';
-import { RemoteListingSource } from './scan/RemoteListingSource';
+import { RemoteListingSource, type FullScanListing } from './scan/RemoteListingSource';
 import { SyncJournal } from './session/SyncJournal';
 import { OversizeSkipNotifier } from './session/OversizeSkipNotifier';
 import { MergeBaseRecorder } from './session/MergeBaseRecorder';
@@ -446,6 +446,7 @@ export class SyncEngine {
         await this.incrementalSync(summary);
       }
     } catch (err) {
+      this.opts.stateDB.setRemoteRootEtag(null);
       console.error('[SyncEngine] Sync failed:', err);
       void this.opts.logger?.log(`sync: FAILED — ${(err as Error).message}`, 'error');
       new Notice(`❌ Sync failed: ${(err as Error).message}`, 6000);
@@ -481,8 +482,7 @@ export class SyncEngine {
   // meaningless: files that were out of scope never entered the tracked listing a short-circuit rebuilds
   // (docs/spec.md §8a.5).
   private invalidateRootEtagOnScopeChange(): void {
-    const { syncConfigFolder, configSync, excludedFolders, syncedCommunityPlugins } = this.opts.settings;
-    const fingerprint = computeSyncScopeFingerprint({ syncConfigFolder, configSync, excludedFolders, syncedCommunityPlugins });
+    const fingerprint = computeSyncScopeFingerprint(this.opts.settings);
     if (this.opts.stateDB.getSyncScopeFingerprint() === fingerprint) return;
     this.opts.stateDB.setRemoteRootEtag(null);
     this.opts.stateDB.setSyncScopeFingerprint(fingerprint);
@@ -816,11 +816,10 @@ export class SyncEngine {
 
   private async incrementalSync(summary: SyncSessionSummary): Promise<void> {
     const client = this.client!;
+    const rootListingGeneration = this.opts.stateDB.getRootListingGeneration();
     let remoteFiles: RemoteFileInfo[];
-    // True when remoteFiles is the COMPLETE listing (absence implies remote deletion); false on the token path's partial diff.
-    let isFullScan = false;
-    // Non-null when the root-ETag short-circuit rebuilt the directory list from State; reuse it to skip getDirectories('') (docs/spec.md §8a.5).
-    let fullScanCachedDirs: RemoteDirInfo[] | null = null;
+    // A full scan has a complete listing (absence implies remote deletion). The token path only has a diff.
+    let fullScan: FullScanListing | undefined;
 
     const existingToken = this.opts.stateDB.getSyncToken();
     // A missing vault folder can surface from any listing call below, including the token-expired fallback, hence one guard
@@ -846,26 +845,22 @@ export class SyncEngine {
         } catch (err) {
           if (err instanceof SyncTokenExpiredError) {
             // Fall back to a full scan (the root-ETag short-circuit may rebuild the listing from State).
-            const listing = await this.obtainFullScanListing(client);
-            remoteFiles = listing.remoteFiles;
-            fullScanCachedDirs = listing.cachedDirs;
-            isFullScan = true;
+            fullScan = await this.obtainFullScanListing(client);
+            remoteFiles = fullScan.remoteFiles;
             const token = await client.getSyncToken();
             this.opts.stateDB.setSyncToken(token);
-            void this.opts.logger?.log(`sync: sync-token expired → FULL SCAN (remote=${remoteFiles.length}, shortCircuit=${listing.cachedDirs != null}, nextToken=${token ? 'obtained' : 'NULL'}). Remote deletions detected by absence (full-scan reconciliation)`);
+            void this.opts.logger?.log(`sync: sync-token expired → FULL SCAN (remote=${remoteFiles.length}, shortCircuit=${fullScan.cachedDirs != null}, nextToken=${token ? 'obtained' : 'NULL'}). Remote deletions detected by absence (full-scan reconciliation)`);
           } else {
             throw err;
           }
         }
       } else {
         // No prior token (the common Nextcloud case: sync-collection REPORT is unsupported, docs/spec.md §18), so every sync lands here.
-        const listing = await this.obtainFullScanListing(client);
-        remoteFiles = listing.remoteFiles;
-        fullScanCachedDirs = listing.cachedDirs;
-        isFullScan = true;
+        fullScan = await this.obtainFullScanListing(client);
+        remoteFiles = fullScan.remoteFiles;
         const token = await client.getSyncToken();
         this.opts.stateDB.setSyncToken(token);
-        void this.opts.logger?.log(`sync: FULL SCAN, no prior token (remote=${remoteFiles.length}, shortCircuit=${listing.cachedDirs != null}, nextToken=${token ? 'obtained' : 'NULL'}). Remote deletions detected by absence (full-scan reconciliation)`);
+        void this.opts.logger?.log(`sync: FULL SCAN, no prior token (remote=${remoteFiles.length}, shortCircuit=${fullScan.cachedDirs != null}, nextToken=${token ? 'obtained' : 'NULL'}). Remote deletions detected by absence (full-scan reconciliation)`);
       }
     } catch (err) {
       if (!(err instanceof RemoteRootMissingError)) throw err;
@@ -890,19 +885,21 @@ export class SyncEngine {
       true,
     );
 
-    await this.processLocalModifications(remoteFiles, summary, isFullScan);
+    await this.processLocalModifications(remoteFiles, summary, fullScan !== undefined);
 
     // Only a COMPLETE listing can show directory absence; the token path's partial diff cannot.
-    if (isFullScan) await this.reconcileDirectories(summary, fullScanCachedDirs ?? undefined);
+    if (fullScan) await this.reconcileDirectories(summary, fullScan.cachedDirs ?? undefined);
 
     // Drop captured clean sides for paths that converged, keeping snapshots bounded to currently-conflicted files.
     this.sweepResolvedSnapshots();
 
-    // Arm the root-ETag short-circuit only after a fully converged scan: with unresolved files, State may be stale against
-    // an unchanged root ETag, and a short-circuit would resolve the remote change as local-wins and overwrite the other device's edit.
-    // Invalidating the ETag forces a real full scan next time; convergence re-arms it (docs/spec.md §8a.5).
-    if (summary.conflictedCount > 0 || summary.errorCount > 0 || this.retryQueue.length > 0) {
+    // An incomplete run cannot reconstruct a complete listing. Size-limit skips are deliberate: their
+    // observed metadata keeps the listing complete without fabricating a common base (docs/spec.md §8a.5).
+    if (this.cancelled || summary.conflictedCount > 0 || summary.errorCount > 0 || this.retryQueue.length > 0) {
       this.opts.stateDB.setRemoteRootEtag(null);
+    } else if (fullScan && this.opts.stateDB.getRootListingGeneration() === rootListingGeneration) {
+      const sizeSkippedFiles = eligible.filter(file => summary.oversizeSkippedPaths.has(file.path));
+      this.opts.stateDB.setRemoteRootEtag(fullScan.rootEtag, sizeSkippedFiles);
     }
   }
 
@@ -1492,9 +1489,7 @@ export class SyncEngine {
     return this.localScanner.collectLocalStats(out);
   }
 
-  private obtainFullScanListing(
-    client: IWebDAVClient,
-  ): Promise<{ remoteFiles: RemoteFileInfo[]; cachedDirs: RemoteDirInfo[] | null }> {
+  private obtainFullScanListing(client: IWebDAVClient): Promise<FullScanListing> {
     return this.remoteListing.obtainFullScanListing(client);
   }
 

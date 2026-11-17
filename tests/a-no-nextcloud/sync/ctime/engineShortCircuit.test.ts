@@ -102,9 +102,8 @@ describe('SyncEngine root-ETag short-circuit and creation time', () => {
     expect(env.localAdapter.creationTimeSupport).not.toHaveBeenCalled();
   });
 
-  it(`${spec('CT-11')} the sync-scope fingerprint carries the scope-v2 version`, () => {
-    expect(computeSyncScopeFingerprint(DEFAULT_SETTINGS)).toContain('scope-v2');
-    expect(computeSyncScopeFingerprint(DEFAULT_SETTINGS)).not.toContain('scope-v1');
+  it(`${spec('CT-11')} the sync-scope fingerprint carries the scope-v3 version`, () => {
+    expect(computeSyncScopeFingerprint(DEFAULT_SETTINGS)).toContain('scope-v3');
   });
 
   it(`${spec('CT-11')} a state saved with the scope-v1 fingerprint real-scans on the first sync after the upgrade`, async () => {

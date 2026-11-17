@@ -6,6 +6,7 @@ export interface SyncScopeInput {
   configSync: ConfigSyncCategories;
   excludedFolders: readonly string[];
   syncedCommunityPlugins: readonly string[];
+  maxFileSizeMB: number;
 }
 
 /**
@@ -14,13 +15,14 @@ export interface SyncScopeInput {
  * categories and the plugin list cannot affect the scope, so they are left out.
  */
 export function computeSyncScopeFingerprint(input: SyncScopeInput): string {
-  const { syncConfigFolder, configSync, excludedFolders, syncedCommunityPlugins } = input;
+  const { syncConfigFolder, configSync, excludedFolders, syncedCommunityPlugins, maxFileSizeMB } = input;
   return JSON.stringify([
-    // Bump when a real scan must run once after an upgrade (v2: listings carry nc:creation_time, docs/spec.md §9.7).
-    'scope-v2',
+    // Bump when an upgrade needs a real scan (v3: size-skipped remote entries, docs/spec.md §8a.5).
+    'scope-v3',
     syncConfigFolder,
     syncConfigFolder ? Object.entries(configSync).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)) : [],
     [...excludedFolders].sort(),
     syncConfigFolder ? [...syncedCommunityPlugins].sort() : [],
+    maxFileSizeMB,
   ]);
 }

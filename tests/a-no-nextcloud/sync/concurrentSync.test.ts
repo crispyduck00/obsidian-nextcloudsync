@@ -123,6 +123,7 @@ describe('[SPEC:CONC-1] SyncEngine — a failed ensureClient must not strand the
       localAdapter: {},
       stateDB: {
         setLastSyncTime: jest.fn(),
+        setRemoteRootEtag: jest.fn(),
         save: jest.fn(async () => undefined),
         countConflicted: jest.fn(() => 0),
         getSyncToken: jest.fn(() => null),

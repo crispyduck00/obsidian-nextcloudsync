@@ -25,6 +25,7 @@ describe('[SPEC:CTE-5] SyncEngine — an untrusted-certificate failure reaches e
       localAdapter: {},
       stateDB: {
         setLastSyncTime: jest.fn(),
+        setRemoteRootEtag: jest.fn(),
         save: jest.fn(async () => undefined),
         countConflicted: jest.fn(() => 0),
         getSyncToken: jest.fn(() => null),
