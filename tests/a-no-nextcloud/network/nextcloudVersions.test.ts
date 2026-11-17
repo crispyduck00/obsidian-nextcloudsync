@@ -1,4 +1,5 @@
 import { requestUrl } from 'obsidian';
+import { DOMParser as XmlDomParser } from '@xmldom/xmldom';
 import { NextcloudClient } from '../../../src/network/NextcloudClient';
 import { DEFAULT_SETTINGS, DavSyncSettings, FeatureUnsupportedError, FileVersion } from '../../../src/types';
 
@@ -20,6 +21,11 @@ function makeClient(): NextcloudClient {
 }
 
 describe('NextcloudClient versions', () => {
+  beforeAll(() => {
+    (globalThis as unknown as { DOMParser: typeof DOMParser }).DOMParser =
+      XmlDomParser as unknown as typeof DOMParser;
+  });
+
   beforeEach(() => mockRequestUrl.mockReset());
 
   it('throws FeatureUnsupportedError when fileId is empty', async () => {
@@ -33,6 +39,39 @@ describe('NextcloudClient versions', () => {
     const call = mockRequestUrl.mock.calls[0][0];
     expect(call.method).toBe('PROPFIND');
     expect(call.url).toContain('/remote.php/dav/versions/alice/versions/123');
+  });
+
+  it('parses Nextcloud version metadata exposed by the versions DAV endpoint', async () => {
+    mockRequestUrl.mockReturnValueOnce(res(207, { text: `<?xml version="1.0"?>
+      <d:multistatus xmlns:d="DAV:" xmlns:nc="http://nextcloud.org/ns">
+        <d:response>
+          <d:href>/remote.php/dav/versions/alice/versions/123/169000</d:href>
+          <d:propstat><d:prop>
+            <d:getlastmodified>Tue, 18 Jul 2023 10:00:00 GMT</d:getlastmodified>
+            <d:getcontentlength>42</d:getcontentlength>
+            <d:getcontenttype>text/markdown</d:getcontenttype>
+            <d:getetag>"etag-v1"</d:getetag>
+            <nc:version-label>Before restructure</nc:version-label>
+            <nc:version-author>conny</nc:version-author>
+            <nc:has-preview>true</nc:has-preview>
+          </d:prop></d:propstat>
+        </d:response>
+      </d:multistatus>` }));
+
+    const versions = await makeClient().listVersions('123');
+    expect(versions).toHaveLength(1);
+    expect(versions[0]).toMatchObject({
+      versionId: '169000',
+      size: 42,
+      label: 'Before restructure',
+      author: 'conny',
+      mimeType: 'text/markdown',
+      etag: '"etag-v1"',
+      hasPreview: true,
+    });
+    const body = mockRequestUrl.mock.calls[0][0].body as string;
+    expect(body).toContain('nc:version-author');
+    expect(body).toContain('nc:version-label');
   });
 
   it('restoreVersion issues MOVE to restore/target', async () => {
