@@ -19,7 +19,7 @@ import {
   VaultRootOutcome,
   ServerLockedError,
 } from '../types';
-import { IWebDAVClient } from './IWebDAVClient';
+import { IWebDAVClient, type RemoteRootInfo } from './IWebDAVClient';
 import { DavSyncSettings } from '../types';
 import { toRemotePath, hrefToRelative, encodeRemoteUrl, encodeServerUrl, ensureRemoteDir, mkcolStrict, prepareMissingParentRetry, isTransportFailure } from './remotePath';
 import { RemoteDirCache } from './RemoteDirCache';
@@ -258,9 +258,11 @@ export class NextcloudClient implements IWebDAVClient {
     return entries[0] ?? null;
   }
 
-  async getRootEtag(): Promise<string | null> {
-    // One Depth:0 PROPFIND on the vault root (docs/spec.md §8a.5): Nextcloud propagates descendant changes to the root ETag.
-    // Never throws; any non-207, unreadable body or other error yields null so the caller full-scans.
+  async getRootInfo(): Promise<RemoteRootInfo> {
+    // Root-ETag short-circuit (docs/spec.md §8a.5): a single Depth:0 PROPFIND on the vault root. Nextcloud
+    // returns oc:fileid in the same response, which lets Client Push recognise root-folder ETag
+    // propagation without a second request. Never throws: every ambiguous outcome returns nulls so
+    // callers conservatively use the ordinary full reconciliation path.
     try {
       const res = await this.reqReadonly({
         url: this.remoteUrl(''),
@@ -269,14 +271,22 @@ export class NextcloudClient implements IWebDAVClient {
         body: PROPFIND_BODY,
         throw: false,
       });
-      if (res.status !== 207) return null;
-      const responses = readMultistatus(res.text, { op: 'getRootEtag', path: '', status: res.status, method: 'PROPFIND' });
-      const etag = readProp(responses[0])
-        ?.getElementsByTagNameNS('DAV:', 'getetag')[0]?.textContent?.replace(/"/g, '') ?? null;
-      return etag && etag.length > 0 ? etag : null;
+      if (res.status !== 207) return { etag: null, fileId: null };
+      const responses = readMultistatus(res.text, { op: 'getRootInfo', path: '', status: res.status, method: 'PROPFIND' });
+      const prop = readProp(responses[0]);
+      if (!prop) return { etag: null, fileId: null };
+
+      const etagRaw = prop.getElementsByTagNameNS('DAV:', 'getetag')[0]?.textContent?.replace(/"/g, '') ?? null;
+      const etag = etagRaw && etagRaw.length > 0 ? etagRaw : null;
+      const rootFileId = readOwncloudProps(prop).fileId?.trim() || null;
+      return { etag, fileId: rootFileId };
     } catch {
-      return null;
+      return { etag: null, fileId: null };
     }
+  }
+
+  async getRootEtag(): Promise<string | null> {
+    return (await this.getRootInfo()).etag;
   }
 
   async getDirectories(path: string): Promise<RemoteDirInfo[]> {
@@ -535,7 +545,18 @@ export class NextcloudClient implements IWebDAVClient {
         'Content-Type': 'application/xml; charset=utf-8',
         ...NO_CACHE_HEADERS,
       },
-      body: `<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:getlastmodified/><d:getcontentlength/></d:prop></d:propfind>`,
+      body: `<?xml version="1.0"?>
+<d:propfind xmlns:d="DAV:" xmlns:nc="http://nextcloud.org/ns">
+  <d:prop>
+    <d:getlastmodified/>
+    <d:getcontentlength/>
+    <d:getcontenttype/>
+    <d:getetag/>
+    <nc:version-label/>
+    <nc:version-author/>
+    <nc:has-preview/>
+  </d:prop>
+</d:propfind>`,
       throw: false,
     });
     if (res.status === 404) return [];
@@ -589,7 +610,19 @@ export class NextcloudClient implements IWebDAVClient {
       const lastModifiedStr = prop?.getElementsByTagNameNS('DAV:', 'getlastmodified')[0]?.textContent ?? '';
       const lastModified = lastModifiedStr ? new Date(lastModifiedStr).getTime() : 0;
       const size = parseInt(prop?.getElementsByTagNameNS('DAV:', 'getcontentlength')[0]?.textContent ?? '0', 10);
-      versions.push({ versionId, href, lastModified, size });
+      const mimeType = prop?.getElementsByTagNameNS('DAV:', 'getcontenttype')[0]?.textContent?.trim() ?? '';
+      const etag = prop?.getElementsByTagNameNS('DAV:', 'getetag')[0]?.textContent?.trim() ?? '';
+      const label = prop?.getElementsByTagNameNS('http://nextcloud.org/ns', 'version-label')[0]?.textContent?.trim() ?? '';
+      const authorText = prop?.getElementsByTagNameNS('http://nextcloud.org/ns', 'version-author')[0]?.textContent?.trim() ?? '';
+      const previewText = prop?.getElementsByTagNameNS('http://nextcloud.org/ns', 'has-preview')[0]?.textContent?.trim().toLowerCase() ?? '';
+      versions.push({
+        versionId, href, lastModified, size,
+        label,
+        author: authorText || null,
+        mimeType,
+        etag,
+        hasPreview: previewText === 'true' || previewText === '1',
+      });
     }
     // Newest first (descending by lastModified).
     versions.sort((a, b) => b.lastModified - a.lastModified);

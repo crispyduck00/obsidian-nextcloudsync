@@ -133,14 +133,25 @@ export function resetDebugIdentityFields(
   return hadCustom;
 }
 
-// Mobile first-run defaults; the caller decides whether the device is mobile. A key is touched only
-// when absent from the saved data, so user-set values are preserved.
-//  - syncOnWifiOnly = true: cellular-cost-safe (inert on iOS, which lacks the API; Android honours it).
-//  - maxFileSizeMB = 20: OOM-safe, the WebView holds the whole file in memory.
-//  - watchOnChangeEnabled = false: opt-in; watch mode runs only in the foreground and costs battery/data.
-//  - syncIntervalMinutes = 0: the OS suspends background timers (see applyAutoSyncInterval), so the
-//    disabled slider reads honestly instead of showing an inert 15.
-// Run before pruneObsoleteSettings so the values are persisted.
+/**
+ * Mobile-only first-run defaults. `loadSettings()` calls this only when `Platform.isMobile`, and it
+ * touches a key only when that key is absent from the saved data.json — so an existing/user-set value
+ * is preserved (first-run only, forward-compatible). Pure and platform-agnostic (the caller decides
+ * whether the device is mobile), which keeps it unit-testable without a `Platform` mock. Mobile
+ * diverges from `DEFAULT_SETTINGS` (desktop values) on the keys the mobile platform makes unsafe or
+ * inert:
+ *   - `syncOnWifiOnly`      = `true`  — cellular-cost-safe default (iOS lacks the API, so effectively
+ *                                        inert there, but Android honours it).
+ *   - `maxFileSizeMB`       = `20`    — OOM-safe cap; the mobile WebView holds the whole file in memory.
+ *   - `watchOnChangeEnabled`= `false` — Android foreground watch is opt-in; mobile starts
+ *                                        conservatively even though the toggle is now available.
+ *   - `syncIntervalMinutes` = `0`     — the mobile OS suspends background timers, so periodic sync never
+ *                                        fires (see the `!Platform.isMobile` guard in
+ *                                        `applyAutoSyncInterval`); defaulting to 0 (= manual only) makes
+ *                                        the disabled "Sync interval" slider read honestly instead of
+ *                                        showing an inert 15.
+ * Mutates `settings` in place. Run before {@link pruneObsoleteSettings} so the values are persisted.
+ */
 export function applyMobileFirstRunDefaults(
   saved: {
     syncOnWifiOnly?: unknown;
@@ -156,7 +167,56 @@ export function applyMobileFirstRunDefaults(
   if (saved.syncIntervalMinutes === undefined) settings.syncIntervalMinutes = 0;
 }
 
-// Drops persisted keys that are no longer in DEFAULT_SETTINGS and returns the removed keys.
+/**
+ * One-time safety migration for the release that first makes Android watch mode runnable.
+ *
+ * Before this feature, mobile runtime always ignored watchOnChangeEnabled even if data.json carried
+ * true (for example after copying a desktop profile). Letting that latent value suddenly become live
+ * would enable a high-frequency automatic sync without an Android user opting in. On the first
+ * Android load after this feature lands, force the setting off once and record the boundary.
+ *
+ * Later loads preserve the user's choice, including true. Desktop never calls this migration, so its
+ * established default/setting remains untouched.
+ *
+ * Returns true when settings changed and should be persisted.
+ */
+export function migrateAndroidWatchOptIn(
+  saved: { mobileWatchMigrationVersion?: unknown },
+  settings: DavSyncSettings,
+): boolean {
+  if (saved.mobileWatchMigrationVersion === 1) return false;
+  settings.watchOnChangeEnabled = false;
+  settings.mobileWatchMigrationVersion = 1;
+  return true;
+}
+
+/**
+ * Runtime watch-mode gate.
+ *
+ * Desktop keeps the original behaviour. Android may opt into foreground watch; iOS remains disabled
+ * until the same lifecycle behaviour is validated there. {@link applyMobileFirstRunDefaults} still
+ * defaults the persisted setting to false on every mobile first run, so enabling Android watch is an
+ * explicit choice rather than a changed default.
+ *
+ * Pure and platform-agnostic: callers pass the platform facts, which keeps the policy unit-testable
+ * without an Obsidian runtime.
+ */
+export function isWatchModeActive(
+  watchOnChangeEnabled: boolean,
+  isMobile: boolean,
+  isIosApp = false,
+): boolean {
+  if (!watchOnChangeEnabled) return false;
+  if (!isMobile) return true;
+  return !isIosApp; // Android foreground watch; iOS stays off for now.
+}
+
+/**
+ * Delete persisted settings keys that are no longer part of the schema (e.g. `debugMode`,
+ * and the `logLevel` / `syncResultsEnabled` / `syncResultsFolder` fields left behind by an
+ * earlier 0.3.0-beta implementation). Mutates `settings` in place and returns the removed keys.
+ * The legacy `debugMode` key and the settings removed by upstream change are simply dropped here.
+ */
 export function pruneObsoleteSettings(settings: Record<string, unknown>): string[] {
   const allowed = new Set<string>(Object.keys(DEFAULT_SETTINGS));
   const removed: string[] = [];
