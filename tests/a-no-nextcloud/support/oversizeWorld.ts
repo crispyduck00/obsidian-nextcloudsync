@@ -124,7 +124,10 @@ export async function buildOversizeWorld(input: OversizeWorldInput) {
     getDirectories: jest.fn(async () => []),
     getSyncToken: jest.fn(async (): Promise<string | null> => null),
     remoteExists: jest.fn(async (p: string) => remote.has(p)),
-    statFile: jest.fn(async () => null),
+    statFile: jest.fn(async (path: string): Promise<RemoteFileInfo | null> => {
+      const file = remote.get(path);
+      return file ? remoteInfo(path, file) : null;
+    }),
     uploadFile: jest.fn(async (p: string, data: ArrayBuffer) => {
       remote.set(p, { body: dec.decode(data), mtime: UPLOADED_MTIME });
     }),
