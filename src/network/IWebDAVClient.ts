@@ -88,7 +88,7 @@ export interface IWebDAVClient {
 
   /**
    * Uploads in chunks; the file appears atomically at the final path.
-   * @param opts `ifMatchEtag` is applied to the assembling MOVE, so a changed remote yields 412 (PreconditionFailedError) as in {@link uploadFile}.
+   * @param opts An `ifMatchEtag` uses a single conditional PUT so it is evaluated on the actual file.
    */
   uploadChunked(
     remotePath: string, data: ArrayBuffer, chunkSizeBytes: number,

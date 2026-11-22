@@ -5,8 +5,7 @@ import { IWebDAVClient } from '../../../src/network/IWebDAVClient';
 import { NextcloudClient } from '../../../src/network/NextcloudClient';
 import { DEFAULT_SETTINGS, DavSyncSettings, PreconditionFailedError } from '../../../src/types';
 
-// The chunked-upload main path must carry the ifMatchEtag opts like the single PUT,
-// so a large file is not overwritten when the remote changed concurrently.
+// Existing files use PUT's precondition on the files DAV resource, even above the chunk threshold.
 
 interface FakeClient {
   uploadFile: jest.Mock;
@@ -27,21 +26,20 @@ function uploadConfig(over: { maxFileSizeMB?: number; uploadChunkThresholdMB?: n
 
 const data = new ArrayBuffer(10);
 
-describe('[SPEC:G5-1]: ChunkedUploadStrategy forwards ifMatchEtag to uploadChunked (large-file path)', () => {
-  it('passes opts (including ifMatchEtag) through on the main chunked-upload call', async () => {
+describe('[SPEC:G5-1]: ChunkedUploadStrategy uses a conditional PUT for updates', () => {
+  it('forwards the live ETag to PUT for a large existing file', async () => {
     const client = fakeClient();
     const s = new ChunkedUploadStrategy(uploadConfig({ maxFileSizeMB: 100 }));
     const outcome = await s.upload(
       client as unknown as IWebDAVClient, 'big.bin', data, 1000, { ifMatchEtag: 'remote-etag' },
     );
     expect(outcome).toBe('uploaded');
-    expect(client.uploadChunked).toHaveBeenCalledTimes(1);
-    const [, , , forwardedOpts] = client.uploadChunked.mock.calls[0];
-    expect(forwardedOpts).toEqual({ ifMatchEtag: 'remote-etag', mtime: 1000 });
+    expect(client.uploadChunked).not.toHaveBeenCalled();
+    expect(client.uploadFile).toHaveBeenCalledWith('big.bin', data, 1000, { ifMatchEtag: 'remote-etag' });
   });
 });
 
-describe('[SPEC:G5-1]: NextcloudClient.uploadChunked — assembling MOVE checks the destination ETag', () => {
+describe('[SPEC:G5-1]: NextcloudClient.uploadChunked', () => {
   const mockRequestUrl = requestUrl as unknown as jest.Mock;
 
   const settings: DavSyncSettings = {
@@ -58,24 +56,24 @@ describe('[SPEC:G5-1]: NextcloudClient.uploadChunked — assembling MOVE checks 
 
   beforeEach(() => mockRequestUrl.mockReset());
 
-  it('sends a tagged DAV condition on the assembling MOVE and maps 412 to PreconditionFailedError', async () => {
-    mockRequestUrl.mockImplementation((req) => {
-      if (req.method === 'MOVE') return res(412);
-      return res(201); // MKCOL, chunk PUT, and the abort-cleanup DELETE all succeed
-    });
+  it('uses conditional PUT and maps a changed file to PreconditionFailedError', async () => {
+    mockRequestUrl.mockImplementation(() => res(412));
     await expect(
       new NextcloudClient(settings, () => 'pw', 'Vault').uploadChunked('Notes/big.bin', new ArrayBuffer(2), 10 * 1024 * 1024, { ifMatchEtag: 'etag-xyz' }),
     ).rejects.toBeInstanceOf(PreconditionFailedError);
-    const move = calls('MOVE')[0];
-    expect(move.headers?.If).toBe(`<${move.headers?.Destination}> (["etag-xyz"])`);
+    expect(calls('MOVE')).toHaveLength(0);
+    expect(calls('PUT')[0].headers?.['If-Match']).toBe('"etag-xyz"');
   });
 
-  it('does not send If-Match when ifMatchEtag is absent (unchanged behavior)', async () => {
+  it('uses a non-overwriting MOVE for a new file', async () => {
     // Everything succeeds (201); the final PROPFIND checksum-verify step gets a non-207 status
     // (also 201 here) so it short-circuits without a mismatch — see verifyRemoteChecksum().
     mockRequestUrl.mockImplementation(() => res(201));
-    await new NextcloudClient(settings, () => 'pw', 'Vault').uploadChunked('Notes/big.bin', new ArrayBuffer(2), 10 * 1024 * 1024);
+    await new NextcloudClient(settings, () => 'pw', 'Vault').uploadChunked(
+      'Notes/big.bin', new ArrayBuffer(2), 10 * 1024 * 1024, { onlyIfAbsent: true },
+    );
     const move = calls('MOVE')[0];
     expect(move.headers?.['If-Match']).toBeUndefined();
+    expect(move.headers?.Overwrite).toBe('F');
   });
 });

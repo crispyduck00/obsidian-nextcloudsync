@@ -1095,6 +1095,18 @@ export class SyncEngine {
     remoteId: string, idType: FileState['idType'], summary: SyncSessionSummary,
   ): Promise<void> {
     try {
+      if (!remote.etag && this.client!.inspectDirectory) {
+        // Listings reconstructed from State hold the checksum but may omit the ETag.
+        // Obtain a live revision before overwriting an existing file.
+        const current = await this.client!.statFile(remote.path);
+        if (!current?.etag) throw new Error('Nextcloud did not confirm the current file revision. Local changes were kept.');
+        const identity = remoteIdOf(current);
+        if (identity.remoteId !== remoteId || (remote.fileId && current.fileId !== remote.fileId)) {
+          await this.handleConflict(remote.path, base, current, identity.remoteId, identity.idType, summary);
+          return;
+        }
+        remote = current;
+      }
       await this.uploadFile(remote.path, localHash, remoteId, idType, remote, summary);
     } catch (err) {
       if (!(err instanceof PreconditionFailedError)) throw err;

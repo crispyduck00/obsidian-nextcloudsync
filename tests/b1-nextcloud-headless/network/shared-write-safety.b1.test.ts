@@ -41,10 +41,11 @@ describeLive('Shared Nextcloud mutations', getEnv => {
     expect(decodeBuf(await owner.downloadFile('new.md'))).toBe('first device');
   });
 
-  it('checks the destination ETag during chunk assembly', async () => {
+  it('uses conditional PUT for an existing file even when requested through the chunk uploader', async () => {
     await owner.uploadFile('chunk.md', textBuf('old'));
     const original = (await owner.statFile('chunk.md'))!;
     await peer.uploadFile('chunk.md', textBuf('other device'));
+    expect((await owner.statFile('chunk.md'))?.etag).not.toBe(original.etag);
     await expect(owner.uploadChunked('chunk.md', textBuf('do not overwrite'), 4, { ifMatchEtag: original.etag }))
       .rejects.toBeInstanceOf(PreconditionFailedError);
     expect(decodeBuf(await peer.downloadFile('chunk.md'))).toBe('other device');

@@ -189,7 +189,7 @@ export const CLAUSES: Clause[] = [
   { id: 'G1-2', source: 'specs/main/spec.md §18.1 (StateDB tracking is cleared only on a successful remote delete; a real failure keeps the entry so the deletion retries)', layer: 'a' },
   { id: 'G4-1', source: 'specs/main/spec.md §18.1 (atomicWrite keeps the tmp copy when rename fails after the target was removed — never loses the sole surviving copy)', layer: 'a' },
   { id: 'G4-2', source: 'specs/main/spec.md §18.1 (store load() recovers from a surviving tmp when a crash landed between remove and rename)', layer: 'a' },
-  { id: 'G5-1', source: 'specs/main/spec.md §18.1 (chunked upload carries the If-Match precondition like single PUT — large files are not exempt from optimistic concurrency)', layer: 'a' },
+  { id: 'G5-1', source: 'specs/main/spec.md §18.1 (large existing files use conditional PUT and chunked creation cannot overwrite a destination)', layer: 'a' },
   { id: 'G6-1', source: 'specs/main/spec.md §18.1 (force-resolve / bulk-resolve are guarded by an instance field that survives re-render, preventing double execution)', layer: 'a' },
   { id: 'G6-2', source: 'specs/main/spec.md §18.1 (version Restore is guarded by a modal-level in-flight gate)', layer: 'a' },
   { id: 'G3-1', source: 'specs/main/spec.md §18.1 (empty-base merge never silently fuses two divergent sides at the character level; line-preserving unions stay clean)', layer: 'a' },

@@ -221,6 +221,19 @@ const trackDir = (stateDB: StateDB, path: string): void =>
   stateDB.setDir({ path, remoteFileId: `dir-${path}` });
 
 describe('Missing shared folders and concurrent directory changes', () => {
+  it('refreshes the file revision before uploading an edit against a cached listing', async () => {
+    const cached = await listed('note.md', 'old');
+    const current = { ...cached, etag: 'live-etag' };
+    const h = await buildEngine({ 'note.md': 'edit on the device' }, [], world({ listing: [cached], stat: () => current }));
+    Object.assign(h.client, { inspectDirectory: async () => null });
+    await track(h.stateDB, cached.path, 'old');
+
+    await h.sync();
+    expect(h.client.statFile).toHaveBeenCalledWith(cached.path);
+    expect(h.client.uploadFile).toHaveBeenCalledWith(cached.path, expect.anything(), expect.any(Number),
+      expect.objectContaining({ ifMatchEtag: 'live-etag' }));
+  });
+
   it('keeps edited, new and excluded files in an invisible folder, then downloads the latest visible copy', async () => {
     const vault = { 'Shared/edit.md': 'local!', 'Shared/draft.md': 'draft', 'Shared/clean.md': 'old', 'Shared/.local': 'kept' };
     const remote = world();

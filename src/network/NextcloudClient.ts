@@ -603,10 +603,6 @@ export class NextcloudClient implements IWebDAVClient {
     return `${this.davBase('versions')}/versions/${encodeURIComponent(fileId)}/${encodeURIComponent(version.versionId)}`;
   }
 
-  private fileEtagCondition(url: string, etag: string): string {
-    return `<${url}> (["${etag.replace(/^"|"$/g, '')}"])`;
-  }
-
   private parseVersions(xml: string, fileId: string): FileVersion[] {
     const versions: FileVersion[] = [];
     const parser = new DOMParser();
@@ -639,6 +635,8 @@ export class NextcloudClient implements IWebDAVClient {
   ): Promise<void> {
     const uploadId = `obsidian-${this.settings.deviceId.slice(-8)}-${Date.now()}`;
     const sessionUrl = `${this.davBase('uploads')}/${uploadId}`;
+    // Nextcloud's chunk assembler can complete a MOVE despite a stale destination ETag.
+    if (opts?.ifMatchEtag) return this.uploadFile(remotePath, data, opts.mtime, opts);
     const finalUrl = this.remoteUrl(remotePath);
     const total = data.byteLength;
 
@@ -676,8 +674,6 @@ export class NextcloudClient implements IWebDAVClient {
         'OC-Checksum': `SHA256:${sum}`,
         ...NO_CACHE_HEADERS,
       };
-      // The MOVE source is the upload session. A tagged DAV condition checks the destination.
-      if (opts?.ifMatchEtag) moveHeaders.If = this.fileEtagCondition(finalUrl, opts.ifMatchEtag);
       if (opts?.onlyIfAbsent) moveHeaders.Overwrite = 'F';
       // Same rules as uploadFile: the MOVE carries the times, and whatever the server does not acknowledge is set afterwards.
       const sentMtime = opts?.mtime ? Math.floor(opts.mtime / 1000) : null;
