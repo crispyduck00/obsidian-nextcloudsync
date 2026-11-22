@@ -423,6 +423,8 @@ export type LoginFlowResult =
 export interface FileVersion {
   /** Trailing identifier of versions/{fileId}/{versionId}. */
   versionId: string;
+  /** File identity the version chooser was opened for. */
+  sourceFileId?: string;
   /** Remote path used for GET/MOVE (the versions namespace, separate from the files root). */
   href: string;
   /** Last modified (epoch milliseconds). */

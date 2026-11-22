@@ -61,4 +61,18 @@ describeLive('Layer A — versions (VR)', (getEnv) => {
     const restored = decodeBuf(await client.downloadFile('vr.md'));
     expect(restored.length).toBeGreaterThan(0);
   });
+
+  it('checks the live vault URL when restoring a version by account file ID', async () => {
+    await client.uploadFile('version ü.md', textBuf('older'), 1_700_000_000_000);
+    await client.uploadFile('version ü.md', textBuf('newer'), 1_700_000_003_000);
+    const current = (await client.statFile('version ü.md'))!;
+    const revisions = await client.listVersions(current.fileId!);
+    const prior = revisions.find(version => version.lastModified < current.lastModified)!;
+    expect(prior).toBeDefined();
+    await expect(client.restoreVersion(prior, current.fileId!, { path: current.path, etag: 'obsolete' }))
+      .rejects.toMatchObject({ status: 412 });
+    expect(decodeBuf(await client.downloadFile(current.path))).toBe('newer');
+    await client.restoreVersion(prior, current.fileId!, { path: current.path, etag: current.etag! });
+    expect(decodeBuf(await client.downloadFile(current.path))).toBe('older');
+  });
 });

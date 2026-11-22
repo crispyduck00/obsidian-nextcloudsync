@@ -260,7 +260,7 @@ export class NextcloudClient implements IWebDAVClient {
     if (res.status === 404) return null; // no such file (or its parent folder does not exist)
     if (res.status !== 207) throw new NetworkError(res.status, res.text, 'PROPFIND');
     const entries = await this.parsePropfindResponse(res.text, { op: 'statFile', path: remotePath, status: res.status, method: 'PROPFIND' });
-    return entries[0] ?? null;
+    return entries.find(file => file.path === remotePath) ?? null;
   }
 
   async getRootEtag(): Promise<string | null> {
@@ -560,13 +560,16 @@ export class NextcloudClient implements IWebDAVClient {
     return res.arrayBuffer;
   }
 
-  async restoreVersion(version: FileVersion, fileId: string): Promise<void> {
+  async restoreVersion(version: FileVersion, fileId: string, target?: { path: string; etag: string }): Promise<void> {
     if (!fileId) throw new FeatureUnsupportedError('versions');
     const destination = `${this.davBase('versions')}/restore/target`;
+    // The request URL is in the account's versions tree. A tagged DAV condition checks the
+    // live file at its vault-relative URL, since If-Match would check the historical version.
+    const condition: Record<string, string> = target ? { If: this.fileEtagCondition(this.remoteUrl(target.path), target.etag) } : {};
     const res = await this.req({
       url: this.versionUrl(version, fileId),
       method: 'MOVE',
-      headers: { Authorization: this.authHeader, Destination: destination, ...NO_CACHE_HEADERS },
+      headers: { Authorization: this.authHeader, Destination: destination, ...condition, ...NO_CACHE_HEADERS },
       throw: false,
     });
     if (res.status < 200 || res.status >= 300) throw new NetworkError(res.status, res.text, 'MOVE');
@@ -574,6 +577,10 @@ export class NextcloudClient implements IWebDAVClient {
 
   private versionUrl(version: FileVersion, fileId: string): string {
     return `${this.davBase('versions')}/versions/${encodeURIComponent(fileId)}/${encodeURIComponent(version.versionId)}`;
+  }
+
+  private fileEtagCondition(url: string, etag: string): string {
+    return `<${url}> (["${etag.replace(/^"|"$/g, '')}"])`;
   }
 
   private parseVersions(xml: string, fileId: string): FileVersion[] {

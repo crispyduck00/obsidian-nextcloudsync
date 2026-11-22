@@ -291,6 +291,7 @@ describe('VersionService', () => {
       listVersions: async (fid: string) => { calls.listed.push(fid); return [version]; },
       restoreVersion: async (_v: FileVersion, fid: string) => { calls.restored.push(fid); },
       downloadFile: async () => new TextEncoder().encode('restored body').buffer,
+      statFile: async (path: string) => ({ path, fileId: tracked?.remoteFileId, etag: 'live' }),
     } as unknown as IWebDAVClient;
     const service = new VersionService({
       localAdapter: {
@@ -299,6 +300,7 @@ describe('VersionService', () => {
       } as never,
       stateDB: {
         getFile: () => tracked,
+        setRemoteRootEtag: () => undefined,
         setFile: (f: FileState) => { calls.setFile = f; },
         save: async () => { calls.saves++; },
       } as never,
@@ -313,7 +315,7 @@ describe('VersionService', () => {
 
   it('lists versions by the file id the state DB recorded', async () => {
     const { service, client, calls } = build(tracked('fid-7'));
-    expect(await service.listVersions(client, NEXTCLOUD, 'note.md')).toEqual([version]);
+    expect(await service.listVersions(client, NEXTCLOUD, 'note.md')).toEqual([{ ...version, sourceFileId: 'fid-7' }]);
     expect(calls.listed).toEqual(['fid-7']);
   });
 
@@ -360,5 +362,15 @@ describe('VersionService', () => {
     const untracked = build(undefined);
     await expect(untracked.service.restoreVersion(untracked.client, NEXTCLOUD, 'note.md', version)).rejects.toThrow(FeatureUnsupportedError);
     expect(untracked.calls.restored).toEqual([]); // nothing touched the server
+  });
+
+  it('refuses stale file IDs before touching the account version store', async () => {
+    const { service, client, calls } = build(tracked('replacement'));
+    await expect(service.restoreVersion(client, NEXTCLOUD, 'note.md', { ...version, sourceFileId: 'original' }))
+      .rejects.toThrow('reopen version history');
+    await expect(service.listVersions({ ...client, statFile: async () => null }, NEXTCLOUD, 'note.md'))
+      .rejects.toThrow('reopen version history');
+    expect(calls.restored).toEqual([]);
+    expect(calls.listed).toEqual([]);
   });
 });
