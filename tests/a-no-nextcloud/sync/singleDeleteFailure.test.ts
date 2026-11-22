@@ -23,7 +23,7 @@ function makeFileEngine(base: FileState) {
     requestSave: jest.fn(),
   };
   const engine = new SyncEngine({
-    app: {}, settings: {}, localAdapter: {}, stateDB, statusBar: { setStatus: jest.fn() },
+    app: {}, settings: {}, localAdapter: { stat: async () => null }, stateDB, statusBar: { setStatus: jest.fn() },
     webdavFactory: { createClient: jest.fn(async () => ({ client: { deleteFile, statFile }, features: {} })) },
     pluginDir: '', configDir: '.obsidian',
   } as never);
@@ -39,8 +39,8 @@ function makeFolderEngine(dir: DirState) {
     requestSave: jest.fn(),
   };
   const engine = new SyncEngine({
-    app: {}, settings: {}, localAdapter: {}, stateDB, statusBar: { setStatus: jest.fn() },
-    webdavFactory: { createClient: jest.fn(async () => ({ client: { deleteCollection }, features: {} })) },
+    app: {}, settings: {}, localAdapter: { stat: async () => null }, stateDB, statusBar: { setStatus: jest.fn() },
+    webdavFactory: { createClient: jest.fn(async () => ({ client: { deleteCollection, isRemoteDirEmpty: async () => true }, features: {} })) },
     pluginDir: '', configDir: '.obsidian',
   } as never);
   return { engine, dirs, stateDB, deleteCollection };
@@ -73,7 +73,7 @@ describe('[SPEC:G1-2] SyncEngine.deleteSingleFile — remote delete failure must
       requestSave: jest.fn(),
     };
     const engine = new SyncEngine({
-      app: {}, settings: {}, localAdapter: {}, stateDB, statusBar: { setStatus: jest.fn() },
+      app: {}, settings: {}, localAdapter: { stat: async () => null }, stateDB, statusBar: { setStatus: jest.fn() },
       webdavFactory: { createClient: jest.fn(async () => ({ client: { deleteFile, statFile }, features: {} })) },
       pluginDir: '', configDir: '.obsidian',
     } as never);
@@ -104,8 +104,8 @@ describe('[SPEC:G1-2] SyncEngine.deleteSingleFolder — remote delete failure mu
       requestSave: jest.fn(),
     };
     const engine = new SyncEngine({
-      app: {}, settings: {}, localAdapter: {}, stateDB, statusBar: { setStatus: jest.fn() },
-      webdavFactory: { createClient: jest.fn(async () => ({ client: { deleteCollection }, features: {} })) },
+      app: {}, settings: {}, localAdapter: { stat: async () => null }, stateDB, statusBar: { setStatus: jest.fn() },
+      webdavFactory: { createClient: jest.fn(async () => ({ client: { deleteCollection, isRemoteDirEmpty: async () => true }, features: {} })) },
       pluginDir: '', configDir: '.obsidian',
     } as never);
 

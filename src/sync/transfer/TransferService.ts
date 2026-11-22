@@ -53,7 +53,7 @@ export class TransferService {
     client: IWebDAVClient, uploadStrategy: IUploadStrategy,
     path: string, localHash: string, remoteId: string,
     idType: FileState['idType'], remote: RemoteFileInfo,
-    summary: SyncSessionSummary,
+    summary: SyncSessionSummary, onlyIfAbsent = false,
   ): Promise<void> {
     const stat = await this.deps.localAdapter.stat(path);
     if (!stat) return;
@@ -75,9 +75,10 @@ export class TransferService {
     let outcome: 'uploaded' | 'skipped';
     try {
       // If-Match with the known remote etag makes a remote changed since our baseline return 412
-      // (PreconditionFailedError, a conflict). New local files carry a null etag, so no precondition.
+      // (PreconditionFailedError, a conflict). A new path must still be absent to create it.
       outcome = await uploadStrategy.upload(client, path, data, stat.mtime, {
         ifMatchEtag: remote.etag,
+        ...(onlyIfAbsent ? { onlyIfAbsent } : {}),
         ctime: uploadCreationTimeMs(stat.ctime, remote.creationTime),
       });
     } finally {

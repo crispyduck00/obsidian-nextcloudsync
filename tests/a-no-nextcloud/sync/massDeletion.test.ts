@@ -96,7 +96,7 @@ describe('[SPEC:MDV-2] SyncEngine file mass-delete breaker — skippedPaths diag
     const app = { vault: { adapter, getFiles: () => [] }, fileManager: {} };
     const stateDB = {
       getFile: (p: string) => store.get(p),
-      getAllFiles: () => [...store.values()],
+      getAllFiles: () => [...store.values()], getAllDirs: () => [],
       deleteFile: jest.fn(),
       getLastSyncTime: () => 0,
     };

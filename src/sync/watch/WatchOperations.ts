@@ -29,6 +29,7 @@ import { isLocallyUnchanged } from '../policy';
 import { FileLogger } from '../../util/FileLogger';
 import { sha256 } from '../../util/hash';
 import { AsyncMutex } from '../../util/AsyncMutex';
+import { assertTrackedParentReadable, type RemoteFolderGuard } from '../directory/RemoteFolderGuard';
 
 // Operation names used in the "skipped on cellular" log line.
 type WatchOpName = 'sync' | 'delete' | 'rename' | 'folder-create' | 'folder-delete' | 'folder-rename';
@@ -47,6 +48,7 @@ export interface WatchDeps {
   mergeBase: MergeBaseRecorder;
   transfer: TransferService;
   deletion: DeletionService;
+  remoteFolders?: RemoteFolderGuard;
   resolution: Pick<ResolutionService, 'dropCleanSnapshot'>;
   isSystemExcluded(path: string): boolean;
   // Plugin files sync only in full runs; watch mode never handles them.
@@ -160,14 +162,16 @@ export class WatchOperations {
         void this.deps.logger?.log(`watch: remote state fetched → classifying ${path}`);
         await this.deps.processFile(remote, summary);
       } else {
+        if (base) throw new Error('The remote file is missing or inaccessible. Local changes were kept.');
+        await assertTrackedParentReadable(conn.client, this.deps.stateDB, path);
         // Not on the server at all: a plain create. If-Match against a non-existent resource always fails,
         // so keep the synthetic null etag.
         void this.deps.logger?.log(`watch: not on remote → upload as new ${path}`);
         await this.deps.transfer.uploadFile(
           conn.client, conn.uploadStrategy,
-          path, localHash, base?.remoteId ?? localHash, base?.idType ?? 'sha256',
-          { path, fileId: base?.remoteFileId ?? null, checksum: null, etag: null, size: stat.size, lastModified: stat.mtime, creationTime: 0 },
-          summary,
+          path, localHash, localHash, 'sha256',
+          { path, fileId: null, checksum: null, etag: null, size: stat.size, lastModified: stat.mtime, creationTime: 0 },
+          summary, true,
         );
       }
       // Coalesced via a trailing debounce so rapid edits do not each rewrite the state file; onunload flushes it.
@@ -255,9 +259,10 @@ export class WatchOperations {
     const conn = await this.deps.connect();
     this.begin();
     try {
-      await conn.client.createDirectory(path);
-      this.deps.stateDB.setDir({ path, remoteFileId: null });
-      this.deps.stateDB.requestSave();
+      await assertTrackedParentReadable(conn.client, this.deps.stateDB, path, true);
+      await conn.client.createDirectory(path); // idempotent: existing folder → harmless
+      if (!this.deps.stateDB.getDir(path)) this.deps.stateDB.setDir({ path, remoteFileId: null });
+      this.deps.stateDB.requestSave(); // coalesced watch-mode save
       void this.deps.logger?.log(`watch: folder created → MKCOL ${path}`);
     } catch (err) {
       console.warn(`[SyncEngine] Single-folder create failed for ${path}:`, err);
@@ -281,13 +286,24 @@ export class WatchOperations {
     const conn = await this.deps.connect();
     this.begin();
     let succeeded = false;
+    let token: string | null = null;
     try {
-      await conn.client.deleteCollection(path); // 404 is handled inside as success
+      await this.deps.remoteFolders?.assertRemovalAllowed(conn.client, path, true);
+      // A collection DELETE is recursive. Match full-sync safety: lock when available and prove the
+      // live remote directory is empty before deleting it. If another device added anything since
+      // our baseline, keep tracking and let the next full reconciliation decide instead.
+      token = await this.deps.transfer.acquireLock(conn.client, path);
+      if (!(await conn.client.isRemoteDirEmpty(path))) {
+        void this.deps.logger?.log(`watch: remote folder not empty → keeping for full reconciliation ${path}`);
+        return;
+      }
+      await conn.client.deleteCollection(path); // trashbin; 404 handled inside as success
       void this.deps.logger?.log(`watch: folder deleted → remote collection removed ${path}`);
       succeeded = true;
     } catch (err) {
       console.warn(`[SyncEngine] Single-folder delete failed for ${path}:`, err);
     } finally {
+      await this.deps.transfer.releaseLock(conn.client, path, token);
       this.end();
     }
     // Drop the tracked directory only when the remote delete succeeded; otherwise the next sync re-creates it locally.
@@ -305,7 +321,9 @@ export class WatchOperations {
     const conn = await this.deps.connect();
     this.begin();
     try {
-      await conn.client.moveFile(oldPath, newPath);
+      await this.deps.remoteFolders?.assertRemovalAllowed(conn.client, oldPath, true);
+      await assertTrackedParentReadable(conn.client, this.deps.stateDB, newPath);
+      await conn.client.moveFile(oldPath, newPath); // MOVE works for collections too
       this.deps.stateDB.deleteDir(oldPath);
       this.deps.stateDB.setDir({ path: newPath, remoteFileId: null });
       this.deps.stateDB.requestSave();

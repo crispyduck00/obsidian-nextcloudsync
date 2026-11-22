@@ -1,8 +1,7 @@
 // Layer B (MDF-B1): "Mirror from remote" when a local-only file cannot be deleted, against a live Nextcloud, driven
 // through the real SyncEngine over an in-memory vault. Covers: the mirror reports each file it could not delete (not
 // counted as deleted, listed in the errors with its path) and keeps it on disk; the next ordinary sync never uploads
-// such a file and retries the local deletion, also after an app restart; a file edited after the mirror is kept and
-// uploaded as a local edit; and a sync that still cannot delete the file leaves the server untouched. The matrix covers
+// such a file and retries the local deletion, also after an app restart; a file edited after the mirror is kept locally while the remote path is absent; and a sync that still cannot delete the file leaves the server untouched. The matrix covers
 // sync history x failure scope x edit after the mirror x restart. Each test uses its own remote workspace.
 import { describeLive, LiveEnv } from '../support/env';
 import { setupWorkspace } from '../support/workspace';
@@ -35,12 +34,6 @@ for (const history of ['synced', 'never synced'] as const) {
       for (const restart of [false, true]) CASES.push({ history, scope, edited, restart });
     }
   }
-}
-
-function without(fp: Record<string, string>, key: string): Record<string, string> {
-  const copy = { ...fp };
-  delete copy[key];
-  return copy;
 }
 
 describeLive('Layer B (MDF-B1) - a mirror that cannot delete a local-only file, against a live server', (getEnv) => {
@@ -99,7 +92,7 @@ describeLive('Layer B (MDF-B1) - a mirror that cannot delete a local-only file, 
       // 5. The app restarts; the vault (and the trash failure hook) is shared with the new device.
       if (restart) target = await restartDevice(env, ws.remoteBase, target);
 
-      // 6. The cause goes away; the next sync retries the deletion and uploads nothing but a user edit.
+      // 6. The cause goes away; the next sync retries clean deletions and keeps edits while their remote paths are missing.
       restore();
       const before = await remoteFingerprint(target.client);
       await target.sync();
@@ -115,15 +108,18 @@ describeLive('Layer B (MDF-B1) - a mirror that cannot delete a local-only file, 
       } else {
         expect(target.vault.localExists('e0.md')).toBe(true);
         expect(target.vault.readLocal('e0.md')).toBe(EDITED);
-        expect(s.uploadedCount).toBe(1);
-        expect(without(after, 'e0.md')).toEqual(before);
-        expect(Object.keys(after)).toContain('e0.md');
+        expect(s.uploadedCount).toBe(0);
+        expect(after).toEqual(before);
+        expect(s.errors).toContainEqual(expect.objectContaining({ path: 'e0.md' }));
         for (const p of failing.filter((f) => f !== 'e0.md')) expect(target.vault.localExists(p)).toBe(false);
       }
 
-      // 7. The sync after that has nothing left to do.
+      // 7. A held edit stays pending across syncs.
       await target.sync();
-      expectQuiet(target);
+      if (edited) {
+        expect(target.vault.readLocal('e0.md')).toBe(EDITED);
+        expect(await remoteFingerprint(target.client)).toEqual(before);
+      } else expectQuiet(target);
     },
     TEST_TIMEOUT,
   );

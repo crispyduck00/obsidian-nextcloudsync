@@ -20,6 +20,7 @@ function makeEngine(opts: { tracked?: DirState[]; settings?: DavSyncSettings } =
   const client = {
     createDirectory: jest.fn(async () => undefined),
     deleteCollection: jest.fn(async () => undefined),
+    isRemoteDirEmpty: async () => true,
     moveFile: jest.fn(async () => undefined),
   };
   const features = { isNextcloud: true, version: '30', hasChecksums: true, hasFilesLocking: false, hasBulkUpload: false, hasAccountDav: true, syncToken: null };

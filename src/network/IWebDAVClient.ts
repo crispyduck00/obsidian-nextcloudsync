@@ -1,5 +1,10 @@
 import { NextcloudFeatures, RemoteFileInfo, RemoteDirInfo, SyncChanges, FileVersion, VaultRootOutcome } from '../types';
 
+export interface RemoteDirectoryInspection {
+  protected: boolean;
+  fileId: string | null;
+}
+
 export interface IWebDAVClient {
   connect(): Promise<NextcloudFeatures>;
   /**
@@ -24,6 +29,8 @@ export interface IWebDAVClient {
   getRootEtag(): Promise<string | null>;
   /** Lists the directories (collections) beneath `path`, recursively; the base folder itself is excluded. Same unreadable-body contract as {@link getFiles}. */
   getDirectories(path: string): Promise<RemoteDirInfo[]>;
+  /** Account DAV can inspect a collection, including mount and app protection. */
+  inspectDirectory?(path: string, includeDescendants?: boolean): Promise<RemoteDirectoryInspection | null>;
   /**
    * True iff the collection at `path` has no children (one Depth:1 probe). Data-loss guard before
    * {@link deleteCollection}. An unreadable body resolves to false.
@@ -55,10 +62,10 @@ export interface IWebDAVClient {
    */
   uploadFile(
     remotePath: string, data: ArrayBuffer, mtime?: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; ctime?: number },
+    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; onlyIfAbsent?: boolean; ctime?: number },
   ): Promise<void>;
   moveFile(oldPath: string, newPath: string): Promise<void>;
-  deleteFile(path: string, expectedRemoteId: string): Promise<void>;
+  deleteFile(path: string, expectedRemoteId: string, ifMatchEtag?: string): Promise<void>;
   getSyncToken(): Promise<string | null>;
   /**
    * Existence check for one remote path (PROPFIND Depth 0). False only on a definitive 404;
@@ -85,7 +92,7 @@ export interface IWebDAVClient {
    */
   uploadChunked(
     remotePath: string, data: ArrayBuffer, chunkSizeBytes: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; mtime?: number; ctime?: number },
+    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; onlyIfAbsent?: boolean; mtime?: number; ctime?: number },
   ): Promise<void>;
 
   /**

@@ -53,6 +53,7 @@ function makeLocalAdapter(files: Record<string, string>) {
     readBinary: jest.fn(async (p: string) => toBuf(files[p] ?? '')),
     atomicWrite: jest.fn(async (p: string, d: string) => { files[p] = d; }),
     atomicWriteBinary: jest.fn(async (p: string, d: ArrayBuffer) => { files[p] = dec.decode(d); }),
+    ignore: jest.fn(),
     writeBinary: jest.fn(async (p: string, d: ArrayBuffer) => { files[p] = dec.decode(d); }),
     remove: jest.fn(async (p: string) => { delete files[p]; }),
   };
@@ -299,24 +300,22 @@ describe('[SPEC:EAD-4] the breaker still refuses a vault-sized batch, and local 
     expect(h.logs.join('\n')).toContain('exceeds safety limit (20)');
   });
 
-  it('leaves a locally edited file out of the candidate set and uploads it instead', async () => {
-    // The edit is the whole point: absence deletion compares real content against the recorded base,
-    // never mtime, so a file whose body has moved on is protected and pushed up rather than trashed —
-    // the resurrection side of a delete/edit race, which the user still has locally.
+  it('keeps a locally edited file without recreating the remote path', async () => {
+    // A local change survives until the remote path is visible again or the user resolves it.
     const world: RemoteWorld = { listing: [], rootEtag: 'etag-empty', exists: true };
     const h = await buildEngine({ '\u30e1\u30e2.md': 'edited body, longer than the base' }, world);
     await track(h.stateDB, '\u30e1\u30e2.md', 'base body'); // recorded hash/size ≠ what is on disk now
 
     const summary = await h.sync();
 
-    expect(h.client.uploadFile).toHaveBeenCalledTimes(1);
-    expect(h.client.uploadFile).toHaveBeenCalledWith('\u30e1\u30e2.md', expect.anything(), BASE_MTIME, expect.anything());
-    expect(summary.uploadedCount).toBe(1);
+    expect(h.client.uploadFile).not.toHaveBeenCalled();
+    expect(summary.uploadedCount).toBe(0);
+    expect(summary.errors).toContainEqual(expect.objectContaining({ path: '\u30e1\u30e2.md', message: expect.stringContaining('local changes were kept') }));
 
-    // Nothing was trashed, and the file is still tracked — now against the body that was uploaded.
+    // The unchanged baseline is needed when the remote path becomes visible again.
     expect(h.trashed).toEqual([]);
     expect(h.vault['\u30e1\u30e2.md']).toBe('edited body, longer than the base');
-    expect(h.stateDB.getFile('\u30e1\u30e2.md')!.localHash).toBe(await sha256(toBuf('edited body, longer than the base')));
-    expect(summary.errorCount).toBe(0);
+    expect(h.stateDB.getFile('\u30e1\u30e2.md')!.localHash).toBe(await sha256(toBuf('base body')));
+    expect(summary.errorCount).toBe(1);
   });
 });

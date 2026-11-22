@@ -672,7 +672,7 @@ export const CLAUSES: Clause[] = [
   { id: 'GDP-8', source: 'specs/086-guarded-delete-propagation/spec.md FR-001 (engine level: after a trash, no file state, merge base, snapshot or child dir row is left under the folder)', layer: 'a' },
   { id: 'GDP-9', source: 'specs/086-guarded-delete-propagation/spec.md FR-004 (the listing lied and the server still has the contents: the next sync downloads them back and issues no DELETE)', layer: 'a' },
   { id: 'GDP-10', source: 'specs/086-guarded-delete-propagation/spec.md FR-004 (the server really has nothing: the next sync is a no-op with nothing left tracked)', layer: 'a' },
-  { id: 'GDP-11', source: 'specs/086-guarded-delete-propagation/spec.md FR-002 (processRemoteDeletion drops the subtree too, for every caller — token diff, absence deletion, Mirror)', layer: 'a' },
+  { id: 'GDP-11', source: 'specs/086-guarded-delete-propagation/spec.md FR-002 (file deletion cannot remove a directory or forget its tracked subtree)', layer: 'a' },
   { id: 'GDP-12', source: 'specs/086-guarded-delete-propagation/spec.md FR-003 (engine level: a failed trash keeps every row and records the error)', layer: 'a' },
   { id: 'GDP-13', source: 'specs/086-guarded-delete-propagation/spec.md FR-005 (engine level: the trashed subtree reaches the LocalAdapter ignore list, so watch mode never reads it as a user deletion)', layer: 'a' },
   { id: 'GDP-14', source: 'specs/086-guarded-delete-propagation/spec.md FR-007 (the server is asked before any DELETE decision, exactly once per candidate)', layer: 'a' },

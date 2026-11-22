@@ -164,7 +164,8 @@ export class MirrorService {
         const failedDeletes: Array<{ path: string; message: string; isDir: boolean }> = [];
         const removeLocal = async (path: string, isDir: boolean): Promise<void> => {
           try {
-            const outcome = await this.deps.deletion.processRemoteDeletion(path, summary);
+            if (await client.remoteExists(path)) throw new Error('The remote path is still present or its status is uncertain. Rebuild the mirror plan.');
+            const outcome = await this.deps.deletion.processRemoteDeletion(path, summary, isDir ? 'empty-directory' : 'file');
             if (outcome.status === 'deleted') result.deleted++;
             else if (outcome.status === 'failed') failedDeletes.push({ path, message: outcome.message, isDir });
           } catch (err) {

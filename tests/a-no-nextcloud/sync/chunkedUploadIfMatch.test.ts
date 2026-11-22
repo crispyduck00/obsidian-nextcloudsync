@@ -41,7 +41,7 @@ describe('[SPEC:G5-1]: ChunkedUploadStrategy forwards ifMatchEtag to uploadChunk
   });
 });
 
-describe('[SPEC:G5-1]: NextcloudClient.uploadChunked — assembling MOVE carries If-Match', () => {
+describe('[SPEC:G5-1]: NextcloudClient.uploadChunked — assembling MOVE checks the destination ETag', () => {
   const mockRequestUrl = requestUrl as unknown as jest.Mock;
 
   const settings: DavSyncSettings = {
@@ -58,7 +58,7 @@ describe('[SPEC:G5-1]: NextcloudClient.uploadChunked — assembling MOVE carries
 
   beforeEach(() => mockRequestUrl.mockReset());
 
-  it('sends If-Match on the assembling MOVE and maps 412 to PreconditionFailedError', async () => {
+  it('sends a tagged DAV condition on the assembling MOVE and maps 412 to PreconditionFailedError', async () => {
     mockRequestUrl.mockImplementation((req) => {
       if (req.method === 'MOVE') return res(412);
       return res(201); // MKCOL, chunk PUT, and the abort-cleanup DELETE all succeed
@@ -67,7 +67,7 @@ describe('[SPEC:G5-1]: NextcloudClient.uploadChunked — assembling MOVE carries
       new NextcloudClient(settings, () => 'pw', 'Vault').uploadChunked('Notes/big.bin', new ArrayBuffer(2), 10 * 1024 * 1024, { ifMatchEtag: 'etag-xyz' }),
     ).rejects.toBeInstanceOf(PreconditionFailedError);
     const move = calls('MOVE')[0];
-    expect(move.headers?.['If-Match']).toBe('"etag-xyz"');
+    expect(move.headers?.If).toBe(`<${move.headers?.Destination}> (["etag-xyz"])`);
   });
 
   it('does not send If-Match when ifMatchEtag is absent (unchanged behavior)', async () => {

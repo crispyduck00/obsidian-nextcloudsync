@@ -20,6 +20,7 @@ function build(opts: { blocked: boolean; running?: boolean }): Harness {
   };
 
   const client = {
+    isRemoteDirEmpty: jest.fn(async () => true),
     statFile: jest.fn(async () => null),
     createDirectory: jest.fn(async () => undefined),
     deleteCollection: jest.fn(async () => undefined),
@@ -44,7 +45,7 @@ function build(opts: { blocked: boolean; running?: boolean }): Harness {
   const newSummary = jest.spyOn(journal, 'newSummary');
   const recordError = jest.spyOn(journal, 'recordError');
   const mergeBase = { record: jest.fn(), drop: jest.fn() };
-  const transfer = { uploadFile: jest.fn(async () => undefined) };
+  const transfer = { uploadFile: jest.fn(async () => undefined), acquireLock: async () => null, releaseLock: async () => undefined };
   const deletion = { deleteLocallyMissing: jest.fn(async () => 'deleted') };
   const resolution = { dropCleanSnapshot: jest.fn() };
   const isSystemExcluded = jest.fn(() => false);

@@ -17,6 +17,8 @@ export interface UploadOptions {
   precomputedSha256?: string;
   /** Send `If-Match` with this ETag so a remote that changed since then answers 412. */
   ifMatchEtag?: string | null;
+  /** Atomically create a path that was absent when the sync listed it. */
+  onlyIfAbsent?: boolean;
   /** Creation time in ms to store on the server (X-OC-CTime, seconds). Omitted = header not sent. */
   ctime?: number;
 }

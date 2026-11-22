@@ -31,7 +31,7 @@ import { NO_CACHE_HEADERS } from './noCacheHeaders';
 import {
   readMultistatus, readSyncToken, readHref, readProp, readStatusText,
   readIsCollection, readDavProps, readOwncloudProps, readNextcloudProps, readLockDiscoveryOwner,
-  readPropPatchOutcome, MultistatusUnreadableError, NC_NS,
+  readPropPatchOutcome, MultistatusUnreadableError, NC_NS, readRemovalProtection, confirmsEmptyCollection,
 } from './dav/propfind';
 import { isValidCreationMs, creationSeconds } from '../util/creationTime';
 import { withRetry } from '../util/retry';
@@ -48,6 +48,12 @@ const PROPFIND_BODY = `<?xml version="1.0" encoding="utf-8" ?>
     <oc:fileid/>
     <nc:creation_time/>
   </d:prop>
+</d:propfind>`;
+
+const DIRECTORY_PROTECTION_BODY = `<?xml version="1.0"?>
+<d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns">
+  <d:prop><d:resourcetype/><oc:fileid/><oc:permissions/><nc:is-mount-root/><nc:mount-type/>
+    <nc:is-protected/><nc:is-deletable/><nc:is-renameable/><nc:is-moveable/></d:prop>
 </d:propfind>`;
 
 // Depth:0 PROPFIND for D:lockdiscovery only, sent once after a 423.
@@ -260,7 +266,7 @@ export class NextcloudClient implements IWebDAVClient {
     if (res.status === 404) return null; // no such file (or its parent folder does not exist)
     if (res.status !== 207) throw new NetworkError(res.status, res.text, 'PROPFIND');
     const entries = await this.parsePropfindResponse(res.text, { op: 'statFile', path: remotePath, status: res.status, method: 'PROPFIND' });
-    return entries[0] ?? null;
+    return entries.find(file => file.path === remotePath) ?? null;
   }
 
   async getRootEtag(): Promise<string | null> {
@@ -302,6 +308,33 @@ export class NextcloudClient implements IWebDAVClient {
     return await this.parsePropfindDirectories(res.text, { op: 'getDirectories', path, status: res.status, method: 'PROPFIND' });
   }
 
+  async inspectDirectory(path: string, includeDescendants = false): Promise<{ protected: boolean; fileId: string | null } | null> {
+    const res = await this.reqReadonly({
+      url: this.remoteUrl(path), method: 'PROPFIND', body: DIRECTORY_PROTECTION_BODY, throw: false,
+      headers: { Authorization: this.authHeader, Depth: includeDescendants ? 'infinity' : '0',
+        'Content-Type': 'application/xml; charset=utf-8', ...NO_CACHE_HEADERS },
+    });
+    if (res.status === 404) return null;
+    if (res.status !== 207) throw new NetworkError(res.status, res.text, 'PROPFIND');
+    const responses = readMultistatus(res.text, { op: 'inspectDirectory', path, status: res.status, method: 'PROPFIND' });
+    let found = false;
+    let fileId: string | null = null;
+    let protectedEntry = false;
+    for (const [index, response] of responses.entries()) {
+      if (index > 0 && index % PARSE_YIELD_EVERY === 0) await new Promise(resolve => window.setTimeout(resolve, 0));
+      const relative = hrefToRelative(this.baseUrl, this.remoteBase, readHref(response));
+      if (relative !== path && (!includeDescendants || !relative?.startsWith(`${path}/`))) continue;
+      const prop = readProp(response);
+      if (relative === path && prop && readIsCollection(prop)) {
+        found = true;
+        fileId = readOwncloudProps(prop).fileId;
+      }
+      if (!prop || readRemovalProtection(prop)) protectedEntry = true;
+    }
+    if (!found) throw new Error(`Nextcloud did not confirm directory ${path}.`);
+    return { protected: protectedEntry, fileId };
+  }
+
   async isRemoteDirEmpty(path: string): Promise<boolean> {
     // Depth:1 lists the collection plus its children; "empty" (rmdir semantics) iff the only response is the collection itself.
     // Conservative on any ambiguity, including an unreadable body, so a recursive DELETE never targets a dir that might hold data.
@@ -313,20 +346,12 @@ export class NextcloudClient implements IWebDAVClient {
       throw: false,
     });
     if (res.status !== 207) return false;
-    let responses: Element[];
     try {
-      responses = readMultistatus(res.text, { op: 'isRemoteDirEmpty', path, status: res.status, method: 'PROPFIND' });
+      const responses = readMultistatus(res.text, { op: 'isRemoteDirEmpty', path, status: res.status, method: 'PROPFIND' });
+      return confirmsEmptyCollection(responses, href => hrefToRelative(this.baseUrl, this.remoteBase, href) === path);
     } catch {
       return false;
     }
-    let children = 0;
-    for (const resp of responses) {
-      const href = readHref(resp);
-      const rel = hrefToRelative(this.baseUrl, this.remoteBase, href);
-      // rel === '' is the collection itself (or the base); any other entry is a child.
-      if (rel !== null && rel !== '' && rel !== path) children++;
-    }
-    return children === 0;
   }
 
   // Fails if any level could not be created: watch mode tracks the folder right after this returns, and a tracked folder
@@ -414,7 +439,7 @@ export class NextcloudClient implements IWebDAVClient {
 
   async uploadFile(
     remotePath: string, data: ArrayBuffer, mtime?: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; ctime?: number },
+    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; onlyIfAbsent?: boolean; ctime?: number },
   ): Promise<void> {
     // PUT first and MKCOL the parents only on a missing parent, then retry once: drops the per-upload directory probe on the common path.
     const checksum = `SHA256:${opts?.precomputedSha256 ?? await sha256(data)}`;
@@ -429,6 +454,7 @@ export class NextcloudClient implements IWebDAVClient {
     if (opts?.ctime !== undefined && isValidCreationMs(opts.ctime)) headers['X-OC-CTime'] = String(creationSeconds(opts.ctime));
     // If-Match optimistic concurrency: a remote changed since this etag returns 412.
     if (opts?.ifMatchEtag) headers['If-Match'] = `"${opts.ifMatchEtag.replace(/^"|"$/g, '')}"`;
+    if (opts?.onlyIfAbsent) headers['If-None-Match'] = '*';
 
     let res = await this.req({ url: this.remoteUrl(remotePath), method: 'PUT', headers, body: data, throw: false });
     // Missing parent: create the ancestors, then retry the PUT once. Standard WebDAV answers 409, Nextcloud 404; handle both.
@@ -493,9 +519,10 @@ export class NextcloudClient implements IWebDAVClient {
     if (res.status < 200 || res.status >= 300) throw dirError ?? new NetworkError(res.status, res.text, 'MOVE');
   }
 
-  async deleteFile(path: string, _expectedRemoteId: string): Promise<void> {
+  async deleteFile(path: string, _expectedRemoteId: string, ifMatchEtag?: string): Promise<void> {
+    const condition: Record<string, string> = ifMatchEtag ? { 'If-Match': `"${ifMatchEtag}"` } : {};
     const res = await this.req({
-      url: this.remoteUrl(path), method: 'DELETE', headers: { Authorization: this.authHeader, ...NO_CACHE_HEADERS }, throw: false,
+      url: this.remoteUrl(path), method: 'DELETE', headers: { Authorization: this.authHeader, ...condition, ...NO_CACHE_HEADERS }, throw: false,
     });
     // Blind delete: a 404 means already gone, the desired end state; no pre-deletion existence probe is needed.
     if (res.status === 404) return;
@@ -576,6 +603,10 @@ export class NextcloudClient implements IWebDAVClient {
     return `${this.davBase('versions')}/versions/${encodeURIComponent(fileId)}/${encodeURIComponent(version.versionId)}`;
   }
 
+  private fileEtagCondition(url: string, etag: string): string {
+    return `<${url}> (["${etag.replace(/^"|"$/g, '')}"])`;
+  }
+
   private parseVersions(xml: string, fileId: string): FileVersion[] {
     const versions: FileVersion[] = [];
     const parser = new DOMParser();
@@ -604,7 +635,7 @@ export class NextcloudClient implements IWebDAVClient {
 
   async uploadChunked(
     remotePath: string, data: ArrayBuffer, chunkSizeBytes: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; mtime?: number; ctime?: number },
+    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; onlyIfAbsent?: boolean; mtime?: number; ctime?: number },
   ): Promise<void> {
     const uploadId = `obsidian-${this.settings.deviceId.slice(-8)}-${Date.now()}`;
     const sessionUrl = `${this.davBase('uploads')}/${uploadId}`;
@@ -645,9 +676,9 @@ export class NextcloudClient implements IWebDAVClient {
         'OC-Checksum': `SHA256:${sum}`,
         ...NO_CACHE_HEADERS,
       };
-      // If-Match optimistic concurrency on the assembling MOVE (mirrors uploadFile): a remote
-      // changed since this etag returns 412, mapped below to PreconditionFailedError.
-      if (opts?.ifMatchEtag) moveHeaders['If-Match'] = `"${opts.ifMatchEtag.replace(/^"|"$/g, '')}"`;
+      // The MOVE source is the upload session. A tagged DAV condition checks the destination.
+      if (opts?.ifMatchEtag) moveHeaders.If = this.fileEtagCondition(finalUrl, opts.ifMatchEtag);
+      if (opts?.onlyIfAbsent) moveHeaders.Overwrite = 'F';
       // Same rules as uploadFile: the MOVE carries the times, and whatever the server does not acknowledge is set afterwards.
       const sentMtime = opts?.mtime ? Math.floor(opts.mtime / 1000) : null;
       const sentCtime = opts?.ctime !== undefined && isValidCreationMs(opts.ctime) ? creationSeconds(opts.ctime) : null;

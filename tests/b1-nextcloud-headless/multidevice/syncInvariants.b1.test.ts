@@ -184,10 +184,7 @@ describeLive('Layer B — cross-device sync invariants', (getEnv) => {
     expect(e1).not.toBeNull();                                   // remote genuinely changed (sanity)
   }, 180_000);
 
-  // Regression: when the remote folder was deleted by another device and this device holds UN-PUSHED edits/creates
-  // under it, the upload into the missing parent must not fail with 404 forever. NextcloudClient's in-session
-  // "createdDirs" cache must drop stale ancestor entries on a 404/409 before re-issuing MKCOL.
-  it('INV-12 dir-delete (remote) × nested local edit/create: nested upload survives (no data loss)', async () => {
+  it('INV-12 remote directory delete preserves pending local edits without undoing the deletion', async () => {
     const d = dev('inv12-D'); const m = dev('inv12-M');
     d.vault.seedLocal('anchor.md', 'a');
     d.vault.seedLocal('Folder/note.md', 'note-base\n');
@@ -198,20 +195,26 @@ describeLive('Layer B — cross-device sync invariants', (getEnv) => {
     // D (stale) edits the nested note AND creates a new nested file, then syncs.
     d.vault.seedLocal('Folder/note.md', 'note-EDITED-by-D\n');
     d.vault.seedLocal('Folder/new.md', 'brand-new\n');
-    // Probe right after D's first sync: D's authored content must reach the remote (not be trashed).
+    // Pending work stays on D and the deletion on M remains effective.
     await d.sync();
-    expect(await remoteExists('Folder/new.md')).toBe(true);   // [probe] new file pushed
-    expect(await remoteExists('Folder/note.md')).toBe(true);  // [probe] edited file restored/pushed
-    expect(d.vault.localExists('Folder/new.md')).toBe(true);  // [probe] not trashed locally by dir reconcile
-    // Converge with a few more rounds on both devices.
-    await m.sync(); await d.sync(); await m.sync();
-    // INVARIANT: D's authored content is NOT lost — it survives on remote and on D, and reaches M.
+    await m.sync();
+    expect(await remoteExists('Folder')).toBe(false);
+    expect(d.vault.readLocal('Folder/new.md')).toBe('brand-new\n');
+    expect(d.vault.readLocal('Folder/note.md')).toBe('note-EDITED-by-D\n');
+    expect(d.engine.getLastSessionSummary()?.errors).toContainEqual(expect.objectContaining({ path: 'Folder' }));
+    await assertNoChurn(d, 'inv12-held');
+
+    // An explicit server-side recovery makes the folder and the old baseline visible again.
+    await baseClient.createDirectory('Folder');
+    await baseClient.uploadFile('Folder/note.md', new TextEncoder().encode('note-base\n').buffer);
+    await d.sync(); await m.sync();
     expect(await remoteExists('Folder/new.md')).toBe(true);
     expect(await remoteText('Folder/new.md')).toBe('brand-new\n');
     expect(await remoteExists('Folder/note.md')).toBe(true);
     expect(await remoteText('Folder/note.md')).toBe('note-EDITED-by-D\n');
     expect(d.vault.readLocal('Folder/new.md')).toBe('brand-new\n');
     expect(d.vault.readLocal('Folder/note.md')).toBe('note-EDITED-by-D\n');
+    expect(m.vault.readLocal('Folder/new.md')).toBe('brand-new\n');
     // And the system converges (no churn after).
     await assertNoChurn(d, 'inv12-D');
   }, 240_000);

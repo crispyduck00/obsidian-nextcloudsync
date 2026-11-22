@@ -20,10 +20,10 @@ function makeEngine(opts?: { resolved?: unknown; exists?: boolean; trashRejects?
     app,
     // A trashed folder takes its contents with it, so the deletion sink enumerates the tracked subtree to forget it too.
     // A failed deletion invalidates the root ETag so the next sync rescans and retries.
-    stateDB: { deleteFile, getAllFiles: () => [], getAllDirs: () => [], deleteDir: jest.fn(), setRemoteRootEtag: jest.fn() },
-    localAdapter: { ignore: jest.fn() },
+    stateDB: { deleteFile, getFile: () => ({ localHash: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855' }), getAllFiles: () => [], getAllDirs: () => [], deleteDir: jest.fn(), setRemoteRootEtag: jest.fn() },
+    localAdapter: { ignore: jest.fn(), readBinary: async () => new ArrayBuffer(0) },
   } as never);
-  const summary = { downloadedCount: 0 } as { downloadedCount: number };
+  const summary = { downloadedCount: 0, errorCount: 0, errors: [] };
 
   const run = (path: string) =>
     (engine as unknown as {
@@ -49,16 +49,16 @@ describe('SyncEngine.processRemoteDeletion', () => {
     expect(summary.downloadedCount).toBe(1);
   });
 
-  // T2: a folder (TFolder) is also removed via trashFile (FR-003)
-  it('T2: resolving a TFolder calls fileManager.trashFile with the folder', async () => {
+  // A stale file deletion must not remove a directory that took its place.
+  it('T2: refuses to delete an existing directory through a file deletion', async () => {
     const folder = new (TFolder as unknown as new (p: string) => TFolder)('Notes/sub');
     const { run, trashFile, remove, deleteFile } = makeEngine({ resolved: folder });
 
     await run('Notes/sub');
 
-    expect(trashFile).toHaveBeenCalledWith(folder);
+    expect(trashFile).not.toHaveBeenCalled();
     expect(remove).not.toHaveBeenCalled();
-    expect(deleteFile).toHaveBeenCalledWith('Notes/sub');
+    expect(deleteFile).not.toHaveBeenCalled();
   });
 
   // T3: untracked (null) but present on disk -> adapter.remove fallback (invariant C2 / FR-004)

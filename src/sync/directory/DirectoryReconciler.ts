@@ -12,7 +12,10 @@ import { TransferService } from '../transfer/TransferService';
 import {
   classifyDirectories, shouldTripMassDeleteBreaker, breakerDenominator,
 } from './classify';
-import { collectSubtreePaths, dropSubtreeTracking } from '../deletion/subtreeTracking';
+import { dropSubtreeTracking } from '../deletion/subtreeTracking';
+import { removeEmptyLocalDirectory } from '../deletion/removeEmptyLocalDirectory';
+import { ancestorMatching } from '../policy';
+import type { RemoteFolderGuard } from './RemoteFolderGuard';
 import { FileLogger } from '../../util/FileLogger';
 
 export interface DirectoryDeps {
@@ -27,9 +30,10 @@ export interface DirectoryDeps {
   dropCleanSnapshot(path: string): void;
   // Registers a path so the vault event this plugin causes is not fed back to the watcher. Required: an
   // unwired no-op here turns a plugin trash back into a server DELETE.
-  markOwnEvent(path: string): void;
+  markOwnEvent: (path: string) => void;
   isSystemExcluded(path: string): boolean;
   massDeleteLimit(): number;
+  remoteFolders?: RemoteFolderGuard;
   // Checked between directory operations so a cancel takes effect promptly.
   isCancelled(): boolean;
   logger?: Pick<FileLogger, 'log'>;
@@ -39,7 +43,7 @@ export class DirectoryReconciler {
   constructor(private readonly deps: DirectoryDeps) {}
 
   async reconcileDirectories(
-    client: IWebDAVClient, summary: SyncSessionSummary, cachedDirs?: RemoteDirInfo[],
+    client: IWebDAVClient, summary: SyncSessionSummary, cachedDirs?: RemoteDirInfo[], skipLocalRemovals = false,
   ): Promise<void> {
     let remoteDirInfos: RemoteDirInfo[];
     if (cachedDirs) {
@@ -57,10 +61,7 @@ export class DirectoryReconciler {
 
     const norm = (p: string): string => p.replace(/\/+$/, '');
     const remoteDirs = new Map(remoteDirInfos.map(d => [norm(d.path), d]));
-    const vault = this.deps.app.vault as Vault & { getAllFolders?: (includeRoot?: boolean) => TFolder[] };
-    const localDirs = new Set(
-      (vault.getAllFolders?.() ?? []).map(f => f.path).filter(p => p && p !== '/'),
-    );
+    const localDirs = this.localDirectories();
     const tracked = new Map(this.deps.stateDB.getAllDirs().map(d => [d.path, d]));
 
     const plan = classifyDirectories(remoteDirs, localDirs, tracked, (p) => this.deps.isSystemExcluded(p));
@@ -89,6 +90,7 @@ export class DirectoryReconciler {
     // Parents before children.
     for (const p of mkcolRemote.sort(shallowFirst)) {
       if (this.deps.isCancelled()) break;
+      if (ancestorMatching(p, parent => tracked.has(parent) && !remoteDirs.has(parent))) continue;
       try {
         await client.createDirectory(p);
         this.deps.stateDB.setDir({ path: p, remoteFileId: remoteDirs.get(p)?.fileId ?? null });
@@ -115,6 +117,7 @@ export class DirectoryReconciler {
       if (this.deps.isCancelled()) break;
       let token: string | null = null;
       try {
+        await this.deps.remoteFolders?.assertRemovalAllowed(client, p, true, summary);
         token = await this.deps.transfer.acquireLock(client, p);
         if (!(await client.isRemoteDirEmpty(p))) {
           void this.deps.logger?.log(`dir-sync: remote dir not empty yet — keeping → ${p}`);
@@ -133,7 +136,7 @@ export class DirectoryReconciler {
     }
     // Children before parents.
     for (const p of trashLocal.sort(deepFirst)) {
-      if (this.deps.isCancelled()) break;
+      if (skipLocalRemovals || this.deps.isCancelled()) break;
       // A folder absent from the listing is a reason to look, not to delete (issue #46): one missing folder
       // is below the mass-delete breaker. remoteExists treats everything but a definitive 404 as present, and
       // a rejecting client likewise: no proof, no deletion. The folder stays tracked for the next listing.
@@ -143,11 +146,13 @@ export class DirectoryReconciler {
         void this.deps.logger?.log(`dir-sync: listing omitted ${p} but the server still has it — keeping it (not trashed)`);
         continue;
       }
-      const folder = this.deps.app.vault.getAbstractFileByPath(p);
       try {
-        if (folder instanceof TFolder) await this.trashFolder(folder);
-        // Our own trash is not a user deletion: leftover child rows would be read next sync as local
-        // deletions and pushed to the server.
+        if (!(await removeEmptyLocalDirectory(this.deps.app, p, this.deps.markOwnEvent))) {
+          if (!summary.errors.some(error => error.path === p)) {
+            this.deps.journal.recordError(summary, p, new Error('The remote folder is missing or inaccessible. Local items were kept.'));
+          }
+          continue;
+        }
         this.forgetSubtree(p);
         this.deps.journal.recordHistory(p, 'deleted');
       } catch (err) {
@@ -159,15 +164,15 @@ export class DirectoryReconciler {
     for (const p of dropTracked) this.deps.stateDB.deleteDir(p);
   }
 
-  // Trashing fires a vault `delete` event for the folder and every file under it, which watch mode would push
-  // as user deletions. Register the paths as our own FIRST: the events can land at any point after the trash.
-  private async trashFolder(folder: TFolder): Promise<void> {
-    const stale = collectSubtreePaths(this.deps.stateDB, folder.path);
-    // The set keeps the folder from registering twice when it is also in `stale.dirs`.
-    for (const path of new Set([folder.path, ...stale.files, ...stale.dirs])) {
-      this.deps.markOwnEvent(path);
-    }
-    await this.deps.app.fileManager.trashFile(folder);
+  private localDirectories(): Set<string> {
+    const vault = this.deps.app.vault as Vault & { getAllFolders?: (includeRoot?: boolean) => TFolder[] };
+    return new Set((vault.getAllFolders?.() ?? []).map(f => f.path).filter(p => p && p !== '/'));
+  }
+
+  countMissingLocalCopies(remotePaths: ReadonlySet<string>): number {
+    const local = this.localDirectories();
+    return this.deps.stateDB.getAllDirs().filter(d => local.has(d.path)
+      && !remotePaths.has(d.path) && !this.deps.isSystemExcluded(d.path)).length;
   }
 
   // Only ever called after a successful trash.
@@ -197,14 +202,23 @@ export class DirectoryReconciler {
         this.deps.stateDB.setDir({ path, remoteFileId: null });
       } else {
         // Local absence is correct: let the deletion proceed on the remote.
-        await client.deleteCollection(path);
+        await this.deps.remoteFolders?.assertRemovalAllowed(client, path, true);
+        const token = await this.deps.transfer.acquireLock(client, path);
+        try {
+          if (!(await client.isRemoteDirEmpty(path))) throw new Error('The remote folder still contains files or folders.');
+          await client.deleteCollection(path);
+        } finally {
+          await this.deps.transfer.releaseLock(client, path, token);
+        }
         this.deps.stateDB.deleteDir(path);
       }
     } else {
       if (choice === 'remote') {
         // Remote absence is correct: let the deletion proceed locally.
-        const folder = this.deps.app.vault.getAbstractFileByPath(path);
-        if (folder instanceof TFolder) await this.trashFolder(folder);
+        if (await client.remoteExists(path)) throw new Error('The folder is visible on Nextcloud again. Run Sync now.');
+        if (!(await removeEmptyLocalDirectory(this.deps.app, path, this.deps.markOwnEvent))) {
+          throw new Error('The local folder still contains files or folders. Review them before removing it.');
+        }
         this.forgetSubtree(path);
 
       } else {

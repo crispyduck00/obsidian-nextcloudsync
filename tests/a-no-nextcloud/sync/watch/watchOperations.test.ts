@@ -71,6 +71,7 @@ function build(o: Opts = {}, over: Partial<WatchDeps> = {}) {
       calls.stats.push(p);
       return o.onServer === undefined ? remote({ path: p }) : o.onServer;
     },
+    isRemoteDirEmpty: async () => true,
     createDirectory: async (p: string) => { calls.createDirectory.push(p); },
     deleteCollection: async (p: string) => {
       if (o.failFolderDelete) throw new Error('boom');
@@ -110,6 +111,7 @@ function build(o: Opts = {}, over: Partial<WatchDeps> = {}) {
       drop: (p: string) => { calls.droppedBase.push(p); },
     } as unknown as MergeBaseRecorder,
     transfer: {
+      acquireLock: async () => null, releaseLock: async () => undefined,
       uploadFile: async (_c: unknown, _u: unknown, p: string) => { calls.uploaded.push(p); },
     } as unknown as TransferService,
     deletion: {
