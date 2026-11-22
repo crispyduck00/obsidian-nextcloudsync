@@ -4,6 +4,7 @@
 // through the unchanged full-scan logic.
 import { requestUrl, DataAdapter } from 'obsidian';
 import { SyncEngine } from '../../../src/sync/SyncEngine';
+import type { FullScanListing } from '../../../src/sync/scan/RemoteListingSource';
 import { StateDB } from '../../../src/data/StateDB';
 import { NextcloudClient } from '../../../src/network/NextcloudClient';
 import { StandardWebDAVClient } from '../../../src/network/StandardWebDAVClient';
@@ -68,7 +69,7 @@ function makeEngine(stateDB: StateDB, isNextcloud: boolean): SyncEngine {
 }
 
 type Privates = {
-  obtainFullScanListing: (c: unknown) => Promise<{ remoteFiles: RemoteFileInfo[]; cachedDirs: RemoteDirInfo[] | null }>;
+  obtainFullScanListing: (c: unknown) => Promise<FullScanListing>;
   rebuildRemoteFilesFromState: () => RemoteFileInfo[];
   rebuildRemoteDirsFromState: () => RemoteDirInfo[];
 };
@@ -96,7 +97,7 @@ describe('[SPEC:ES-1..ES-10] root-ETag short-circuit', () => {
       expect(db.getRemoteRootEtag()).toBe('ROOT-1');           // ES-6: stored etag NOT changed on short-circuit
     });
 
-    it('[SPEC:ES-1][SPEC:ES-5] current != stored → REAL scan: getFiles called, stored etag updated, count reset', async () => {
+    it('[SPEC:ES-1][SPEC:ES-5] current != stored → REAL scan, candidate ETag returned and count reset', async () => {
       const db = await makeStateDB((d) => { d.setRemoteRootEtag('OLD'); d.setFullScanSkipCount(3); });
       const remote: RemoteFileInfo[] = [{ path: 'x.md', fileId: 'f', checksum: 'c', etag: null, size: 1, lastModified: 0 }];
       const client = fakeClient({ getRootEtag: jest.fn(async () => 'NEW'), getFiles: jest.fn(async () => remote) });
@@ -108,17 +109,18 @@ describe('[SPEC:ES-1..ES-10] root-ETag short-circuit', () => {
       expect(client.getFiles).toHaveBeenCalledWith('');        // ES-5: real listing
       expect(out.cachedDirs).toBeNull();
       expect(out.remoteFiles).toBe(remote);
-      expect(db.getRemoteRootEtag()).toBe('NEW');              // stored updated to current
+      expect(out.rootEtag).toBe('NEW');
+      expect(db.getRemoteRootEtag()).toBe('OLD');              // Only reconciliation can commit the candidate
       expect(db.getFullScanSkipCount()).toBe(0);              // ES-8 reset
     });
 
-    it('[SPEC:ES-5] getRootEtag returns null (fetch failure) → REAL scan, stored etag set null', async () => {
+    it('[SPEC:ES-5] getRootEtag returns null (fetch failure) → REAL scan without a candidate', async () => {
       const db = await makeStateDB((d) => d.setRemoteRootEtag('OLD'));
       const client = fakeClient({ getRootEtag: jest.fn(async () => null), getFiles: jest.fn(async () => []) });
       const out = await priv(makeEngine(db, true)).obtainFullScanListing(client);
       expect(client.getFiles).toHaveBeenCalledWith('');
       expect(out.cachedDirs).toBeNull();
-      expect(db.getRemoteRootEtag()).toBeNull();
+      expect(out.rootEtag).toBeNull();
     });
 
     it('[SPEC:ES-7] no stored root etag (first run after upgrade) → REAL scan even if current is present', async () => {
@@ -127,7 +129,7 @@ describe('[SPEC:ES-1..ES-10] root-ETag short-circuit', () => {
       const out = await priv(makeEngine(db, true)).obtainFullScanListing(client);
       expect(client.getFiles).toHaveBeenCalledWith('');
       expect(out.cachedDirs).toBeNull();
-      expect(db.getRemoteRootEtag()).toBe('ROOT-1');           // now populated → next sync can short-circuit
+      expect(out.rootEtag).toBe('ROOT-1');
     });
 
     it('[SPEC:ES-7] non-Nextcloud → never short-circuits and never even fetches root etag', async () => {
@@ -137,7 +139,7 @@ describe('[SPEC:ES-1..ES-10] root-ETag short-circuit', () => {
       expect(client.getRootEtag).not.toHaveBeenCalled();       // isNextcloud=false short-circuits the check
       expect(client.getFiles).toHaveBeenCalledWith('');
       expect(out.cachedDirs).toBeNull();
-      expect(db.getRemoteRootEtag()).toBeNull();               // stored cur=null on non-NC
+      expect(out.rootEtag).toBeNull();
     });
 
     it('[SPEC:ES-8] skip budget reached → FORCED real scan despite matching etag, then count resets', async () => {
@@ -158,9 +160,9 @@ describe('[SPEC:ES-1..ES-10] root-ETag short-circuit', () => {
       expect(db.getRemoteRootEtag()).toBe('ROOT-1');
       // Sync 2: an upload has since changed the remote → root etag differs → real scan.
       const c2 = fakeClient({ getRootEtag: jest.fn(async () => 'ROOT-2'), getFiles: jest.fn(async () => []) });
-      await priv(makeEngine(db, true)).obtainFullScanListing(c2);
+      const out = await priv(makeEngine(db, true)).obtainFullScanListing(c2);
       expect(c2.getFiles).toHaveBeenCalledWith('');
-      expect(db.getRemoteRootEtag()).toBe('ROOT-2');
+      expect(out.rootEtag).toBe('ROOT-2');
     });
   });
 
@@ -196,17 +198,42 @@ describe('[SPEC:ES-1..ES-10] root-ETag short-circuit', () => {
   });
 
   describe('[SPEC:ES-9] StateDB persistence & back-compat', () => {
-    it('round-trips remoteRootEtag and fullScanSkipCount through save/load', async () => {
+    it('round-trips the root ETag, size-skipped server metadata, and skip count', async () => {
       const adapter = makeAdapter();
       const db = new StateDB(adapter, PLUGIN_DIR, 'dev-1');
       await db.load();
-      db.setRemoteRootEtag('ROOT-9');
+      const skipped: RemoteFileInfo = {
+        path: 'large.bin', fileId: 'large-id', checksum: 'remote-content', etag: 'remote-version',
+        size: 42_000_000, lastModified: 100, creationTime: 10,
+      };
+      db.setRemoteRootEtag('ROOT-9', [skipped]);
       db.setFullScanSkipCount(7);
       await db.save();
       const reopened = new StateDB(adapter, PLUGIN_DIR, 'dev-1');
       await reopened.load();
       expect(reopened.getRemoteRootEtag()).toBe('ROOT-9');
       expect(reopened.getFullScanSkipCount()).toBe(7);
+      expect(reopened.getRootSizeSkippedFiles()).toEqual([skipped]);
+      expect(reopened.getFileByRemoteId('large-id')).toBeUndefined();
+      const [remote] = priv(makeEngine(reopened, true)).rebuildRemoteFilesFromState();
+      expect(remote).toEqual({ ...skipped, creationTime: undefined });
+    });
+
+    it.each([false, true])('keeps the common base when reading a legacy root ETag (downgrade=%s)', async (downgrade) => {
+      const base = fileState({ path: 'a.md', remoteId: 'common', idType: 'sha256' });
+      const legacy = {
+        deviceId: 'dev-1', lastSyncTime: 40, syncToken: null, files: { [base.path]: base },
+        directories: { notes: { path: 'notes', remoteFileId: 'folder-id' } },
+        remoteRootEtag: 'LEGACY-ROOT',
+        ...(downgrade ? { remoteRootListing: { etag: 'EARLIER-ROOT', sizeSkippedFiles: [] } } : {}),
+      };
+      const db = new StateDB(makeAdapter({ [`${PLUGIN_DIR}/state-dev-1.json`]: JSON.stringify(legacy) }), PLUGIN_DIR, 'dev-1');
+      await db.load();
+      expect(db.getRemoteRootEtag()).toBeNull();
+      expect(db.getFileByRemoteId(base.remoteFileId!)).toEqual(base);
+      expect(db.getDir('notes')).toEqual(legacy.directories.notes);
+      expect(db.getLastSyncTime()).toBe(40);
+      expect(db.getDeviceId()).toBe('dev-1');
     });
 
     it('a pre-023 state file (no fields) loads with remoteRootEtag=null and skipCount=0', async () => {
@@ -276,6 +303,7 @@ describe('[SPEC:CPS-16] computeSyncScopeFingerprint', () => {
     configSync: { bookmarks: true, others: false },
     excludedFolders: ['b', 'a'],
     syncedCommunityPlugins: ['y', 'x'],
+    maxFileSizeMB: 20,
     ...over,
   });
   const fp = (over: Partial<SyncScopeInput> = {}): string => computeSyncScopeFingerprint(scope(over));
@@ -304,13 +332,14 @@ describe('[SPEC:CPS-16] computeSyncScopeFingerprint', () => {
 
   it('equals the documented JSON expression', () => {
     expect(fp()).toBe(JSON.stringify([
-      'scope-v2',
+      'scope-v3',
       true,
       [['bookmarks', true], ['others', false]],
       ['a', 'b'],
       ['x', 'y'],
+      20,
     ]));
-    expect(fp({ syncConfigFolder: false })).toBe(JSON.stringify(['scope-v2', false, [], ['a', 'b'], []]));
+    expect(fp({ syncConfigFolder: false })).toBe(JSON.stringify(['scope-v3', false, [], ['a', 'b'], [], 20]));
   });
 });
 

@@ -193,11 +193,10 @@ export interface SyncState {
   files: Record<string, FileState>;
   /** Absent in older state files; treated as {}. */
   directories?: Record<string, DirState>;
-  /**
-   * Vault root ETag at the end of the last real full scan; a match lets the remote listing be rebuilt
-   * from state instead of a Depth:infinity PROPFIND. Absent = next sync does a real scan (docs/spec.md §8a.5).
-   */
+  /** Legacy root ETag, discarded on load because older clients could omit size-skipped files. */
   remoteRootEtag?: string | null;
+  /** Last usable root listing and the server entries that a size skip left outside the common base. */
+  remoteRootListing?: { etag: string; sizeSkippedFiles: RemoteFileInfo[] };
   /** Consecutive short-circuited scans since the last real one (bounded by FORCE_FULL_SCAN_EVERY). */
   fullScanSkipCount?: number;
   /** Fingerprint of the sync scope at the last sync; absent in older state files (treated as changed). */
