@@ -69,6 +69,8 @@ export interface DavSyncSettings {
   maxFileSizeMB: number;
   /** Watch mode: sync local edits immediately. */
   watchOnChangeEnabled: boolean;
+  /** One-time Android foreground-watch opt-in boundary. */
+  mobileWatchMigrationVersion?: number;
   /** Startup sync delay in seconds, 0-10; 0 = no startup sync. */
   startupSyncDelaySeconds: number;
   /** Number of concurrent WebDAV requests. Derived from device RAM on first run if not persisted. */
@@ -121,6 +123,7 @@ export const DEFAULT_SETTINGS: DavSyncSettings = {
   deviceId: '',
   maxFileSizeMB: 0, // desktop default; mobile gets a cap in loadSettings()
   watchOnChangeEnabled: true,
+  mobileWatchMigrationVersion: 0,
   startupSyncDelaySeconds: 1,
   networkConcurrency: 16, // overridden on first run by autoNetworkConcurrency()
   // Mobile's first run flips this ON (metered data).
