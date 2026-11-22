@@ -12,6 +12,7 @@ requireAndroidEnv();
 // Duplicated from src/ui/ because the runner ships only `tests/` to the Android host. Layer a pins the real constants (RIB-1, SEP-3).
 const SYNC_RIBBON_LABEL = 'Sync with Nextcloud';
 const MIRROR_RIBBON_LABEL = 'Mirror from remote';
+const VERSION_HISTORY_RIBBON_LABEL = 'Version history';
 
 const TAP_MARK = 'data-b3-open-menu';
 
@@ -136,7 +137,9 @@ describe('[SPEC:RIB-3] [SPEC:SEP-4] b-3 — ribbon actions reach mobile through 
     expect(closed.pluginEnabled).toBe(true);
     expect(closed.allRibbonActions).toContain(SYNC_RIBBON_LABEL);
     expect(closed.allRibbonActions).toContain(MIRROR_RIBBON_LABEL);
-    // The ribbon bar itself is not drawn (Obsidian's own actions are hidden too), which is why the menu is the route.
+    expect(closed.allRibbonActions).toContain(VERSION_HISTORY_RIBBON_LABEL);
+    // ...and the ribbon BAR is not drawn: Obsidian's own actions are hidden here too. This is why
+    // the menu below is the route, and why measuring only this container was misleading.
     expect(rendered(closed.ribbonContainers)).toBe(false);
   });
 
@@ -152,7 +155,11 @@ describe('[SPEC:RIB-3] [SPEC:SEP-4] b-3 — ribbon actions reach mobile through 
     }).toEqual(
       expect.objectContaining({
         tapped: true,
-        menuItems: expect.arrayContaining([SYNC_RIBBON_LABEL, MIRROR_RIBBON_LABEL]),
+        menuItems: expect.arrayContaining([
+          SYNC_RIBBON_LABEL,
+          MIRROR_RIBBON_LABEL,
+          VERSION_HISTORY_RIBBON_LABEL,
+        ]),
       }),
     );
   });
@@ -161,5 +168,6 @@ describe('[SPEC:RIB-3] [SPEC:SEP-4] b-3 — ribbon actions reach mobile through 
     expect(closed.ourCommands).toContain('nextcloud-sync:open-sync-status');
     expect(closed.ourCommands).toContain('nextcloud-sync:mirror-from-remote');
     expect(closed.ourCommands).toContain('nextcloud-sync:sync-now');
+    expect(closed.ourCommands).toContain('nextcloud-sync:show-version-history');
   });
 });

@@ -22,6 +22,8 @@ const DEFAULT_PASSWORD_SECRET_ID = 'obsidian-nextcloudsync-password';
 const LEGACY_CREDENTIALS_KEY = 'obsidian-nextcloudsync-password';
 
 export class NextcloudSyncSettingTab extends PluginSettingTab implements SettingDefinitionsHost {
+  private clientPushApplyTimer: number | null = null;
+
   constructor(app: App, private readonly plugin: ObsidianNextcloudsync) {
     super(app, plugin);
   }
@@ -68,6 +70,16 @@ export class NextcloudSyncSettingTab extends PluginSettingTab implements Setting
     await this.plugin.saveSettings();
     // Re-arm the auto-sync timer immediately so a new interval takes effect without a reload.
     if (key === 'syncIntervalMinutes') this.plugin.applyAutoSyncInterval();
+    if (key === 'useClientPush') {
+      await this.plugin.applyClientPushSettings();
+      this.update();
+    } else if (key === 'clientPushUrlOverride') {
+      // Declarative text controls report each edit. Debounce the reconnect so typing a URL does not
+      // tear down/recreate the WebSocket on every keystroke.
+      this.scheduleClientPushApply();
+    } else if (key === 'watchOnChangeEnabled' || key === 'syncOnWifiOnly') {
+      this.plugin.reevaluateMobileWatchPolicy();
+    }
   }
 
 
@@ -81,6 +93,18 @@ export class NextcloudSyncSettingTab extends PluginSettingTab implements Setting
     const base = this.plugin.settings.serverUrl.trim().replace(/\/+$/, '');
     if (!base) return '(enter the Server URL above)';
     return `${base}/${this.app.vault.getName()}`;
+  }
+
+  clientPushStatusSummary(): string {
+    return this.plugin.clientPushSettingsStatus();
+  }
+
+  private scheduleClientPushApply(): void {
+    if (this.clientPushApplyTimer !== null) window.clearTimeout(this.clientPushApplyTimer);
+    this.clientPushApplyTimer = window.setTimeout(() => {
+      this.clientPushApplyTimer = null;
+      void this.plugin.applyClientPushSettings();
+    }, 600);
   }
 
   async addExcludedFolder(raw: string): Promise<void> {

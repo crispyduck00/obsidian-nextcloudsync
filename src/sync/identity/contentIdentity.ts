@@ -17,12 +17,16 @@ export function bytesEqual(a: ArrayBuffer, b: ArrayBuffer): boolean {
 
 // The baseline for a file whose local and remote bodies are proven identical. The caller adds the stat signature.
 export function convergedState(
-  remote: RemoteFileInfo, localHash: string, localStat: { size: number; mtime: number },
+  remote: RemoteFileInfo, localHash: string, localStat: { size: number; mtime: number }, previous?: FileState,
 ): FileState {
   const { remoteId, idType } = remoteIdOf(remote);
   return {
     path: remote.path, localHash, remoteId, idType,
     size: localStat.size, mtime: remote.lastModified || localStat.mtime,
-    remoteFileId: remote.fileId, isConflicted: false,
+    remoteFileId: remote.fileId ?? previous?.remoteFileId ?? null, isConflicted: false,
+    ...(previous && (remote.fileId === null || remote.fileId === previous.remoteFileId) ? {
+      ...(previous.ctimeLocalAttempt !== undefined ? { ctimeLocalAttempt: previous.ctimeLocalAttempt } : {}),
+      ...(previous.ctimeRemoteAttempt !== undefined ? { ctimeRemoteAttempt: previous.ctimeRemoteAttempt } : {}),
+    } : {}),
   };
 }

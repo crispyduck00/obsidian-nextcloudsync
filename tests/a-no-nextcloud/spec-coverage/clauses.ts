@@ -192,6 +192,7 @@ export const CLAUSES: Clause[] = [
   { id: 'G5-1', source: 'specs/main/spec.md §18.1 (chunked upload carries the If-Match precondition like single PUT — large files are not exempt from optimistic concurrency)', layer: 'a' },
   { id: 'G6-1', source: 'specs/main/spec.md §18.1 (force-resolve / bulk-resolve are guarded by an instance field that survives re-render, preventing double execution)', layer: 'a' },
   { id: 'G6-2', source: 'specs/main/spec.md §18.1 (version Restore is guarded by a modal-level in-flight gate)', layer: 'a' },
+  { id: 'G7-2', source: 'specs/main/spec.md §18.1 (mobile watch stays conservative at runtime: Android is explicit opt-in with default off; iOS remains gated off)', layer: 'a' },
   { id: 'G3-1', source: 'specs/main/spec.md §18.1 (empty-base merge never silently fuses two divergent sides at the character level; line-preserving unions stay clean)', layer: 'a' },
   { id: 'G3-3', source: 'specs/main/spec.md §18.1 (MergeEngine.merge for non-markdown never splits a leading --- block as frontmatter — a one-sided in-block edit is 3-way merged, not discarded)', layer: 'a' },
   // MWM: watch mode on mobile + "Wi-Fi only" applied to watch
@@ -257,6 +258,7 @@ export const CLAUSES: Clause[] = [
   { id: 'ES-9',  source: 'specs/main/spec.md §8a.5 (remoteRootEtag/skipCount persist + pre-023 back-compat)', layer: 'a' },
   { id: 'ES-10', source: 'specs/main/spec.md §8a.5 (short-circuit also skips getDirectories∞ via rebuilt dirs)', layer: 'a' },
   { id: 'ES-11', source: 'specs/main/spec.md §8a.5 (tie no-op invalidates root ETag → next sync re-scans; no silent local-wins upload)', layer: 'a' },
+  { id: 'ES-12', source: 'docs/spec.md §8a.5 (cached listing retains observed size-skipped server entries)', layer: 'a' },
   // SG/WB: download safety guards (docs/spec.md §9.2)
   { id: 'SG-1', source: 'specs/main/spec.md §9 (advertised size > received ⇒ anomalous remote)', layer: 'a' },
   { id: 'SG-2', source: 'specs/main/spec.md §9 (anomalous download refused: no overwrite, Base kept, retry)', layer: 'a' },
