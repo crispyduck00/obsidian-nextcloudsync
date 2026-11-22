@@ -12,23 +12,26 @@ import { FileLogger } from '../../util/FileLogger';
 // (capabilities arrive on connect, settings can be edited).
 export interface RemoteListingDeps {
   stateDB: Pick<StateDB,
-    'getAllFiles' | 'getAllDirs' | 'getRemoteRootEtag' | 'setRemoteRootEtag'
-    | 'getFullScanSkipCount' | 'setFullScanSkipCount'>;
+    'getAllFiles' | 'getAllDirs' | 'getRemoteRootEtag'
+    | 'getFullScanSkipCount' | 'setFullScanSkipCount' | 'getRootSizeSkippedFiles'>;
   isNextcloud(): boolean;
   // The batching loop advances by this value, so it floors it again: a 0 would never terminate.
   networkConcurrency(): number;
   logger?: Pick<FileLogger, 'log'>;
 }
 
+export interface FullScanListing {
+  remoteFiles: RemoteFileInfo[];
+  cachedDirs: RemoteDirInfo[] | null;
+  rootEtag: string | null;
+}
+
 export class RemoteListingSource {
   constructor(private readonly deps: RemoteListingDeps) {}
 
   // Returns cachedDirs only when short-circuited, so reconcileDirectories can skip getDirectories('').
-  // The rebuilt listing is COMPLETE, so downstream deletion and conflict logic is unchanged. The stored root
-  // ETag is updated ONLY on a real scan, so a local upload/delete/rename forces a real scan next time.
-  async obtainFullScanListing(
-    client: IWebDAVClient,
-  ): Promise<{ remoteFiles: RemoteFileInfo[]; cachedDirs: RemoteDirInfo[] | null }> {
+  // A new root ETag is only a candidate until the caller finishes reconciliation of this listing.
+  async obtainFullScanListing(client: IWebDAVClient): Promise<FullScanListing> {
     const db = this.deps.stateDB;
     const isNextcloud = this.deps.isNextcloud();
     const stored = db.getRemoteRootEtag();
@@ -46,22 +49,20 @@ export class RemoteListingSource {
       void this.deps.logger?.log(
         `sync: root-ETag MATCH (${cur}) → SHORT-CIRCUIT full scan; rebuilt ${remoteFiles.length} files / ${cachedDirs.length} dirs from State (skip ${skipCount + 1}/${FORCE_FULL_SCAN_EVERY})`,
       );
-      return { remoteFiles, cachedDirs };
+      return { remoteFiles, cachedDirs, rootEtag: cur };
     }
 
     // A null ETag (non-Nextcloud, or fetch failure) just makes the next sync real-scan again.
     const remoteFiles = await client.getFiles('');
-    db.setRemoteRootEtag(cur);
     db.setFullScanSkipCount(0);
     void this.deps.logger?.log(
       `sync: REAL full scan (remote=${remoteFiles.length}); rootEtag=${cur ?? 'null'}${forced ? ' (forced: skip budget reached)' : ''}`,
     );
-    return { remoteFiles, cachedDirs: null };
+    return { remoteFiles, cachedDirs: null, rootEtag: cur };
   }
 
-  // Every entry must read as "remote unchanged" against its own base: effective id = checksum ?? etag ?? size = remoteId.
   rebuildRemoteFilesFromState(): RemoteFileInfo[] {
-    return this.deps.stateDB.getAllFiles().map((fs) => ({
+    const files = this.deps.stateDB.getAllFiles().map((fs): RemoteFileInfo => ({
       path: fs.path,
       fileId: fs.remoteFileId,
       checksum: fs.idType === 'sha256' ? fs.remoteId : null,
@@ -69,6 +70,15 @@ export class RemoteListingSource {
       size: fs.size,
       lastModified: fs.remoteMtime ?? fs.mtime,
     }));
+
+    const skipped = this.deps.stateDB.getRootSizeSkippedFiles();
+    if (skipped.length === 0) return files;
+    // A skipped download left the common base untouched. Keep that base for merge and file-ID lookup,
+    // but use the observed server entry in the reconstructed listing, even for a path without a base.
+    const filesByPath = new Map(files.map(file => [file.path, file]));
+    // Creation time can change without an ETag change, so only a real listing supplies it.
+    for (const file of skipped) filesByPath.set(file.path, { ...file, creationTime: undefined });
+    return [...filesByPath.values()];
   }
 
   // reconcileDirectories only needs path/fileId; etag/lastModified are unused there.

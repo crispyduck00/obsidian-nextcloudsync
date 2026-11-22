@@ -1,5 +1,5 @@
 import { DataAdapter } from 'obsidian';
-import { DirState, FileState, SyncState } from '../types';
+import { DirState, FileState, RemoteFileInfo, SyncState } from '../types';
 import { AsyncMutex } from '../util/AsyncMutex';
 
 const STATEDB_TMP_SUFFIX = '.tmp';
@@ -14,6 +14,7 @@ export class StateDB {
   // remoteFileId -> path reverse index (O(1) rename detection); kept in sync by setFile/deleteFile, rebuilt on load.
   private fileIdIndex = new Map<string, string>();
   private saveTimer: number | null = null;
+  private rootListingGeneration = 0;
 
   constructor(
     private readonly adapter: DataAdapter,
@@ -40,7 +41,9 @@ export class StateDB {
       const parsed = JSON.parse(raw) as SyncState;
       this.state = parsed;
       if (!this.state.directories) this.state.directories = {}; // pre-DP v1 state file
-      // Absent remoteRootEtag => the next sync does a real full scan (docs/spec.md §8a.5); skip count defaults to 0.
+      // Old versions can reconstruct an incomplete listing, including after a downgrade. Keep their
+      // file/directory bases, but do a real scan before trusting a root listing (docs/spec.md §8a.5).
+      if (this.state.remoteRootEtag !== undefined) this.setRemoteRootEtag(null);
       if (this.state.fullScanSkipCount == null) this.state.fullScanSkipCount = 0;
       if (recoveredFromTmp) {
         // Adopt the recovered tmp; best-effort, the next save() recreates statePath from memory.
@@ -154,12 +157,23 @@ export class StateDB {
 
   // null => the next sync full-scans (docs/spec.md §8a.5).
   getRemoteRootEtag(): string | null {
-    return this.state.remoteRootEtag ?? null;
+    return this.state.remoteRootListing?.etag ?? null;
   }
 
-  // Set ONLY after a real full scan completes, never on a short-circuit.
-  setRemoteRootEtag(etag: string | null): void {
-    this.state.remoteRootEtag = etag;
+  getRootSizeSkippedFiles(): readonly RemoteFileInfo[] {
+    return this.state.remoteRootListing?.sizeSkippedFiles ?? [];
+  }
+
+  /** Detects an invalidation during a scan, even when it started without any cached ETag. */
+  getRootListingGeneration(): number {
+    return this.rootListingGeneration;
+  }
+
+  // A newer ETag and its size-skipped metadata become usable together, after a complete scan.
+  setRemoteRootEtag(etag: string | null, sizeSkippedFiles: RemoteFileInfo[] = []): void {
+    this.rootListingGeneration++;
+    delete this.state.remoteRootEtag;
+    this.state.remoteRootListing = etag === null ? undefined : { etag, sizeSkippedFiles };
   }
 
   // null => older state file; the next sync treats the scope as changed and does a real scan.
@@ -207,6 +221,7 @@ export class StateDB {
     }
     this.state = { deviceId: this.state.deviceId, lastSyncTime: 0, syncToken: null, files: {} };
     this.fileIdIndex.clear();
+    this.rootListingGeneration++;
     await this.save();
   }
 

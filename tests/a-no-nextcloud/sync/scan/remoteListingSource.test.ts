@@ -12,17 +12,16 @@ function fileState(over: Partial<FileState> & { path: string }): FileState {
 }
 
 function build(over: Partial<RemoteListingDeps> = {}, files: FileState[] = [], dirs: DirState[] = []) {
-  let rootEtag: string | null = null;
   let skip = 0;
   const deps: RemoteListingDeps = {
     stateDB: {
       getAllFiles: () => files,
       getAllDirs: () => dirs,
-      getRemoteRootEtag: () => rootEtag,
-      setRemoteRootEtag: (e: string | null) => { rootEtag = e; },
+      getRemoteRootEtag: () => null,
+      getRootSizeSkippedFiles: () => [],
       getFullScanSkipCount: () => skip,
       setFullScanSkipCount: (n: number) => { skip = n; },
-    } as unknown as RemoteListingDeps['stateDB'],
+    },
     isNextcloud: () => true,
     networkConcurrency: () => 2,
     ...over,
