@@ -575,6 +575,7 @@ export default class ObsidianNextcloudsync extends Plugin {
       readAppPassword,
       pluginDir,
       configDir: this.app.vault.configDir,
+      isLocalVaultAvailable: () => localAdapter.isFolder(pluginDir),
       pluginsAwaitingRestart: this.pluginsAwaitingRestart,
       // Evaluated live from the same settings and host token as the logger, so it follows the logging
       // toggle (docs/spec.md §9.1).

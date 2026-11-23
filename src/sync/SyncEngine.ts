@@ -95,6 +95,8 @@ interface SyncEngineOptions {
   readAppPassword?: AppPasswordReader;
   pluginDir: string;
   configDir: string;
+  /** The host probes the installed plugin folder inside the vault. */
+  isLocalVaultAvailable?: () => Promise<boolean>;
   // Host-owned predicate for this device's active log files, which must stay out of sync (docs/spec.md §9.1).
   isActiveLogFile?: (path: string) => boolean;
   // True while the user is typing into `path`. Consulted before any REMOTE -> LOCAL write, because writing under the cursor
@@ -224,6 +226,7 @@ export class SyncEngine {
     });
     this.versions = new VersionService({ localAdapter: opts.localAdapter, stateDB: opts.stateDB });
     this.deletion = new DeletionService({
+      assertLocalVaultAvailable: () => this.assertLocalVaultAvailable(),
       app: opts.app,
       stateDB: opts.stateDB,
       journal: this.journal,
@@ -274,6 +277,7 @@ export class SyncEngine {
       logger: opts.logger,
     });
     this.directories = new DirectoryReconciler({
+      assertLocalVaultAvailable: () => this.assertLocalVaultAvailable(),
       app: opts.app,
       stateDB: opts.stateDB,
       journal: this.journal,
@@ -287,6 +291,7 @@ export class SyncEngine {
       logger: opts.logger,
     });
     this.watch = new WatchOperations({
+      assertLocalVaultAvailable: () => this.assertLocalVaultAvailable(),
       localAdapter: opts.localAdapter,
       stateDB: opts.stateDB,
       historyStore: opts.historyStore,
@@ -345,6 +350,12 @@ export class SyncEngine {
       connect: async () => (await this.ensureClient()).client,
       logger: opts.logger,
     });
+  }
+
+  private async assertLocalVaultAvailable(): Promise<void> {
+    if (this.opts.isLocalVaultAvailable && !(await this.opts.isLocalVaultAvailable())) {
+      throw new Error('The local vault or plugin folder is unavailable. Reopen the vault and sync again.');
+    }
   }
 
   private getOrCreateRenameTracker(): RenameTracker {
@@ -445,6 +456,7 @@ export class SyncEngine {
 
     const cancelled = false;
     try {
+      await this.assertLocalVaultAvailable();
       // Connect INSIDE the try: if ensureClient() threw or hung outside it, the finally that clears `running` would be
       // skipped and the engine would balk forever as "already running".
       void this.opts.logger?.log('sync: connecting (ensureClient)');

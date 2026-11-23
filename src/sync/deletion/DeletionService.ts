@@ -20,6 +20,7 @@ export type RemoteDeletionOutcome =
   | { status: 'failed'; message: string };
 
 export interface DeletionDeps {
+  assertLocalVaultAvailable?(): Promise<void>;
   app: App;
   stateDB: Pick<StateDB, 'deleteFile' | 'getFile' | 'getAllFiles' | 'getAllDirs' | 'deleteDir'>;
   journal: SyncJournal;
@@ -50,6 +51,7 @@ export class DeletionService {
     }
 
     if (serverHash && serverHash === base.localHash) {
+      await this.deps.assertLocalVaultAvailable?.();
       void this.deps.logger?.log(`delete-remote: local deletion (server checksum matches base) → ${remote.path}`);
       try {
         await client.deleteFile(remote.path, base.remoteId);

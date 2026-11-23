@@ -16,6 +16,7 @@ import { collectSubtreePaths, dropSubtreeTracking } from '../deletion/subtreeTra
 import { FileLogger } from '../../util/FileLogger';
 
 export interface DirectoryDeps {
+  assertLocalVaultAvailable?(): Promise<void>;
   app: App;
   stateDB: Pick<StateDB,
     'getAllDirs' | 'setDir' | 'deleteDir' | 'requestSave' | 'getAllFiles' | 'deleteFile'>;
@@ -120,6 +121,7 @@ export class DirectoryReconciler {
           void this.deps.logger?.log(`dir-sync: remote dir not empty yet — keeping → ${p}`);
           continue; // children pending; self-heals next sync
         }
+        await this.deps.assertLocalVaultAvailable?.();
         await client.deleteCollection(p);
         this.deps.stateDB.deleteDir(p);
         summary.deletedCount++;
@@ -197,6 +199,7 @@ export class DirectoryReconciler {
         this.deps.stateDB.setDir({ path, remoteFileId: null });
       } else {
         // Local absence is correct: let the deletion proceed on the remote.
+        await this.deps.assertLocalVaultAvailable?.();
         await client.deleteCollection(path);
         this.deps.stateDB.deleteDir(path);
       }
