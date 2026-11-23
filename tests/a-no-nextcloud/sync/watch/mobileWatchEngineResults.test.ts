@@ -1,12 +1,16 @@
 import { SyncEngine } from '../../../../src/sync/SyncEngine';
-import { DEFAULT_SETTINGS } from '../../../../src/types';
+import { DEFAULT_SETTINGS, type PendingFileRename } from '../../../../src/types';
 
 function makeHarness() {
   const files = new Map<string, { path: string }>();
   const dirs = new Set<string>();
   const stat = jest.fn(async (_path: string) => null as { mtime: number; size: number } | null);
 
+  let renames: PendingFileRename[] = [];
   const stateDB = {
+    getPendingFileRenames: () => renames,
+    setPendingFileRenames: (value: PendingFileRename[]) => { renames = value; },
+    save: async () => undefined,
     getFile: (path: string) => files.get(path),
     getDir: (path: string) => dirs.has(path) ? { path } : undefined,
   };
@@ -39,7 +43,7 @@ function makeHarness() {
   internals.watch = watch;
   internals.retryQueue = [];
 
-  return { engine, internals, watch, files, dirs, stat };
+  return { engine, internals, watch, files, dirs, stat, stateDB };
 }
 
 describe('SyncEngine mobile watch convergence wrappers', () => {
@@ -69,10 +73,12 @@ describe('SyncEngine mobile watch convergence wrappers', () => {
     h.files.set('old.md', { path: 'old.md' });
 
     await expect(h.engine.renameSingleFileForMobileWatch('old.md', 'new.md')).resolves.toBe(false);
+    expect(h.stateDB.getPendingFileRenames()).toHaveLength(1);
 
     h.watch.renameSingleFile.mockImplementationOnce(async (oldPath, newPath) => {
       h.files.delete(oldPath);
       h.files.set(newPath, { path: newPath });
+      h.stateDB.setPendingFileRenames([]);
     });
     await expect(h.engine.renameSingleFileForMobileWatch('old.md', 'new.md')).resolves.toBe(true);
   });

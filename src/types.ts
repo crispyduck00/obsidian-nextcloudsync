@@ -195,6 +195,19 @@ export interface DirState {
   remoteFileId: string | null;
 }
 
+export type FileRenameIssue = 'locked' | 'read-only' | 'denied' | 'conflict' | 'local-missing' | 'scope' | 'retry';
+
+/** A local file rename whose original remote file is still owned by this operation. */
+export interface PendingFileRename {
+  source: string;
+  destination: string;
+  scope: string;
+  fileId: string | null;
+  /** Persisted before MOVE so a lost response or an app restart can be reconciled by identity. */
+  attemptedDestination?: string;
+  issue?: FileRenameIssue;
+}
+
 export interface SyncState {
   deviceId: string;
   lastSyncTime: number;
@@ -206,6 +219,7 @@ export interface SyncState {
   remoteRootFileId?: string;
   /** Absent in older state files; treated as {}. */
   directories?: Record<string, DirState>;
+  pendingFileRenames?: PendingFileRename[];
   /** Legacy root ETag, discarded on load because older clients could omit size-skipped files. */
   remoteRootEtag?: string | null;
   /** Last usable root listing and the server entries that a size skip left outside the common base. */
@@ -237,6 +251,8 @@ export interface RemoteFileInfo {
   fileId: string | null;
   checksum: string | null;
   etag: string | null;
+  /** Effective Nextcloud DAV permissions, when the server provided the property. */
+  permissions?: string;
   size: number;
   lastModified: number;
   /**
@@ -290,6 +306,8 @@ export type ConflictResolution =
 
 /** One recorded sync error; `path` is empty for session-level errors. */
 export interface SyncErrorDetail {
+  /** Persistent rename failures are displayed with their original and intended paths. */
+  pendingRename?: boolean;
   path: string;
   message: string;
   /** Full list of skipped deletion candidates; set only when the file-side mass-delete breaker fires. */

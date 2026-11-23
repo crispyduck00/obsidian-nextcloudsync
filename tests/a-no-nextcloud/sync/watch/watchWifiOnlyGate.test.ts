@@ -50,7 +50,7 @@ function build(opts: { blocked: boolean; running?: boolean }): Harness {
   const resolution = { dropCleanSnapshot: jest.fn() };
   const isSystemExcluded = jest.fn(() => false);
   const connect = jest.fn(async () => ({ client, uploadStrategy: {} }));
-  const renameTracker = jest.fn(() => ({ applyLocalRename: jest.fn(async () => undefined) }));
+  const retryFileRename = jest.fn(async () => true);
   const isSyncRunning = jest.fn(() => opts.running === true);
   const isBlockedByWifiOnly = jest.fn(() => opts.blocked);
   const processFile = jest.fn(async () => undefined);
@@ -61,7 +61,7 @@ function build(opts: { blocked: boolean; running?: boolean }): Harness {
 
   const deps = {
     localAdapter, stateDB, historyStore, statusBar, journal, mergeBase, transfer, deletion, resolution,
-    isSystemExcluded, isPluginPath: noPluginPath, connect, renameTracker, isBlockedByWifiOnly, isSyncRunning, processFile,
+    isSystemExcluded, isPluginPath: noPluginPath, connect, retryFileRename, isBlockedByWifiOnly, isSyncRunning, processFile,
     queueRetry, conflictEncounters, logger, notify,
     runNonFullSyncOperation: async <T>(fn: () => Promise<T>) => fn(),
   } as unknown as WatchDeps;
@@ -95,7 +95,7 @@ function build(opts: { blocked: boolean; running?: boolean }): Harness {
     deleteLocallyMissing: deletion.deleteLocallyMissing,
     dropCleanSnapshot: resolution.dropCleanSnapshot,
     connect,
-    renameTracker,
+    retryFileRename,
     isSyncRunning,
     processFile,
     queueRetry,

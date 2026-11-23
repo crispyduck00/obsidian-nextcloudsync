@@ -28,6 +28,7 @@ export interface DirectoryDeps {
   // unwired no-op here turns a plugin trash back into a server DELETE.
   markOwnEvent: (path: string) => void;
   isSystemExcluded(path: string): boolean;
+  hasRenameInFolder?(path: string): boolean;
   massDeleteLimit(): number;
   // Checked between directory operations so a cancel takes effect promptly.
   isCancelled(): boolean;
@@ -61,6 +62,7 @@ export class DirectoryReconciler {
     const tracked = new Map(this.deps.stateDB.getAllDirs().map(d => [d.path, d]));
 
     const plan = classifyDirectories(remoteDirs, localDirs, tracked, p => isHeld(p) || this.deps.isSystemExcluded(p));
+    plan.trashLocal = plan.trashLocal.filter(path => !this.deps.hasRenameInFolder?.(path));
     const { mkcolRemote, mkdirLocal, deleteRemote, trashLocal, ensureTracked, dropTracked } = plan;
 
     // Circuit breaker: a partial listing would make many dirs look deleted.
@@ -121,6 +123,7 @@ export class DirectoryReconciler {
         void this.deps.logger?.log(`dir-sync: listing omitted ${p} but the server still has it — keeping it (not trashed)`);
         continue;
       }
+      if (this.deps.hasRenameInFolder?.(p)) continue;
       try {
         if (!(await removeEmptyLocalDirectory(this.deps.app, p, this.deps.markOwnEvent))) {
           if (!summary.errors.some(error => error.path === p)) {
@@ -147,7 +150,7 @@ export class DirectoryReconciler {
   countMissingLocalCopies(remotePaths: ReadonlySet<string>, isHeld: (path: string) => boolean): number {
     const local = this.localDirectories();
     return this.deps.stateDB.getAllDirs().filter(d => local.has(d.path)
-      && !remotePaths.has(d.path) && !isHeld(d.path) && !this.deps.isSystemExcluded(d.path)).length;
+      && !remotePaths.has(d.path) && !isHeld(d.path) && !this.deps.hasRenameInFolder?.(d.path) && !this.deps.isSystemExcluded(d.path)).length;
   }
 
   // Only ever called after a successful trash.
@@ -170,6 +173,7 @@ export class DirectoryReconciler {
     category: 'deleteRemote' | 'trashLocal',
     choice: 'remote' | 'local',
   ): Promise<void> {
+    if (this.deps.hasRenameInFolder?.(path)) throw new Error('This folder contains a pending file rename.');
     if (category === 'deleteRemote') {
       if (choice === 'remote') {
         // Remote is correct: undo the apparent local deletion by recreating the folder locally.

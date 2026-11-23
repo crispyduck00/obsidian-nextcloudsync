@@ -33,6 +33,7 @@ export interface TransferDeps {
   // Read at call time: the cap is a live setting.
   maxFileSizeMB(): number;
   hasFilesLocking(): boolean;
+  isRenameHeld?(path: string): boolean;
   // Asks which client is running, not what the server said: `StandardWebDAVClient` hardcodes `checksum: null`,
   // so recording a SHA-256 against plain WebDAV would mismatch what the next sync reads back (docs/spec.md §4.1).
   // Deliberately NOT the server's `hasChecksums` capability, which is false on the official Docker image even
@@ -55,6 +56,7 @@ export class TransferService {
     idType: FileState['idType'], remote: RemoteFileInfo,
     summary: SyncSessionSummary, onlyIfAbsent = false,
   ): Promise<void> {
+    if (this.deps.isRenameHeld?.(path)) return;
     const stat = await this.deps.localAdapter.stat(path);
     if (!stat) return;
 
@@ -74,6 +76,7 @@ export class TransferService {
 
     let outcome: 'uploaded' | 'skipped';
     try {
+      if (this.deps.isRenameHeld?.(path)) return;
       // If-Match with the known remote etag makes a remote changed since our baseline return 412
       // (PreconditionFailedError, a conflict). A new path must still be absent to create it.
       outcome = await uploadStrategy.upload(client, path, data, stat.mtime, {
@@ -130,6 +133,7 @@ export class TransferService {
     remote: RemoteFileInfo, remoteId: string,
     idType: FileState['idType'], summary: SyncSessionSummary,
   ): Promise<void> {
+    if (this.deps.isRenameHeld?.(remote.path)) return;
     // Skip oversized remote files BEFORE the GET, covering the normal download and the local-delete-vs-remote-edit
     // restore. Local and Base stay untouched and no retry is queued: the skip is permanent until the cap is
     // raised, then the next reconcile downloads it. Not an error (docs/spec.md §9.4). Counted for the
@@ -167,6 +171,7 @@ export class TransferService {
       await this.deps.creationTime?.align(client, remote, localStat);
       return;
     }
+    if (this.deps.isRenameHeld?.(remote.path)) return;
     const writeMtime = this.deps.localWrite.mtimeFor(remote.path, remote.lastModified || undefined);
     await this.deps.localAdapter.atomicWriteBinary(remote.path, data, writeMtime, writeCreationTimeMs(localStat?.ctime, remote.creationTime));
     this.deps.localWrite.written(remote.path);

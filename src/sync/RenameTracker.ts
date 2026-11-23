@@ -47,10 +47,15 @@ export class RenameTracker {
     this.stateDB.setFile({ ...file, path: newPath });
   }
 
+  async moveRemoteFile(source: string, destination: string, etag?: string): Promise<void> {
+    await this.beforeMove?.(source, destination);
+    if (etag) await this.client.moveFile(source, destination, etag);
+    else await this.client.moveFile(source, destination);
+  }
+
   async applyLocalRename(oldRemotePath: string, newRemotePath: string): Promise<void> {
     try {
-      await this.beforeMove?.(oldRemotePath, newRemotePath);
-      await this.client.moveFile(oldRemotePath, newRemotePath);
+      await this.moveRemoteFile(oldRemotePath, newRemotePath);
       const file = this.stateDB.getFile(oldRemotePath);
       if (file) {
         this.stateDB.deleteFile(oldRemotePath);

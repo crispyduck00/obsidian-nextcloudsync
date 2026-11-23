@@ -358,11 +358,13 @@ export default class ObsidianNextcloudsync extends Plugin {
       }));
 
       this.registerEvent(this.app.vault.on('rename', (file: TAbstractFile, oldPath: string) => {
-        if (!watchOn() || isPluginEvent(oldPath) || isPluginEvent(file.path)) return;
+        if (isPluginEvent(oldPath) || isPluginEvent(file.path)) return;
         const hadPendingUpload = takePendingUpload(oldPath);
         if (isOwnSyncEvent(oldPath) || isOwnSyncEvent(file.path)) return;
 
         if (file instanceof TFolder) {
+          this.syncEngine?.rememberFolderRename(oldPath, file.path);
+          if (!watchOn()) return;
           runStructural(
             `rename folder ${oldPath} → ${file.path}`,
             (engine) => engine.renameSingleFolder(oldPath, file.path),
@@ -373,6 +375,8 @@ export default class ObsidianNextcloudsync extends Plugin {
         if (!(file instanceof TFile)) return;
 
         const newPath = file.path;
+        this.syncEngine?.rememberFileRename(oldPath, newPath);
+        if (!watchOn()) return;
         const lastEditAt = this.lastLocalEdit.get(oldPath);
         if (lastEditAt !== undefined) {
           this.lastLocalEdit.delete(oldPath);
@@ -944,7 +948,7 @@ export default class ObsidianNextcloudsync extends Plugin {
 
     const scheduler = new PushSyncScheduler({
       isSyncRunning: () => this.syncEngine?.isSyncRunning() ?? false,
-      shouldSync: async () => this.syncEngine?.shouldReconcileClientPush() ?? true,
+      shouldSync: async (fileIds) => this.syncEngine?.shouldReconcileClientPush(fileIds) ?? true,
       onReconciliationTriggered: () => {
         this.pushStatusItem?.pulse();
         this.mobileSyncStatusItem?.pulseRealtime();

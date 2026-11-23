@@ -1,11 +1,12 @@
 import { SyncEngine } from '../../../../src/sync/SyncEngine';
 import { DEFAULT_SETTINGS } from '../../../../src/types';
 
-function makeEngine() {
+function makeEngine(renames: { fileId: string; scope: string }[] = []) {
   let password: string | null = 'first-password';
   const getRootInfo = jest.fn(async () => ({ etag: 'root-etag', fileId: 'root-id' }));
   const createClient = jest.fn(async () => ({ client: { getRootInfo }, features: { isNextcloud: true } }));
-  const stateDB = { getSyncToken: () => null, getRemoteRootEtag: () => 'root-etag', getFileByRemoteId: jest.fn() };
+  const stateDB = { getSyncToken: () => null, getRemoteRootEtag: () => 'root-etag', getFileByRemoteId: jest.fn(),
+    getPendingFileRenames: () => renames };
   const engine = new SyncEngine({
     app: {}, settings: DEFAULT_SETTINGS, localAdapter: {}, stateDB, configDir: '.obsidian',
     statusBar: {}, webdavFactory: { createClient }, readAppPassword: () => password,
@@ -42,4 +43,14 @@ test('a root response that arrives during a password change does not suppress re
   await expect(engine.shouldReconcileClientPush()).resolves.toEqual({
     kind: 'targeted', rootEtag: 'new-etag', rootFileId: 'root-id',
   });
+});
+
+
+test('a push for a pending rename retries through full sync even with an unchanged vault root', async () => {
+  const scope = JSON.stringify([DEFAULT_SETTINGS.serverUrl, DEFAULT_SETTINGS.username, undefined]);
+  const { engine, connect, getRootInfo } = makeEngine([{ fileId: 'note-id', scope }]);
+  await connect();
+  await expect(engine.shouldReconcileClientPush(['elsewhere'])).resolves.toEqual({ kind: 'ignore' });
+  await expect(engine.shouldReconcileClientPush(['note-id'])).resolves.toEqual({ kind: 'full-sync' });
+  expect(getRootInfo).toHaveBeenCalledTimes(1);
 });

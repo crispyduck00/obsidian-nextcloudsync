@@ -273,8 +273,9 @@ describe('Missing shared folders and concurrent directory changes', () => {
 
   it.each(['sync', 'watch delete', 'watch move'])('keeps every remote child of a protected root during %s', async operation => {
     const note = { ...await listed('Shared/a.md', 'a'), etag: 'revision-a' };
-    const w = world({ listing: [note], dirs: [remoteDir('Shared')], stat: () => note });
-    const h = await buildEngine({}, [], w);
+    const w = world({ listing: [note], dirs: [remoteDir('Shared')], stat: path => path === note.path ? note : null });
+    const vault = operation === 'watch move' ? { 'Moved/a.md': 'a' } : {};
+    const h = await buildEngine(vault as Record<string, string>, operation === 'watch move' ? ['Moved'] : [], w);
     const inspectDirectory = jest.fn(async () => ({ protected: true, fileId: 'dir-Shared' }));
     const moveFile = jest.fn();
     Object.assign(h.client, { inspectDirectory, moveFile });
@@ -286,6 +287,9 @@ describe('Missing shared folders and concurrent directory changes', () => {
     if (operation === 'watch move') {
       await h.engine.renameSingleFile(note.path, 'Moved/a.md');
       await h.engine.renameSingleFolder('Shared', 'Moved');
+      expect(h.engine.getStatusReport().pendingFileRenames).toEqual([expect.objectContaining({
+        source: note.path, destination: 'Moved/a.md',
+      })]);
     }
     expect(inspectDirectory).toHaveBeenCalledWith('Shared');
     expect(h.client.deleteFile).not.toHaveBeenCalled();

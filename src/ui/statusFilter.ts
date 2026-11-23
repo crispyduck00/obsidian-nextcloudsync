@@ -1,12 +1,13 @@
 // Pure filter logic for the Sync Status dialog, kept apart from the view so it is testable without a DOM.
 
-import { SyncErrorDetail, SyncFileOp, SyncHistoryEntry, SyncSessionSummary } from '../types';
+import { PendingFileRename, SyncErrorDetail, SyncFileOp, SyncHistoryEntry, SyncSessionSummary } from '../types';
 
 export interface SyncStatusReport {
   summary: SyncSessionSummary | null;
   conflictedFiles: string[];
   retryFiles: string[];
   history: SyncHistoryEntry[];
+  pendingFileRenames?: readonly PendingFileRename[];
 }
 
 export const ALL_FILTER_OPS: SyncFileOp[] = [
@@ -67,7 +68,7 @@ interface FilteredStatusReport {
 
 // History rows filter by their own op; conflicts follow `conflicted`; the retry queue and session errors follow `error`.
 export function filterReport(report: SyncStatusReport, checked: Set<SyncFileOp>): FilteredStatusReport {
-  const errors = report.summary?.errors ?? [];
+  const errors = report.summary?.errors.filter(error => !error.pendingRename) ?? [];
   return {
     history: report.history.filter(e => isVisible(e.op, checked)),
     conflictedFiles: isVisible('conflicted', checked) ? report.conflictedFiles : [],

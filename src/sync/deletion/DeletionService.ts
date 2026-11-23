@@ -33,6 +33,8 @@ export interface DeletionDeps {
   mergeBase: MergeBaseRecorder;
   transfer: TransferService;
   isSystemExcluded(path: string): boolean;
+  isRenameHeld?(path: string): boolean;
+  hasRenameInFolder?(path: string): boolean;
   dropCleanSnapshot(path: string): void;
   // Registers a path so the vault event this plugin causes is not fed back to the watcher. Required: an
   // unwired no-op here turns a plugin trash back into a server DELETE.
@@ -65,7 +67,7 @@ export class DeletionService {
     const identityChanged = !!base.remoteFileId && !!remote.fileId && remote.fileId !== base.remoteFileId;
     if (serverHash && serverHash === base.localHash && !identityChanged) {
       await this.deps.remoteFolders?.assertRemovalAllowed(client, remote.path, false, summary);
-      if (await this.deps.localAdapter.stat(remote.path)) return 'kept';
+      if (await this.deps.localAdapter.stat(remote.path) || this.deps.isRenameHeld?.(remote.path)) return 'kept';
       void this.deps.logger?.log(`delete-remote: local deletion (server checksum matches base) → ${remote.path}`);
       try {
         if (remote.etag) await client.deleteFile(remote.path, serverHash, remote.etag);
@@ -105,6 +107,7 @@ export class DeletionService {
     // A throw reaches the caller, which keeps the tracking entry: an unanswerable probe must never be read as
     // "gone", or an outage would quietly discard the file's history.
     const remote = await client.statFile(path);
+    if (this.deps.isRenameHeld?.(path)) return 'kept';
     if (!remote) {
       void this.deps.logger?.log(`delete-remote: not on the server (Depth:0 404) — dropping tracking, no DELETE → ${path}`);
       this.deps.journal.recordHistory(path, 'deleted');
@@ -130,6 +133,7 @@ export class DeletionService {
   async processRemoteDeletion(
     path: string, summary: SyncSessionSummary, mode: 'unchanged-file' | 'file' | 'empty-directory' = 'unchanged-file',
   ): Promise<RemoteDeletionOutcome> {
+    if (this.deps.isRenameHeld?.(path)) return { status: 'ignored' };
     // Security boundary at the delete sink: a compromised server could fabricate a deletion for
     // `.obsidian/...`, which would otherwise reach the raw fs remove below. Enforced here for all callers.
     if (!isSafeVaultRelativePath(path) || this.deps.isSystemExcluded(path)) {
@@ -142,6 +146,7 @@ export class DeletionService {
     let removed = false;
     try {
       if (mode === 'empty-directory') {
+        if (this.deps.hasRenameInFolder?.(path)) return { status: 'ignored' };
         if (!(await removeEmptyLocalDirectory(this.deps.app, path, this.deps.markOwnEvent))) {
           return { status: 'failed', message: 'The local folder still contains files or folders.' };
         }

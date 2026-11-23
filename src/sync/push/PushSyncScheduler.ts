@@ -23,7 +23,7 @@ export interface PushSyncSchedulerOptions {
    * false means proven irrelevant, true means conservatively use the ordinary full sync. P2 returns
    * an explicit result so only a positively changed root may enter targeted reconciliation.
    */
-  shouldSync?(): Promise<boolean | ClientPushScopeResult>;
+  shouldSync?(fileIds: readonly string[]): Promise<boolean | ClientPushScopeResult>;
   /** Called only when a push actually starts reconciliation, not while a full sync merely waits. */
   onReconciliationTriggered?(): void;
   /** Optional targeted path added by remote-reconcile; absent keeps the original full-sync behavior. */
@@ -264,7 +264,7 @@ export class PushSyncScheduler {
       let scope: ClientPushScopeResult = { kind: 'full-sync' };
       if (this.opts.shouldSync) {
         try {
-          scope = this.normalizeScope(await this.opts.shouldSync());
+          scope = this.normalizeScope(await this.opts.shouldSync(fileIds));
         } catch (err) {
           // Scope filtering is an optimization. Any failure must preserve the ordinary sync path.
           this.opts.log?.(`push: vault scope check failed — ${this.errorMessage(err)}; reconciling normally`);

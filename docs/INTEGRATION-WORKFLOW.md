@@ -137,6 +137,11 @@ Line History is retained-version provenance rather than Git blame; pruned interm
   - keeps the original Nextcloud folder ID across syncs and holds local work when a folder is replaced at the same path
   - retains remote collections after local deletion, propagates independently verified file deletions, and keeps Watch moves within the selected sync scope
 
+- `fixes/persistent-file-renames`
+  - persists blocked WebDAV file renames per device along with the original Nextcloud file identity
+  - holds both paths through lock, read-only and conflict states. A full sync resumes the conditional MOVE after access returns.
+  - the integration sends relevant Client Push IDs through the full-sync gate even with an unchanged root ETag and keeps the directory identity checks
+
 - `fixes/scoped-version-history`
   - verifies the live vault path and file ID before opening, comparing or restoring versions
   - the integration also uses this verification in the enhanced history and line history views
