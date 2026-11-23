@@ -104,6 +104,7 @@ async function buildEngine(
       Object.keys(vault).map(p => ({ path: p, size: sizeOf(p), mtime: BASE_MTIME }))),
     list: jest.fn(async () => ({ files: [], folders: [] })), // no dot paths in these vaults
     stat: jest.fn(async (p: string) => (p in vault ? { size: sizeOf(p), mtime: BASE_MTIME } : null)),
+    isFile: jest.fn(async (p: string) => Object.hasOwn(vault, p)),
     exists: jest.fn(async (p: string) => p in vault),
     read: jest.fn(async (p: string) => vault[p] ?? ''),
     readBinary: jest.fn(async (p: string) => toBuf(vault[p] ?? '')),

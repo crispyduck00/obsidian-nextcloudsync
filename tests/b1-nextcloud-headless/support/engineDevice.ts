@@ -36,6 +36,7 @@ export function makeDevice(
   vault: FakeVault = new FakeVault(), creationTimeSupport: CreationTimeSupport = 'settable',
   readAppPassword: AppPasswordReader = () => env.appPassword,
 ): Device {
+  vault.seedFolder(PLUGIN_DIR);
   const settings: DavSyncSettings = {
     ...DEFAULT_SETTINGS,
     serverUrl: env.serverUrl,
@@ -68,6 +69,7 @@ export function makeDevice(
     readAppPassword,
     pluginDir: PLUGIN_DIR,
     configDir: CONFIG_DIR,
+    isLocalVaultAvailable: () => localAdapter.isFolder(PLUGIN_DIR),
   } as never);
   return { engine, vault, stateDB, baseStore, cleanSideStore, client, settings, sync: () => engine.syncManual({ manual: true }) };
 }

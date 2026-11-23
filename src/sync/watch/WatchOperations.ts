@@ -364,6 +364,7 @@ export class WatchOperations {
 
   // MKCOL is idempotent (405 swallowed), which also makes it safe against a stray download-created-folder event.
   async createSingleFolder(path: string): Promise<void> {
+    if (this.deps.isRenameHeld?.(path)) return;
     if (this.deps.isSystemExcluded(path) || this.deps.isPluginPath(path)) return;
     if (this.skippedOnCellular('folder-create', path)) return;
     return this.deps.runNonFullSyncOperation(async () => {
@@ -371,6 +372,7 @@ export class WatchOperations {
       this.begin();
       try {
         await assertTrackedParentReadable(conn.client, this.deps.stateDB, path, true);
+        if (this.deps.isRenameHeld?.(path)) return;
         await conn.client.createDirectory(path); // idempotent: existing folder → harmless
         if (!this.deps.stateDB.getDir(path)) this.deps.stateDB.setDir({ path, remoteFileId: null });
         this.deps.stateDB.requestSave(); // coalesced watch-mode save

@@ -41,7 +41,7 @@ async function build() {
   const client = { statFile: jest.fn(async (p: string) => remote.get(p) ?? null) } as unknown as IWebDAVClient;
   const queueFor = (state: StateDB) => new PendingFileRenames({
     state,
-    local: { stat: async path => local.has(path) ? { size: 4, mtime: 1 } : null },
+    local: { isFile: async path => local.has(path) },
     scope: () => settings.scope,
     isExcluded: p => !!settings.excluded && p.startsWith(settings.excluded),
     move,
@@ -90,6 +90,50 @@ describe('persistent file renames', () => {
     expect(h.queue.list()[0].issue).toBe('read-only');
     h.remote.set('Old.md', remoteOriginal);
     await expect(h.queue.retry(h.client)).resolves.toBe(true);
+  });
+
+  it('holds an inferred rename if a peer edits the source after the lock or after app restart', async () => {
+    const h = await build();
+    h.queue.capture('Old.md', 'New.md', 'inferred');
+    h.move.mockRejectedValueOnce(new NetworkError(423, '', 'MOVE'));
+    await h.queue.retry(h.client);
+    expect(h.queue.list()[0].issue).toBe('locked');
+
+    h.remote.set('Old.md', { ...remoteOriginal, checksum: 'peer-edit', etag: 'peer-revision' });
+    const { queue } = await h.restart();
+    await expect(queue.retry(h.client)).resolves.toBe(false);
+    expect(queue.list()[0].issue).toBe('conflict');
+    expect(h.move).toHaveBeenCalledTimes(1);
+    expect(h.remote.has('New.md')).toBe(false);
+  });
+
+  it('holds an older, unproven cross-folder rename saved by RC.3', async () => {
+    const h = await build();
+    const destination = 'Shared/New.md';
+    h.local.add(destination);
+    h.db.setPendingFileRenames([{ source: 'Old.md', destination, scope: h.settings.scope, fileId: original.remoteFileId }]);
+    await h.db.save();
+
+    const { queue } = await h.restart();
+    await expect(queue.retry(h.client)).resolves.toBe(false);
+    expect(queue.list()[0].issue).toBe('conflict');
+    expect(h.move).not.toHaveBeenCalled();
+  });
+
+  it('rechecks the target type after saving and reserves a subtree that now occupies a held path', async () => {
+    const h = await build();
+    h.queue.capture('Old.md', 'New.md');
+    const save = h.db.save.bind(h.db);
+    jest.spyOn(h.db, 'save').mockImplementationOnce(async () => {
+      await save();
+      h.local.delete('New.md');
+    });
+
+    await expect(h.queue.retry(h.client)).resolves.toBe(false);
+    expect(h.queue.list()[0].issue).toBe('local-missing');
+    expect(h.queue.holds('New.md/Local child.md')).toBe(true);
+    expect(h.queue.holds('New.md.bak')).toBe(false);
+    expect(h.move).not.toHaveBeenCalled();
   });
 
   it('keeps both paths on a server denial that is not known to be read-only', async () => {

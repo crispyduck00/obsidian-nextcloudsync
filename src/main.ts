@@ -402,7 +402,7 @@ export default class ObsidianNextcloudsync extends Plugin {
 
           // Hidden/Wi-Fi-blocked renames become structural-dirty instead of replaying a blind MOVE.
           void mobileWatch.runStructural(
-            () => engine.renameSingleFileForMobileWatch(oldPath, newPath),
+            () => engine.syncRememberedFileRenameForMobileWatch(oldPath, newPath),
             `rename file ${oldPath} → ${newPath}`,
           ).then((ran) => {
               if (hadPendingUpload) mobileWatch.queueFile(newPath);
@@ -415,8 +415,7 @@ export default class ObsidianNextcloudsync extends Plugin {
           return;
         }
 
-        // Desktop: preserve the established immediate-rename fix exactly.
-        const renamePromise = engine.renameSingleFile(oldPath, newPath);
+        const renamePromise = engine.syncRememberedFileRename(oldPath, newPath);
         if (hadPendingUpload) {
           void renamePromise.then(
             () => { void engine.syncSingleFile(newPath); },
@@ -901,6 +900,7 @@ export default class ObsidianNextcloudsync extends Plugin {
       },
       pluginDir,
       configDir: this.app.vault.configDir,
+      isLocalVaultAvailable: () => localAdapter.isFolder(pluginDir),
       pluginsAwaitingRestart: this.pluginsAwaitingRestart,
       // Evaluated live from the same settings and host token as the logger, so it follows the logging
       // toggle (docs/spec.md §9.1).

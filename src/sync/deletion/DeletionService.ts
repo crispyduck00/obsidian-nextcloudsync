@@ -24,6 +24,7 @@ export type RemoteDeletionOutcome =
   | { status: 'failed'; message: string };
 
 export interface DeletionDeps {
+  assertLocalVaultAvailable?(): Promise<void>;
   app: App;
   localAdapter: Pick<LocalAdapter, 'readBinary' | 'stat'>;
   isBeingEdited?(path: string): boolean;
@@ -68,6 +69,8 @@ export class DeletionService {
     if (serverHash && serverHash === base.localHash && !identityChanged) {
       await this.deps.remoteFolders?.assertRemovalAllowed(client, remote.path, false, summary);
       if (await this.deps.localAdapter.stat(remote.path) || this.deps.isRenameHeld?.(remote.path)) return 'kept';
+      await this.deps.assertLocalVaultAvailable?.();
+      if (this.deps.isRenameHeld?.(remote.path)) return 'kept';
       void this.deps.logger?.log(`delete-remote: local deletion (server checksum matches base) → ${remote.path}`);
       try {
         if (remote.etag) await client.deleteFile(remote.path, serverHash, remote.etag);

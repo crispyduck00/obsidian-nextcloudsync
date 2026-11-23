@@ -34,7 +34,7 @@ describe('watch rename preserves a pending debounced edit', () => {
       ? handler.slice(handler.indexOf('// Desktop:'))
       : handler;
 
-    const rename = desktop.indexOf('const renamePromise = engine.renameSingleFile(oldPath, newPath);');
+    const rename = desktop.indexOf('const renamePromise = engine.syncRememberedFileRename(oldPath, newPath);');
     const pendingGuard = desktop.indexOf('if (hadPendingUpload)', rename);
     const reconcile = desktop.indexOf('void engine.syncSingleFile(newPath);', pendingGuard);
 

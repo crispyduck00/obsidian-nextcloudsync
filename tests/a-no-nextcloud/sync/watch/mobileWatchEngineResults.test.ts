@@ -71,8 +71,9 @@ describe('SyncEngine mobile watch convergence wrappers', () => {
   it('recognizes a tracked file rename only when StateDB identity moved to the new path', async () => {
     const h = makeHarness();
     h.files.set('old.md', { path: 'old.md' });
+    h.engine.rememberFileRename('old.md', 'new.md');
 
-    await expect(h.engine.renameSingleFileForMobileWatch('old.md', 'new.md')).resolves.toBe(false);
+    await expect(h.engine.syncRememberedFileRenameForMobileWatch('old.md', 'new.md')).resolves.toBe(false);
     expect(h.stateDB.getPendingFileRenames()).toHaveLength(1);
 
     h.watch.renameSingleFile.mockImplementationOnce(async (oldPath, newPath) => {
@@ -80,7 +81,7 @@ describe('SyncEngine mobile watch convergence wrappers', () => {
       h.files.set(newPath, { path: newPath });
       h.stateDB.setPendingFileRenames([]);
     });
-    await expect(h.engine.renameSingleFileForMobileWatch('old.md', 'new.md')).resolves.toBe(true);
+    await expect(h.engine.syncRememberedFileRenameForMobileWatch('old.md', 'new.md')).resolves.toBe(true);
   });
 
   it('treats a restored local file as a converged guarded delete outcome', async () => {

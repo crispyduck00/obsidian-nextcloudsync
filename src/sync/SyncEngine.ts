@@ -108,6 +108,8 @@ interface SyncEngineOptions {
   readAppPassword?: AppPasswordReader;
   pluginDir: string;
   configDir: string;
+  /** The host probes the installed plugin folder inside the vault. */
+  isLocalVaultAvailable?: () => Promise<boolean>;
   // Host-owned predicate for this device's active log files, which must stay out of sync (docs/spec.md §9.1).
   isActiveLogFile?: (path: string) => boolean;
   // True while the user is typing into `path`. Consulted before any REMOTE -> LOCAL write, because writing under the cursor
@@ -264,6 +266,7 @@ export class SyncEngine {
     });
     this.remoteFolders = new RemoteFolderGuard(opts.app, opts.stateDB);
     this.deletion = new DeletionService({
+      assertLocalVaultAvailable: () => this.assertLocalVaultAvailable(),
       isRenameHeld: (p) => this.pendingFileRenames.holds(p),
       hasRenameInFolder: (p) => this.pendingFileRenames.touchesFolder(p),
       app: opts.app,
@@ -321,6 +324,7 @@ export class SyncEngine {
     });
     this.directories = new DirectoryReconciler({
       hasRenameInFolder: (p) => this.pendingFileRenames.touchesFolder(p),
+      isRenameHeld: (p) => this.pendingFileRenames.holds(p),
       app: opts.app,
       stateDB: opts.stateDB,
       journal: this.journal,
@@ -349,10 +353,8 @@ export class SyncEngine {
       connect: () => this.connection(),
       isRenameHeld: (p) => this.pendingFileRenames.holds(p),
       hasRenameInFolder: (p) => this.pendingFileRenames.touchesFolder(p),
-      retryFileRename: (client, source, destination) => {
-        this.rememberFileRename(source, destination);
-        return this.retryPendingFileRenames(client, rename => rename.destination === destination);
-      },
+      retryFileRename: (client, _source, destination) =>
+        this.retryPendingFileRenames(client, rename => rename.destination === destination),
       isBlockedByWifiOnly: () => this.isBlockedByWifiOnly(),
       isSyncRunning: () => this.isSyncRunning(),
       runNonFullSyncOperation: (fn) => this.activityGate.runShared(fn),
@@ -408,6 +410,12 @@ export class SyncEngine {
       connect: async () => (await this.ensureClient()).client,
       logger: opts.logger,
     });
+  }
+
+  private async assertLocalVaultAvailable(): Promise<void> {
+    if (this.opts.isLocalVaultAvailable && !(await this.opts.isLocalVaultAvailable())) {
+      throw new Error('The local vault or plugin folder is unavailable. Reopen the vault and sync again.');
+    }
   }
 
   private getOrCreateRenameTracker(): RenameTracker {
@@ -643,6 +651,7 @@ export class SyncEngine {
 
     let completed = false;
     try {
+      await this.assertLocalVaultAvailable();
       // Connect INSIDE the try: if ensureClient() threw or hung outside it, the finally that clears `running` would be
       // skipped and the engine would balk forever as "already running".
       void this.opts.logger?.log('sync: connecting (ensureClient)');
@@ -863,6 +872,10 @@ export class SyncEngine {
   /** @see WatchOperations.renameSingleFile */
   renameSingleFile(oldPath: string, newPath: string): Promise<void> {
     this.rememberFileRename(oldPath, newPath);
+    return this.syncRememberedFileRename(oldPath, newPath);
+  }
+
+  syncRememberedFileRename(oldPath: string, newPath: string): Promise<void> {
     if (this.isSyncRunning()) return Promise.resolve();
     return this.watch.renameSingleFile(oldPath, newPath);
   }
@@ -872,9 +885,9 @@ export class SyncEngine {
    * identity moved with it. Untracked renames are intentionally conservative: a full reconcile is
    * safer than guessing whether a pre-first-sync/new local file ever existed remotely.
    */
-  async renameSingleFileForMobileWatch(oldPath: string, newPath: string): Promise<boolean> {
+  async syncRememberedFileRenameForMobileWatch(oldPath: string, newPath: string): Promise<boolean> {
     const trackedBefore = this.opts.stateDB.getFile(oldPath);
-    await this.renameSingleFile(oldPath, newPath);
+    await this.syncRememberedFileRename(oldPath, newPath);
     if (!trackedBefore) return false;
     return this.opts.stateDB.getFile(oldPath) == null && this.opts.stateDB.getFile(newPath) != null;
   }
@@ -1311,7 +1324,7 @@ export class SyncEngine {
     }
   }
 
-  /** Recover an unobserved rename only from an unambiguous match to a tracked Nextcloud file. */
+  /** Infer a rename only within one folder and only from an unchanged local file signature. */
   private async inferUnobservedFileRenames(
     remoteFiles: readonly RemoteFileInfo[], isHeld: (path: string) => boolean,
   ): Promise<Set<string>> {
@@ -1326,7 +1339,7 @@ export class SyncEngine {
     for (const file of remoteFiles) {
       if (!file.fileId || localPaths.has(file.path) || !eligible(file.path)) continue;
       const base = this.opts.stateDB.getFile(file.path);
-      if (base?.remoteFileId !== file.fileId || base.size > MAX_HASH_SIZE) continue;
+      if (base?.remoteFileId !== file.fileId || base.localMtime === undefined || base.isConflicted || base.size > MAX_HASH_SIZE) continue;
       const sameSize = missing.get(base.size) ?? [];
       sameSize.push(base);
       missing.set(base.size, sameSize);
@@ -1340,7 +1353,8 @@ export class SyncEngine {
       const bytes = await this.opts.localAdapter.readBinary(file.path).catch(() => null);
       if (!bytes || bytes.byteLength !== file.size) continue;
       const hash = await sha256(bytes);
-      const originals = sameSize.filter(base => base.localHash === hash);
+      const originals = sameSize.filter(base => base.localHash === hash
+        && base.localMtime === file.mtime && parentDirOf(base.path) === parentDirOf(file.path));
       if (originals.length !== 1) continue;
       const source = originals[0].path;
       const destinations = matches.get(source) ?? [];
@@ -1349,7 +1363,7 @@ export class SyncEngine {
     }
     for (const [source, destinations] of matches) {
       if (destinations.length === 1 && !(await this.opts.localAdapter.stat(source))
-        && this.pendingFileRenames.capture(source, destinations[0])) inferred.add(source);
+        && this.pendingFileRenames.capture(source, destinations[0], 'inferred')) inferred.add(source);
     }
     if (inferred.size) await this.opts.stateDB.save();
     return inferred;

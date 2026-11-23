@@ -4,6 +4,9 @@ import type { IWebDAVClient } from '../network/IWebDAVClient';
 import { isSafeVaultRelativePath } from '../network/remotePath';
 import { ConflictError, NetworkError, type FileRenameIssue, type FileState, type PendingFileRename, type RemoteFileInfo } from '../types';
 import { AsyncMutex } from '../util/AsyncMutex';
+import { sha256 } from '../util/hash';
+import { MAX_HASH_SIZE } from '../util/limits';
+import { parentDir } from './policy';
 import { remoteIdOf } from './remoteIdentity';
 
 const issueMessages: Record<FileRenameIssue, string> = {
@@ -24,8 +27,14 @@ function validFilePath(path: string): boolean {
   return !!path && isSafeVaultRelativePath(path);
 }
 
-function touches(rename: PendingFileRename, path: string): boolean {
-  return rename.source === path || rename.destination === path || rename.attemptedDestination === path;
+function within(path: string, root: string): boolean {
+  return path === root || path.startsWith(`${root}/`);
+}
+
+function pathsOf(rename: PendingFileRename): string[] {
+  return rename.attemptedDestination
+    ? [rename.source, rename.destination, rename.attemptedDestination]
+    : [rename.source, rename.destination];
 }
 
 function issueFor(error: unknown): FileRenameIssue {
@@ -38,7 +47,7 @@ function issueFor(error: unknown): FileRenameIssue {
 
 interface RenamePorts {
   state: Pick<StateDB, 'getPendingFileRenames' | 'setPendingFileRenames' | 'getFile' | 'save'>;
-  local: Pick<LocalAdapter, 'stat'>;
+  local: Pick<LocalAdapter, 'isFile'>;
   scope(): string;
   isExcluded(path: string): boolean;
   move(source: string, destination: string, etag: string): Promise<void>;
@@ -57,17 +66,17 @@ export class PendingFileRenames {
   }
 
   holds(path: string): boolean {
-    return this.list().some(rename => touches(rename, path));
+    return this.list().some(rename => pathsOf(rename).some(root => within(path, root)));
   }
 
   touchesFolder(path: string): boolean {
-    const within = (candidate: string | undefined): boolean => !!candidate && (candidate === path || candidate.startsWith(`${path}/`));
-    return this.list().some(rename => within(rename.source) || within(rename.destination) || within(rename.attemptedDestination));
+    return this.list().some(rename => pathsOf(rename).some(candidate => within(candidate, path)));
   }
 
   /** Recording is synchronous so an already-running sync can see the hold at its next write. */
-  capture(oldPath: string, newPath: string): boolean {
+  capture(oldPath: string, newPath: string, origin: 'observed' | 'inferred' = 'observed'): boolean {
     if (oldPath === newPath || !validFilePath(oldPath) || !validFilePath(newPath)) return false;
+    if (origin === 'inferred' && (this.holds(oldPath) || this.holds(newPath))) return false;
     const scope = this.deps.scope();
     const chain = this.list().find(rename => rename.destination === oldPath && rename.scope === scope);
     if (chain) {
@@ -79,7 +88,9 @@ export class PendingFileRenames {
     if (this.holds(oldPath) || this.deps.isExcluded(oldPath) || this.deps.isExcluded(newPath)) return false;
     const base = this.deps.state.getFile(oldPath);
     if (!base) return false;
-    this.deps.state.setPendingFileRenames([...this.list(), { source: oldPath, destination: newPath, scope, fileId: base.remoteFileId }]);
+    const intent: PendingFileRename = { source: oldPath, destination: newPath, scope, fileId: base.remoteFileId };
+    if (origin === 'observed') intent.observed = true;
+    this.deps.state.setPendingFileRenames([...this.list(), intent]);
     return true;
   }
 
@@ -108,12 +119,12 @@ export class PendingFileRenames {
   private async attempt(client: IWebDAVClient, rename: PendingFileRename): Promise<boolean> {
     const { source, destination, attemptedDestination } = rename;
     if (this.current(source) !== rename) return false;
-    if (rename.scope !== this.deps.scope() || [source, destination, attemptedDestination].some(path =>
-      path !== undefined && (!validFilePath(path) || this.deps.isExcluded(path)))) {
+    const paths = pathsOf(rename);
+    if (rename.scope !== this.deps.scope() || paths.some(path => !validFilePath(path) || this.deps.isExcluded(path))) {
       return this.recordIssue(source, 'scope');
     }
-    if (this.list().some(other => other !== rename && (touches(other, source) || touches(other, destination)
-      || (attemptedDestination !== undefined && touches(other, attemptedDestination))))) {
+    if (this.list().some(other => other !== rename && pathsOf(other).some(held =>
+      paths.some(path => within(path, held) || within(held, path))))) {
       return this.recordIssue(source, 'conflict');
     }
     const base = this.deps.state.getFile(source);
@@ -140,21 +151,35 @@ export class PendingFileRenames {
         await this.deps.state.save();
         return false;
       }
-      if (!(await this.deps.local.stat(destination))) return this.recordIssue(source, 'local-missing');
+      if (!(await this.deps.local.isFile(destination))) return this.recordIssue(source, 'local-missing');
       // The absence of all file-change rights is a useful explicit signal. The actual MOVE still decides
       // for mixed permissions and for servers that omit the property.
       if (original.permissions && !/[DNVW]/.test(original.permissions)) return this.recordIssue(source, 'read-only');
+      // A full scan (or an older queue entry with unknown origin) may mistake a delete plus a new
+      // file for a rename. Keep the server file in place if its content or parent no longer match.
+      if (!rename.observed && (parentDir(source) !== parentDir(destination) ||
+          !(await this.hasTrackedContent(client, original, base)))) return this.recordIssue(source, 'conflict');
       if (this.current(source) !== rename || this.deps.isCancelled()) return false;
       const prepared = { ...rename, attemptedDestination: destination };
       this.replace(source, prepared);
       await this.deps.state.save();
+      const localFileExists = await this.deps.local.isFile(destination);
       if (this.current(source) !== prepared || this.deps.isCancelled() || prepared.scope !== this.deps.scope()) return false;
+      if (!localFileExists) return this.recordIssue(source, 'local-missing');
       await this.deps.move(source, destination, original.etag);
       await this.finishMove(prepared, destination, base);
       return true;
     } catch (error) {
       return this.recordIssue(source, issueFor(error));
     }
+  }
+
+  private async hasTrackedContent(client: IWebDAVClient, original: RemoteFileInfo, base: FileState): Promise<boolean> {
+    if (base.isConflicted || original.size !== base.size || base.size > MAX_HASH_SIZE) return false;
+    if (original.checksum) return original.checksum === base.localHash;
+    if (base.idType === 'etag' && original.etag === base.remoteId) return true;
+    const bytes = await client.downloadFile(original.path);
+    return bytes.byteLength === base.size && await sha256(bytes) === base.localHash;
   }
 
   private matchesOriginal(remote: RemoteFileInfo, base: FileState): boolean {
