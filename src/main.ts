@@ -471,7 +471,7 @@ export default class ObsidianNextcloudsync extends Plugin {
       new Notice('Configure the server settings first.');
       return;
     }
-    await this.syncEngine.syncManual({ manual: true });
+    await this.syncEngine.syncManual({ manual: true, refreshRemote: true });
   }
 
   // Desktop-only: on mobile the OS suspends background timers, so the timer is always stopped there.

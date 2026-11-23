@@ -70,11 +70,15 @@ function makeEngine(opts: {
     stat: jest.fn(async () => null),
     exists: jest.fn(async () => false),
     mkdir,
+    rmdir: (p: string, recursive: boolean) => {
+      if (recursive) throw new Error('Recursive removal');
+      return trashFile(new TFolder(p));
+    },
     // The engine registers a trashed subtree here so watch mode does not read the plugin's own vault delete events as user deletions.
     ignore: jest.fn(),
   };
   const localPaths = opts.localDirs ?? [];
-  const trashFile = jest.fn(async () => undefined);
+  const trashFile = jest.fn(async (_folder: TFolder) => undefined);
   const vault = {
     adapter,
     getFiles: () => [],

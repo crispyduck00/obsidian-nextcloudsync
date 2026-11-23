@@ -6,6 +6,7 @@ export class RenameTracker {
   constructor(
     private readonly stateDB: StateDB,
     private readonly client: IWebDAVClient,
+    private readonly beforeMove?: (source: string, destination: string) => Promise<void>,
   ) {}
 
   detectRemoteRenames(remoteFiles: RemoteFileInfo[]): Map<string, string> {
@@ -48,6 +49,7 @@ export class RenameTracker {
 
   async applyLocalRename(oldRemotePath: string, newRemotePath: string): Promise<void> {
     try {
+      await this.beforeMove?.(oldRemotePath, newRemotePath);
       await this.client.moveFile(oldRemotePath, newRemotePath);
       const file = this.stateDB.getFile(oldRemotePath);
       if (file) {

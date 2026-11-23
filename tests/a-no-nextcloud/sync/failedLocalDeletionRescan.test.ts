@@ -24,7 +24,7 @@ function summary(): SyncSessionSummary {
 
 function makeEngine(opts: { present: boolean; trashFails: boolean }) {
   const state: FileState = {
-    path: 'note.md', localHash: 'h', remoteId: 'h', idType: 'sha256', size: 1, mtime: 0,
+    path: 'note.md', localHash: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855', remoteId: 'h', idType: 'sha256', size: 1, mtime: 0,
     remoteFileId: null, isConflicted: false,
   };
   const store = new Map<string, FileState>([[state.path, state]]);
@@ -32,7 +32,7 @@ function makeEngine(opts: { present: boolean; trashFails: boolean }) {
   const trashFile = jest.fn(async () => { if (opts.trashFails) throw new Error('trash failed'); });
   const adapter = {
     stat: jest.fn(async () => null), exists: jest.fn(async () => false), remove: jest.fn(async () => undefined),
-    ignore: jest.fn(),
+    ignore: jest.fn(), readBinary: async () => new ArrayBuffer(0),
   };
   const vault = {
     adapter,

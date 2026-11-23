@@ -16,7 +16,7 @@ export class ChunkedUploadStrategy implements IUploadStrategy {
     // maxFileSizeMB of 0 means unlimited.
     if (isOverFileSizeLimit(data.byteLength, this.config.maxFileSizeMB())) return 'skipped';
 
-    if (sizeMB > this.config.uploadChunkThresholdMB) {
+    if (sizeMB > this.config.uploadChunkThresholdMB && !opts?.ifMatchEtag) {
       try {
         await client.uploadChunked(remotePath, data, CHUNK_SIZE_BYTES, { ...opts, mtime });
         return 'uploaded';

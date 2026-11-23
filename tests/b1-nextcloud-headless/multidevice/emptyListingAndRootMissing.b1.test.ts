@@ -4,8 +4,7 @@
 // `anchor.md` keeps the listing non-empty).
 // INV-13: deleting the LAST tracked file on one device reaches the other (an empty listing must not be skipped
 // wholesale, or the root-ETag short-circuit rebuilds the file from State).
-// INV-14: deleting the vault FOLDER on the server is repaired, not obeyed: the folder comes back and the vault is
-// re-uploaded from local; nothing is trashed locally.
+// INV-14: deleting the established Nextcloud vault root stops sync and preserves local files and tracking.
 import { describeLive } from '../support/env';
 import { setupWorkspace } from '../support/workspace';
 import { cleanupWorkspace, IsolatedWorkspace } from '../support/isolation';
@@ -47,7 +46,16 @@ describeLive('Layer B — empty listing and a missing vault folder', (getEnv) =>
     expect(m.vault.localExists('only.md')).toBe(false);
   }, 180_000);
 
-  it('INV-14 [SPEC:VRR-B1-1] a vault folder deleted on the server is re-created and re-seeded from local', async () => {
+  it('creates the remote root for a genuinely new vault on the first sync', async () => {
+    const d = makeDevice(getEnv(), `${ws.remoteBase}/new-vault`, 'fresh-root');
+    await expect(d.client.getFiles('')).rejects.toThrow(RemoteRootMissingError);
+    d.vault.seedLocal('first.md', 'created on first sync\n');
+    await d.sync();
+    expect(await remoteExists('new-vault/first.md')).toBe(true);
+    expect(d.engine.getLastSessionSummary()?.errorCount).toBe(0);
+  });
+
+  it('INV-14 [SPEC:VRR-B1-1] a disappeared Nextcloud vault root stops sync with its local files and baseline intact', async () => {
     const d = dev('inv14-D');
     d.vault.seedLocal('a.md', 'alpha\n');
     d.vault.seedLocal('sub/b.md', 'bravo\n');
@@ -61,19 +69,15 @@ describeLive('Layer B — empty listing and a missing vault folder', (getEnv) =>
     await baseClient.deleteFile('', '');
     await expect(baseClient.getFiles('')).rejects.toThrow(RemoteRootMissingError);
 
+    const baseline = d.stateDB.getAllFiles();
     await d.sync();
-
-    // Restored on the server: files, the subfolder, and the deliberately empty folder.
-    expect(await remoteExists('a.md')).toBe(true);
-    expect(await remoteExists('sub/b.md')).toBe(true);
-    expect(await remoteExists('empty')).toBe(true);
-    // Untouched locally — a missing folder is never read as "everything was deleted".
+    await expect(baseClient.getFiles('')).rejects.toThrow(RemoteRootMissingError);
+    expect(d.stateDB.getAllFiles()).toEqual(baseline);
+    expect(d.engine.getLastSessionSummary()).toMatchObject({ uploadedCount: 0, deletedCount: 0, errorCount: 1 });
     expect(d.vault.localExists('a.md')).toBe(true);
     expect(d.vault.readLocal('sub/b.md')).toBe('bravo\n');
-
-    // And it converges: the re-seed leaves State agreeing with the remote, so the next sync is a no-op.
     await d.sync();
-    expect(await remoteExists('a.md')).toBe(true);
+    await expect(baseClient.getFiles('')).rejects.toThrow(RemoteRootMissingError);
     expect(d.vault.localExists('a.md')).toBe(true);
   }, 240_000);
 });

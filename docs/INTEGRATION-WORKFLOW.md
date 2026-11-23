@@ -130,6 +130,15 @@ Line History is retained-version provenance rather than Git blame; pruned interm
 - `fixes/oversize-root-etag`
   - keeps the remote metadata of size-skipped paths available during the root-ETag short circuit
 
+- `fixes/guarded-folder-reconciliation`
+  - verifies protected collections and child operations, preserves pending edits when a folder becomes invisible, and bounds local removal
+  - checks live revision preconditions before shared writes and keeps an established Nextcloud root from being silently created again
+  - refreshes the remote listing on explicit Sync now, including permission changes with an unchanged root ETag
+
+- `fixes/scoped-version-history`
+  - verifies the live vault path and file ID before opening, comparing or restoring versions
+  - the integration also uses this verification in the enhanced history and line history views
+
 ## Superseded topics
 
 Upstream 1.0.13 already covers `fixes/mirror-empty-remote-directories` and `fixes/mirror-state-persistence`. They are retained in the 0.1.1 archive and are not re-applied as duplicate changes. Their former Draft PRs document the supersession.

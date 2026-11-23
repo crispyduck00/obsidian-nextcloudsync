@@ -300,7 +300,7 @@ describe('VersionService', () => {
         calls.downloaded.push(path);
         return new TextEncoder().encode('restored body').buffer;
       },
-      statFile: async () => null,
+      statFile: async (path: string) => ({ path, fileId: tracked?.remoteFileId, lastModified: 0, etag: 'live' }),
     } as unknown as IWebDAVClient;
     const service = new VersionService({
       localAdapter: {
@@ -325,7 +325,7 @@ describe('VersionService', () => {
 
   it('lists versions by the file id the state DB recorded', async () => {
     const { service, client, calls } = build(tracked('fid-7'));
-    expect(await service.listVersions(client, NEXTCLOUD, 'note.md')).toEqual([version]);
+    expect(await service.listVersions(client, NEXTCLOUD, 'note.md')).toEqual([{ ...version, sourceFileId: 'fid-7' }]);
     expect(calls.listed).toEqual(['fid-7']);
   });
 

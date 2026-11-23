@@ -310,7 +310,7 @@ describe('SyncEngine.processRemoteDeletion — out-of-scope safety', () => {
     };
     // getAllFiles/getAllDirs/deleteDir: the deletion sink forgets a trashed folder's whole subtree, so it
     // enumerates tracking even for a plain file path (where it finds nothing).
-    const stateDB = { deleteFile, getAllFiles: () => [], getAllDirs: () => [], deleteDir: jest.fn() };
+    const stateDB = { deleteFile, getFile: () => ({ localHash: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855' }), getAllFiles: () => [], getAllDirs: () => [], deleteDir: jest.fn() };
     const bookmarks = opts.bookmarks ?? false;
     const settings = {
       configDir: '.obsidian',
@@ -319,7 +319,7 @@ describe('SyncEngine.processRemoteDeletion — out-of-scope safety', () => {
     } as unknown;
     const engineOpts = {
       app, settings, stateDB, configDir: '.obsidian',
-      localAdapter: {}, statusBar: {}, webdavFactory: {}, pluginDir: '.obsidian/plugins/nextcloud-sync',
+      localAdapter: { readBinary: async () => new ArrayBuffer(0), ignore: jest.fn() }, statusBar: {}, webdavFactory: {}, pluginDir: '.obsidian/plugins/nextcloud-sync',
     };
     const engine = new SyncEngine(engineOpts as never);
     const invoke = (path: string, summary: SyncSessionSummary) =>

@@ -54,6 +54,7 @@ function build(over: Partial<MirrorDeps> = {}, tracked: FileState[] = []) {
   let total = 0;
 
   const client = {
+    remoteExists: async () => false,
     getFiles: async () => [] as RemoteFileInfo[],
     recalcChecksum: async () => null,
     getDirectories: async () => [],

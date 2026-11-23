@@ -200,6 +200,8 @@ export interface SyncState {
   lastSyncTime: number;
   syncToken: string | null;
   files: Record<string, FileState>;
+  /** The configured Nextcloud root has been listed successfully, even if it was empty. */
+  remoteRootObserved?: boolean;
   /** Absent in older state files; treated as {}. */
   directories?: Record<string, DirState>;
   /** Legacy root ETag, discarded on load because older clients could omit size-skipped files. */
@@ -431,6 +433,8 @@ export type LoginFlowResult =
 export interface FileVersion {
   /** Trailing identifier of versions/{fileId}/{versionId}. */
   versionId: string;
+  /** File identity the version chooser was opened for. */
+  sourceFileId?: string;
   /** Remote path used for GET/MOVE (the versions namespace, separate from the files root). */
   href: string;
   /** Last modified (epoch milliseconds). */

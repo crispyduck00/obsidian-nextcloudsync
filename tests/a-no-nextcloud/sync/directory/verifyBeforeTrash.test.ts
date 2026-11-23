@@ -34,7 +34,7 @@ function build(exists: boolean | (() => Promise<boolean>)) {
   const deps: DirectoryDeps = {
     app: {
       vault: {
-        adapter: { mkdir: async () => undefined },
+        adapter: { list: async () => ({ files: [], folders: [] }), rmdir: async (p: string) => { calls.trash.push(p); } },
         getAllFolders: () => [new TFolder('Projects/New')],
         getAbstractFileByPath: (p: string) => (p === 'Projects/New' ? new TFolder(p) : null),
       },

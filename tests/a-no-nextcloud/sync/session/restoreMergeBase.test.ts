@@ -57,10 +57,28 @@ it('rejects a path replaced by another file ID during Restore', async () => {
   const local = makeLocalAdapter({ [path]: 'local edit' });
   const { stateDB } = await buildEngine(local, {});
   stateDB.setFile({ path, remoteFileId: 'fid' } as never);
-  const client = { restoreVersion: async () => undefined, statFile: async () => remoteOf(path, 'other', { fileId: 'replacement' }), downloadFile: jest.fn() };
+  const client = { restoreVersion: jest.fn(), statFile: async () => remoteOf(path, 'other', { fileId: 'replacement' }), downloadFile: jest.fn() };
   await expect(new VersionService({ localAdapter: local, stateDB }).restoreVersion(client as never, features as never, path, {} as never)).rejects.toThrow();
   expect(client.downloadFile).not.toHaveBeenCalled();
+  expect(client.restoreVersion).not.toHaveBeenCalled();
   expect(local.files[path]).toBe('local edit');
+});
+
+it('rejects version access from a stale picker after the replacement itself was synced', async () => {
+  const local = makeLocalAdapter({ [path]: 'replacement' });
+  const { stateDB } = await buildEngine(local, {});
+  stateDB.setFile({ path, remoteFileId: 'replacement' } as never);
+  const client = {
+    statFile: async () => remoteOf(path, 'replacement', { fileId: 'replacement' }),
+    restoreVersion: jest.fn(),
+    getVersionContent: jest.fn(),
+  };
+  const service = new VersionService({ localAdapter: local, stateDB, isTextEligible: () => true });
+  const oldVersion = { sourceFileId: 'previous' } as never;
+  await expect(service.restoreVersion(client as never, features as never, path, oldVersion)).rejects.toThrow('path has changed');
+  await expect(service.readVersionText(client as never, features as never, path, oldVersion)).rejects.toThrow('path has changed');
+  expect(client.restoreVersion).not.toHaveBeenCalled();
+  expect(client.getVersionContent).not.toHaveBeenCalled();
 });
 
 it('does not report success when the restored base cannot be persisted', async () => {

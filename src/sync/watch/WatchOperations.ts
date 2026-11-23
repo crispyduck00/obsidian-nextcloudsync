@@ -29,6 +29,7 @@ import { isLocallyUnchanged } from '../policy';
 import { FileLogger } from '../../util/FileLogger';
 import { sha256 } from '../../util/hash';
 import { AsyncMutex } from '../../util/AsyncMutex';
+import { assertTrackedParentReadable, type RemoteFolderGuard } from '../directory/RemoteFolderGuard';
 
 // Operation names used in the "skipped on cellular" log line.
 type WatchOpName = 'sync' | 'delete' | 'rename' | 'folder-create' | 'folder-delete' | 'folder-rename';
@@ -50,6 +51,7 @@ export interface WatchDeps {
   mergeBase: MergeBaseRecorder;
   transfer: TransferService;
   deletion: DeletionService;
+  remoteFolders?: RemoteFolderGuard;
   resolution: Pick<ResolutionService, 'dropCleanSnapshot'>;
   isSystemExcluded(path: string): boolean;
   // Plugin files sync only in full runs; watch mode never handles them.
@@ -254,14 +256,16 @@ export class WatchOperations {
         void this.deps.logger?.log(`watch: remote state fetched → classifying ${path}`);
         await this.deps.processFile(remote, summary);
       } else {
+        if (base) throw new Error('The remote file is missing or inaccessible. Local changes were kept.');
+        await assertTrackedParentReadable(conn.client, this.deps.stateDB, path);
         // Not on the server at all: a plain create. If-Match against a non-existent resource always fails,
         // so keep the synthetic null etag.
         void this.deps.logger?.log(`watch: not on remote → upload as new ${path}`);
         await this.deps.transfer.uploadFile(
           conn.client, conn.uploadStrategy,
-          path, localHash, base?.remoteId ?? localHash, base?.idType ?? 'sha256',
-          { path, fileId: base?.remoteFileId ?? null, checksum: null, etag: null, size: stat.size, lastModified: stat.mtime, creationTime: 0 },
-          summary,
+          path, localHash, localHash, 'sha256',
+          { path, fileId: null, checksum: null, etag: null, size: stat.size, lastModified: stat.mtime, creationTime: 0 },
+          summary, true,
         );
       }
       // Coalesced via a trailing debounce so rapid edits do not each rewrite the state file; onunload flushes it.
@@ -358,8 +362,9 @@ export class WatchOperations {
       const conn = await this.deps.connect();
       this.begin();
       try {
+        await assertTrackedParentReadable(conn.client, this.deps.stateDB, path, true);
         await conn.client.createDirectory(path); // idempotent: existing folder → harmless
-        this.deps.stateDB.setDir({ path, remoteFileId: null });
+        if (!this.deps.stateDB.getDir(path)) this.deps.stateDB.setDir({ path, remoteFileId: null });
         this.deps.stateDB.requestSave(); // coalesced watch-mode save
         void this.deps.logger?.log(`watch: folder created → MKCOL ${path}`);
       } catch (err) {
@@ -388,6 +393,7 @@ export class WatchOperations {
       let succeeded = false;
       let token: string | null = null;
       try {
+        await this.deps.remoteFolders?.assertRemovalAllowed(conn.client, path, true);
         // A collection DELETE is recursive. Match full-sync safety: lock when available and prove the
         // live remote directory is empty before deleting it. If another device added anything since
         // our baseline, keep tracking and let the next full reconciliation decide instead.
@@ -422,6 +428,8 @@ export class WatchOperations {
       const conn = await this.deps.connect();
       this.begin();
       try {
+        await this.deps.remoteFolders?.assertRemovalAllowed(conn.client, oldPath, true);
+        await assertTrackedParentReadable(conn.client, this.deps.stateDB, newPath);
         await conn.client.moveFile(oldPath, newPath); // MOVE works for collections too
         this.deps.stateDB.deleteDir(oldPath);
         this.deps.stateDB.setDir({ path: newPath, remoteFileId: null });

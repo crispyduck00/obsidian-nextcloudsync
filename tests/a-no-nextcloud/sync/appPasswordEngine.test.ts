@@ -16,13 +16,16 @@ type EngineInternals = { ensureClient(): Promise<unknown>; client: unknown };
 
 const PASSWORD_ERROR = 'App password not found in credentials';
 
-// Every method rejects: a stub client is never expected to serve a request. Only 'then' (so that awaiting it works) and
-// LABEL are answered. A stub client must never reach a jest matcher: pretty-format probes unknown properties such as
+// DAV requests reject, and the stub omits the optional root-creation policy. A stub client must never reach a
+// jest matcher: pretty-format probes unknown properties such as
 // hasAttribute() and would call into the stub, whose unhandled rejection kills the jest worker. Tests compare clients
 // through idOf() instead.
 const LABEL = Symbol('label');
 const stubClient = (label: string): object => new Proxy({}, {
-  get: (_t, prop) => (prop === 'then' ? undefined : prop === LABEL ? label : async () => { throw new Error('stub client'); }),
+  get: (_t, prop) => {
+    if (prop === 'then' || prop === 'requireExistingVaultRoot') return undefined;
+    return prop === LABEL ? label : async () => { throw new Error('stub client'); };
+  },
 });
 const idOf = (client: unknown): string | null => (client === null ? null : String((client as Record<symbol, unknown>)[LABEL]));
 
@@ -56,6 +59,7 @@ describe('SyncEngine — the app password is read for every sync', () => {
         countConflicted: jest.fn(() => 0),
         getSyncToken: jest.fn(() => null),
         getAllFiles: jest.fn(() => []),
+        getAllDirs: jest.fn(() => []),
         // Called right after the connection (invalidateRootEtagOnScopeChange).
         getSyncScopeFingerprint: jest.fn(() => null),
         setSyncScopeFingerprint: jest.fn(),

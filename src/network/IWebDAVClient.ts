@@ -7,6 +7,11 @@ export interface RemoteRootInfo {
   fileId: string | null;
 }
 
+export interface RemoteDirectoryInspection {
+  protected: boolean;
+  fileId: string | null;
+}
+
 export interface IWebDAVClient {
   connect(): Promise<NextcloudFeatures>;
   /**
@@ -44,6 +49,8 @@ export interface IWebDAVClient {
    * parsed as a listing throws RemoteListingUnreadableError rather than resolving to [].
    */
   getDirectories(path: string): Promise<RemoteDirInfo[]>;
+  /** Account DAV can inspect a collection, including mount and app protection. */
+  inspectDirectory?(path: string, includeDescendants?: boolean): Promise<RemoteDirectoryInspection | null>;
   /**
    * True iff the collection at `path` has no children (one Depth:1 probe). Data-loss guard before
    * {@link deleteCollection}. An unreadable body resolves to false.
@@ -51,6 +58,8 @@ export interface IWebDAVClient {
   isRemoteDirEmpty(path: string): Promise<boolean>;
   /** Creates a directory and any missing ancestors via MKCOL; an existing collection is fine. */
   createDirectory(path: string): Promise<void>;
+  /** Restrict automatic MKCOLs to children of an established vault root. */
+  requireExistingVaultRoot?(required: boolean): void;
   /**
    * Creates the vault folder (sync root) and reports whether it had to be created. Missing ancestors
    * are created best-effort; only the vault folder itself is judged (docs/spec.md §5.2).
@@ -72,13 +81,14 @@ export interface IWebDAVClient {
    * @param mtime ms epoch; sent as X-OC-MTime so Nextcloud preserves the timestamp.
    * @param opts.precomputedSha256 reused for the OC-Checksum header instead of re-hashing.
    * @param opts.ifMatchEtag sent as `If-Match`; a changed remote yields 412 (PreconditionFailedError).
+   * @param opts.expectedRemoteChecksum verifies the current Nextcloud body before a conditional write.
    */
   uploadFile(
     remotePath: string, data: ArrayBuffer, mtime?: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; ctime?: number },
+    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; expectedRemoteChecksum?: string; onlyIfAbsent?: boolean; ctime?: number },
   ): Promise<void>;
   moveFile(oldPath: string, newPath: string): Promise<void>;
-  deleteFile(path: string, expectedRemoteId: string): Promise<void>;
+  deleteFile(path: string, expectedRemoteId: string, ifMatchEtag?: string): Promise<void>;
   getSyncToken(): Promise<string | null>;
   /**
    * Existence check for one remote path (PROPFIND Depth 0). False only on a definitive 404;
@@ -97,15 +107,15 @@ export interface IWebDAVClient {
   /** Retrieves the content of the given version. */
   getVersionContent(version: FileVersion, fileId: string): Promise<ArrayBuffer>;
   /** Restores the given version as the current file (MOVE restore). */
-  restoreVersion(version: FileVersion, fileId: string): Promise<void>;
+  restoreVersion(version: FileVersion, fileId: string, target?: { path: string; etag: string }): Promise<void>;
 
   /**
    * Uploads in chunks; the file appears atomically at the final path.
-   * @param opts `ifMatchEtag` is applied to the assembling MOVE, so a changed remote yields 412 (PreconditionFailedError) as in {@link uploadFile}.
+   * @param opts An `ifMatchEtag` uses a single conditional PUT so it is evaluated on the actual file.
    */
   uploadChunked(
     remotePath: string, data: ArrayBuffer, chunkSizeBytes: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; mtime?: number; ctime?: number },
+    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; expectedRemoteChecksum?: string; onlyIfAbsent?: boolean; mtime?: number; ctime?: number },
   ): Promise<void>;
 
   /**

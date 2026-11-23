@@ -89,6 +89,7 @@ function build(o: Opts = {}, over: Partial<DeletionDeps> = {}) {
   } as unknown as IWebDAVClient;
 
   const deps: DeletionDeps = {
+    localAdapter: { stat: async () => null, readBinary: async () => new ArrayBuffer(0) },
     app: {
       vault: {
         getAbstractFileByPath: (p: string) => {
@@ -100,6 +101,12 @@ function build(o: Opts = {}, over: Partial<DeletionDeps> = {}) {
         adapter: {
           exists: async (p: string) => o.adapterPaths?.includes(p) === true,
           remove: async (p: string) => { calls.adapterRemoved.push(p); },
+          list: async () => ({ files: [], folders: [] }),
+          rmdir: async (p: string, recursive: boolean) => {
+            if (recursive || o.trashFails) throw new Error('EACCES');
+            calls.trashed.push(p);
+            calls.order.push(`trash:${p}`);
+          },
         },
       },
       fileManager: {
@@ -238,7 +245,7 @@ describe('DeletionService.processRemoteDeletion — applying it locally', () => 
   it('routes a vault-tracked file through the user\'s own deletion setting', async () => {
     const { deletion, calls } = build({ vaultFiles: { 'note.md': 'file' } });
     const s = summary();
-    await deletion.processRemoteDeletion('note.md', s);
+    await deletion.processRemoteDeletion('note.md', s, 'file');
     expect(calls.trashed).toEqual(['note.md']);
     expect(calls.adapterRemoved).toEqual([]); // never a raw remove for tracked content
     expect(s.downloadedCount).toBe(1);
@@ -249,13 +256,13 @@ describe('DeletionService.processRemoteDeletion — applying it locally', () => 
 
   it('handles a folder the same way', async () => {
     const { deletion, calls } = build({ vaultFiles: { Folder: 'folder' } });
-    await deletion.processRemoteDeletion('Folder', summary());
+    await deletion.processRemoteDeletion('Folder', summary(), 'empty-directory');
     expect(calls.trashed).toEqual(['Folder']);
   });
 
   it('removes a config dotfile directly, since the vault does not track it', async () => {
     const { deletion, calls } = build({ adapterPaths: ['.obsidian/bookmarks.json'] });
-    await deletion.processRemoteDeletion('.obsidian/bookmarks.json', summary());
+    await deletion.processRemoteDeletion('.obsidian/bookmarks.json', summary(), 'file');
     expect(calls.adapterRemoved).toEqual(['.obsidian/bookmarks.json']);
     expect(calls.stateDeletes).toEqual(['.obsidian/bookmarks.json']);
   });
@@ -263,7 +270,7 @@ describe('DeletionService.processRemoteDeletion — applying it locally', () => 
   it('still cleans up state for a file that is already gone locally', async () => {
     const { deletion, calls } = build({ vaultFiles: {}, adapterPaths: [] });
     const s = summary();
-    await deletion.processRemoteDeletion('note.md', s);
+    await deletion.processRemoteDeletion('note.md', s, 'file');
     expect(calls.trashed).toEqual([]);
     expect(calls.adapterRemoved).toEqual([]);
     expect(s.downloadedCount).toBe(0); // nothing was deleted, so nothing is counted
@@ -272,7 +279,7 @@ describe('DeletionService.processRemoteDeletion — applying it locally', () => 
 
   it('keeps the state entry when the deletion fails, so the next sync retries', async () => {
     const { deletion, calls } = build({ vaultFiles: { 'note.md': 'file' }, trashFails: true });
-    await deletion.processRemoteDeletion('note.md', summary());
+    await deletion.processRemoteDeletion('note.md', summary(), 'file');
     expect(calls.stateDeletes).toEqual([]);
     expect(calls.droppedBase).toEqual([]);
     expect(Notice.instances).toHaveLength(1); // and the user is told
@@ -280,7 +287,7 @@ describe('DeletionService.processRemoteDeletion — applying it locally', () => 
 
   it('does not abort the session for one failed deletion', async () => {
     const { deletion } = build({ vaultFiles: { 'note.md': 'file' }, trashFails: true });
-    await expect(deletion.processRemoteDeletion('note.md', summary())).resolves.toEqual({ status: 'failed', message: expect.any(String) });
+    await expect(deletion.processRemoteDeletion('note.md', summary(), 'file')).resolves.toEqual({ status: 'failed', message: expect.any(String) });
   });
 });
 
@@ -289,23 +296,23 @@ describe('[SPEC:MDF-1] DeletionService.processRemoteDeletion — the reported ou
 
   it('reports deleted for a vault-tracked file', async () => {
     const { deletion } = build({ vaultFiles: { 'note.md': 'file' } });
-    await expect(deletion.processRemoteDeletion('note.md', summary())).resolves.toEqual({ status: 'deleted' });
+    await expect(deletion.processRemoteDeletion('note.md', summary(), 'file')).resolves.toEqual({ status: 'deleted' });
   });
 
   it('reports deleted for a vault-tracked folder', async () => {
     const { deletion } = build({ vaultFiles: { Folder: 'folder' } });
-    await expect(deletion.processRemoteDeletion('Folder', summary())).resolves.toEqual({ status: 'deleted' });
+    await expect(deletion.processRemoteDeletion('Folder', summary(), 'empty-directory')).resolves.toEqual({ status: 'deleted' });
   });
 
   it('reports deleted for a config dotfile removed through the adapter', async () => {
     const { deletion } = build({ adapterPaths: ['.obsidian/bookmarks.json'] });
-    await expect(deletion.processRemoteDeletion('.obsidian/bookmarks.json', summary()))
+    await expect(deletion.processRemoteDeletion('.obsidian/bookmarks.json', summary(), 'file'))
       .resolves.toEqual({ status: 'deleted' });
   });
 
   it('reports absent when nothing is there locally', async () => {
     const { deletion } = build({ vaultFiles: {}, adapterPaths: [] });
-    await expect(deletion.processRemoteDeletion('note.md', summary())).resolves.toEqual({ status: 'absent' });
+    await expect(deletion.processRemoteDeletion('note.md', summary(), 'file')).resolves.toEqual({ status: 'absent' });
   });
 
   it('reports ignored for a path outside sync scope', async () => {
@@ -319,7 +326,7 @@ describe('[SPEC:MDF-1] DeletionService.processRemoteDeletion — the reported ou
 
   it('reports failed with a message when the trash fails, keeping state and notifying once', async () => {
     const { deletion, calls } = build({ vaultFiles: { 'note.md': 'file' }, trashFails: true });
-    const outcome = await deletion.processRemoteDeletion('note.md', summary());
+    const outcome = await deletion.processRemoteDeletion('note.md', summary(), 'file');
     expect(outcome.status).toBe('failed');
     if (outcome.status === 'failed') expect(outcome.message.length).toBeGreaterThan(0);
     expect(Notice.instances).toHaveLength(1);

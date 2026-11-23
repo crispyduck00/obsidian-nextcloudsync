@@ -75,7 +75,16 @@ function build(world: Partial<World> = {}, over: Partial<DirectoryDeps> = {}) {
   const deps: DirectoryDeps = {
     app: {
       vault: {
-        adapter: { mkdir: async (p: string) => { calls.mkdir.push(p); } },
+        adapter: {
+          exists: async (p: string) => w.local.includes(p),
+          mkdir: async (p: string) => { calls.mkdir.push(p); },
+          list: async () => ({ files: [], folders: [] }),
+          rmdir: async (p: string, recursive: boolean) => {
+            if (recursive) throw new Error('Recursive removal');
+            calls.trash.push(p);
+            calls.order.push(`trash:${p}`);
+          },
+        },
         getAllFolders: () => w.local.map((p) => new TFolder(p)),
         getAbstractFileByPath: (p: string) => (w.local.includes(p) ? new TFolder(p) : null),
       },
@@ -442,7 +451,10 @@ describe('[SPEC:DTV-3] DirectoryReconciler.reconcileDirectories — a plugin tra
     }, {
       app: {
         vault: {
-          adapter: { mkdir: async () => undefined },
+          adapter: {
+            list: async () => ({ files: [], folders: [] }),
+            rmdir: async () => { throw new Error('EACCES'); },
+          },
           getAllFolders: () => [new TFolder('F')],
           getAbstractFileByPath: () => new TFolder('F'),
         },
@@ -463,7 +475,7 @@ describe('[SPEC:DTV-3] DirectoryReconciler.reconcileDirectories — a plugin tra
   // the folder and every file under it, and nothing says those arrive after this method finishes —
   // watch mode could act on them first. So the paths are registered as the plugin's own doing
   // BEFORE the trash, which is the same mechanism downloads already use to avoid an upload loop.
-  it('[SPEC:GDP-6] registers the subtree as its own vault event before trashing, not after', async () => {
+  it('[SPEC:GDP-6] registers the empty folder as its own vault event before removal', async () => {
     const { reconciler, client, calls } = build({
       local: ['F'],
       tracked: [{ path: 'F', remoteFileId: null }],
@@ -472,11 +484,9 @@ describe('[SPEC:DTV-3] DirectoryReconciler.reconcileDirectories — a plugin tra
 
     await reconciler.reconcileDirectories(client, summary());
 
-    expect(calls.markOwnEvent.sort()).toEqual(['F', 'F/a.md', 'F/sub/b.md']);
+    expect(calls.markOwnEvent).toEqual(['F']);
     expect(calls.order.indexOf('trash:F')).toBe(calls.order.length - 1);
-    expect(calls.order.slice(0, -1)).toEqual(
-      expect.arrayContaining(['ignore:F', 'ignore:F/a.md', 'ignore:F/sub/b.md']),
-    );
+    expect(calls.order).toEqual(['ignore:F', 'trash:F']);
   });
 
   // The verify-before-trash gate in front of all of this must stay shut: absence from the listing is

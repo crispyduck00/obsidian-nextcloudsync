@@ -27,6 +27,7 @@ import type { CleanSideStore } from '../data/CleanSideStore';
 import type { CleanSideMetrics } from '../ui/compareResolution';
 import {
   parentDir as parentDirOf,
+  ancestorMatching,
   isTextEligible,
   isLocallyUnchanged as isLocallyUnchangedPure,
   isSystemExcluded as isSystemExcludedPure,
@@ -47,6 +48,7 @@ import { ResolutionService } from './resolution/ResolutionService';
 import { ConflictApplier } from './conflict/ConflictApplier';
 import { hasCompleteMarkerSet } from './ConflictResolver';
 import { DirectoryReconciler } from './directory/DirectoryReconciler';
+import { RemoteFolderGuard, assertTrackedParentReadable } from './directory/RemoteFolderGuard';
 import { WatchOperations } from './watch/WatchOperations';
 import { SyncActivityGate } from './SyncActivityGate';
 import { RemotePushReconciler, type RemoteBatchReconcileResult, type RemotePushBatch } from './push/RemotePushReconciler';
@@ -148,6 +150,7 @@ export class SyncEngine {
   private readonly conflicts: ConflictApplier;
 
   private readonly directories: DirectoryReconciler;
+  private readonly remoteFolders: RemoteFolderGuard;
 
   private readonly watch: WatchOperations;
   /** Shared/exclusive gate: lightweight path operations may overlap each other, never a full sync. */
@@ -245,8 +248,12 @@ export class SyncEngine {
       isTextEligible: (path) => path.toLowerCase().endsWith('.md')
         || isTextEligible(path, this.opts.settings.autoMergeFileTypes),
     });
+    this.remoteFolders = new RemoteFolderGuard(opts.app, opts.stateDB);
     this.deletion = new DeletionService({
       app: opts.app,
+      localAdapter: opts.localAdapter,
+      isBeingEdited: opts.isBeingEdited,
+      remoteFolders: this.remoteFolders,
       stateDB: opts.stateDB,
       journal: this.journal,
       mergeBase: this.mergeBase,
@@ -305,6 +312,7 @@ export class SyncEngine {
       markOwnEvent: (p) => this.opts.localAdapter.ignore(p),
       isSystemExcluded: (p) => this.isSystemExcluded(p),
       massDeleteLimit: () => this.opts.settings.massDeleteLimit,
+      remoteFolders: this.remoteFolders,
       isCancelled: () => this.cancelled,
       logger: opts.logger,
     });
@@ -317,6 +325,7 @@ export class SyncEngine {
       mergeBase: this.mergeBase,
       transfer: this.transfer,
       deletion: this.deletion,
+      remoteFolders: this.remoteFolders,
       resolution: this.resolution,
       isSystemExcluded: (p) => this.isSystemExcluded(p),
       isPluginPath: (p) => this.plugins.isPluginPath(p),
@@ -380,7 +389,11 @@ export class SyncEngine {
 
   private getOrCreateRenameTracker(): RenameTracker {
     if (!this.renameTracker) {
-      this.renameTracker = new RenameTracker(this.opts.stateDB, this.client!);
+      const client = this.client!;
+      this.renameTracker = new RenameTracker(this.opts.stateDB, client, async (source, destination) => {
+        await this.remoteFolders.assertRemovalAllowed(client, source);
+        await assertTrackedParentReadable(client, this.opts.stateDB, destination);
+      });
     }
     return this.renameTracker;
   }
@@ -426,6 +439,10 @@ export class SyncEngine {
         ? new ChunkedUploadStrategy(uploadConfig)
         : new SimpleUploadStrategy(uploadConfig);
       this.opts.onFeatures?.(features);
+    }
+    if (this.client.requireExistingVaultRoot) {
+      if (this.opts.stateDB.hasObservedRemoteRoot()) this.rememberRemoteRoot(this.client);
+      else this.client.requireExistingVaultRoot(false);
     }
     return { client: this.client, features: this.features };
   }
@@ -497,7 +514,7 @@ export class SyncEngine {
     return !read || (password !== null && read() === password);
   }
 
-  async syncManual(opts: { manual?: boolean } = {}): Promise<void> {
+  async syncManual(opts: { manual?: boolean; refreshRemote?: boolean } = {}): Promise<void> {
     await this.syncManualWithResult(opts);
   }
 
@@ -506,7 +523,7 @@ export class SyncEngine {
     return this.syncManualWithResult();
   }
 
-  private async syncManualWithResult(opts: { manual?: boolean } = {}): Promise<boolean> {
+  private async syncManualWithResult(opts: { manual?: boolean; refreshRemote?: boolean } = {}): Promise<boolean> {
     // Mobile has no status bar; sync state (progress + result) is surfaced via NoticeStatusBar,
     // which implements IStatusBar and is driven uniformly for every run. The two early-return
     // guidance notices below still need an explicit mobile notice because those paths return
@@ -531,7 +548,7 @@ export class SyncEngine {
     this.cancelled = false;
     // Full sync is exclusive with watch/lightweight operations. Existing lightweight work may
     // finish first; once this writer is queued, later lightweight work waits behind it.
-    const run = this.activityGate.runExclusive(() => this.runSyncSession(opts.manual === true));
+    const run = this.activityGate.runExclusive(() => this.runSyncSession(opts.manual === true, opts.refreshRemote === true));
     this.currentRun = run;
     let completed = false;
     try {
@@ -548,7 +565,7 @@ export class SyncEngine {
     return completed;
   }
 
-  private async runSyncSession(manual: boolean): Promise<boolean> {
+  private async runSyncSession(manual: boolean, refreshRemote: boolean): Promise<boolean> {
     // Created before the try so catch/finally can reference them even if the first step fails.
     const summary = this.initSummary();
     this.journal.beginRun(summary.startedAt);
@@ -561,15 +578,19 @@ export class SyncEngine {
       await this.ensureClient();
       this.plugins.begin(manual ? 'manual' : 'automatic');
       this.invalidateRootEtagOnScopeChange();
+      // A permissions-only change on Nextcloud can leave the vault root ETag untouched.
+      if (refreshRemote) this.opts.stateDB.setRemoteRootEtag(null);
       this.syncProgress = { processed: 0, total: 0 };
       this.opts.statusBar.setStatus('syncing', { automatic: !manual });
 
-      const isFirstSync = !this.opts.stateDB.getSyncToken() && this.opts.stateDB.getAllFiles().length === 0;
+      const isFirstSync = !this.opts.stateDB.getSyncToken()
+        && this.opts.stateDB.getAllFiles().length === 0 && this.opts.stateDB.getAllDirs().length === 0
+        && !(this.client?.requireExistingVaultRoot && this.opts.stateDB.hasObservedRemoteRoot());
 
       if (isFirstSync) {
         await this.initialSync(summary);
       } else {
-        await this.incrementalSync(summary);
+        await this.incrementalSync(summary, refreshRemote);
       }
       completed = !this.cancelled;
     } catch (err) {
@@ -994,9 +1015,12 @@ export class SyncEngine {
     this.journal.recordHistory(path, op, message, detail);
   }
 
-  // A missing vault folder proves nothing about individual files, so local wins and nothing is deleted locally (docs/spec.md §8).
-  // The MKCOL is the proof: 201 = truly absent (reset and re-upload); 405 = the 404 listing was wrong, so change nothing.
+  // For established Nextcloud roots, 404 can mean lost access to a mount. MKCOL could create a private
+  // folder at the same path and replay the vault into it. Plain WebDAV keeps its existing recovery.
   private async reseedFromLocal(summary: SyncSessionSummary): Promise<void> {
+    if (this.client!.requireExistingVaultRoot && this.opts.stateDB.hasObservedRemoteRoot()) {
+      throw new Error('The synced Nextcloud vault folder is missing or inaccessible. Local files were kept. Check the remote path and permissions.');
+    }
     const outcome = await this.client!.createVaultRoot();
     if (outcome === 'exists') {
       void this.opts.logger?.log(
@@ -1020,6 +1044,7 @@ export class SyncEngine {
     let remoteFiles: RemoteFileInfo[];
     try {
       remoteFiles = await client.getFiles('');
+      this.rememberRemoteRoot(client);
     } catch (err) {
       if (!(err instanceof RemoteRootMissingError)) throw err;
       void this.opts.logger?.log('sync: INITIAL — no vault folder on the server yet; the first upload will create it');
@@ -1050,14 +1075,20 @@ export class SyncEngine {
     this.opts.stateDB.setSyncToken(token);
   }
 
-  private async incrementalSync(summary: SyncSessionSummary): Promise<void> {
+  private rememberRemoteRoot(client: IWebDAVClient): void {
+    if (!client.requireExistingVaultRoot) return;
+    this.opts.stateDB.markRemoteRootObserved();
+    client.requireExistingVaultRoot(true);
+  }
+
+  private async incrementalSync(summary: SyncSessionSummary, refreshRemote: boolean): Promise<void> {
     const client = this.client!;
     const rootListingGeneration = this.opts.stateDB.getRootListingGeneration();
     let remoteFiles: RemoteFileInfo[];
     // A full scan has a complete listing (absence implies remote deletion). The token path only has a diff.
     let fullScan: FullScanListing | undefined;
 
-    const existingToken = this.opts.stateDB.getSyncToken();
+    const existingToken = refreshRemote ? null : this.opts.stateDB.getSyncToken();
     // A missing vault folder can surface from any listing call below, including the token-expired fallback, hence one guard
     // around both. Nextcloud answers the token REPORT with 415 (docs/spec.md §18), so that branch is unreachable there.
     try {
@@ -1103,6 +1134,7 @@ export class SyncEngine {
       await this.reseedFromLocal(summary);
       return;
     }
+    if (fullScan) this.rememberRemoteRoot(client);
 
     summary.retriedFiles = this.retryQueue.splice(0);
 
@@ -1121,17 +1153,25 @@ export class SyncEngine {
       true,
     );
 
-    await this.processLocalModifications(remoteFiles, summary, fullScan !== undefined);
+    // Read the directory view before using absence to decide whether to upload a local-only path.
+    // In particular, an accessible vault can contain a now-inaccessible share or Team Folder.
+    let remoteDirs = fullScan?.cachedDirs ?? undefined;
+    if (fullScan && !remoteDirs) {
+      try { remoteDirs = await client.getDirectories(''); }
+      catch (err) { void this.opts.logger?.log(`dir-sync: listing failed — skip this session: ${(err as Error).message}`); }
+    }
+    const withinLocalDeleteLimit = await this.processLocalModifications(remoteFiles, summary, fullScan !== undefined, remoteDirs);
 
     // Only a COMPLETE listing can show directory absence; the token path's partial diff cannot.
-    if (fullScan) await this.reconcileDirectories(summary, fullScan.cachedDirs ?? undefined);
+    if (remoteDirs) await this.reconcileDirectories(summary, remoteDirs, !withinLocalDeleteLimit);
 
     // Drop captured clean sides for paths that converged, keeping snapshots bounded to currently-conflicted files.
     this.sweepResolvedSnapshots();
 
     // An incomplete run cannot reconstruct a complete listing. Size-limit skips are deliberate: their
     // observed metadata keeps the listing complete without fabricating a common base (docs/spec.md §8a.5).
-    if (this.cancelled || summary.conflictedCount > 0 || summary.errorCount > 0 || this.retryQueue.length > 0) {
+    if (this.cancelled || summary.conflictedCount > 0 || summary.errorCount > 0 || this.retryQueue.length > 0
+        || (fullScan && !remoteDirs)) {
       this.opts.stateDB.setRemoteRootEtag(null);
     } else if (fullScan && this.opts.stateDB.getRootListingGeneration() === rootListingGeneration) {
       const sizeSkippedFiles = eligible.filter(file => summary.oversizeSkippedPaths.has(file.path));
@@ -1322,6 +1362,18 @@ export class SyncEngine {
     remoteId: string, idType: FileState['idType'], summary: SyncSessionSummary,
   ): Promise<void> {
     try {
+      if (!remote.etag && this.client!.inspectDirectory) {
+        // Listings reconstructed from State hold the checksum but may omit the ETag.
+        // Obtain a live revision before overwriting an existing file.
+        const current = await this.client!.statFile(remote.path);
+        if (!current?.etag) throw new Error('Nextcloud did not confirm the current file revision. Local changes were kept.');
+        const identity = remoteIdOf(current);
+        if (identity.remoteId !== remoteId || (remote.fileId && current.fileId !== remote.fileId)) {
+          await this.handleConflict(remote.path, base, current, identity.remoteId, identity.idType, summary);
+          return;
+        }
+        remote = current;
+      }
       await this.uploadFile(remote.path, localHash, remoteId, idType, remote, summary);
     } catch (err) {
       if (!(err instanceof PreconditionFailedError)) throw err;
@@ -1389,10 +1441,10 @@ export class SyncEngine {
   private uploadFile(
     path: string, localHash: string, remoteId: string,
     idType: FileState['idType'], remote: RemoteFileInfo,
-    summary: SyncSessionSummary,
+    summary: SyncSessionSummary, onlyIfAbsent = false,
   ): Promise<void> {
     return this.transfer.uploadFile(
-      this.client!, this.uploadStrategy!, path, localHash, remoteId, idType, remote, summary,
+      this.client!, this.uploadStrategy!, path, localHash, remoteId, idType, remote, summary, onlyIfAbsent,
     );
   }
 
@@ -1487,13 +1539,27 @@ export class SyncEngine {
     const outcome = await this.deletion.processRemoteDeletion(path, summary);
     // The entry kept for the retry describes a file the server no longer has. A short-circuit would rebuild the
     // listing from State, report it as still on the server, and never retry (docs/spec.md §8a.5).
-    if (outcome.status === 'failed') this.opts.stateDB.setRemoteRootEtag(null);
+    if (outcome.status === 'failed') {
+      this.opts.stateDB.setRemoteRootEtag(null);
+      this.recordError(summary, path, new Error(outcome.message));
+    }
   }
 
   private async processLocalModifications(
-    remoteFiles: RemoteFileInfo[], summary: SyncSessionSummary, isFullScan = false,
-  ): Promise<void> {
+    remoteFiles: RemoteFileInfo[], summary: SyncSessionSummary, isFullScan = false, remoteDirs?: RemoteDirInfo[],
+  ): Promise<boolean> {
     const remotePathSet = new Set(remoteFiles.map(f => f.path));
+    const remoteDirPaths = new Set(remoteDirs?.map(dir => dir.path.replace(/\/+$/, '')));
+    const heldPaths = new Set<string>();
+    const missingParentOf = (path: string): string | undefined => ancestorMatching(path,
+      parent => !!this.opts.stateDB.getDir(parent) && !remoteDirPaths.has(parent));
+    const reportLocalChanges = (path: string, base?: FileState): void => {
+      // A held edit can have the same size and mtime. Re-read it when access returns.
+      if (base?.localMtime != null) this.opts.stateDB.setFile({ ...base, localMtime: undefined });
+      if (heldPaths.has(path)) return;
+      heldPaths.add(path);
+      this.recordError(summary, path, new Error('The remote path is missing or inaccessible. Unsynced local changes were kept.'));
+    };
 
     const localStats = new Map<string, { size: number; mtime: number }>();
     await this.collectLocalStats('', localStats);
@@ -1519,6 +1585,11 @@ export class SyncEngine {
         const data = await this.opts.localAdapter.readBinary(path);
         const localHash = await sha256(data);
         if (base && localHash === base.localHash) return;
+        const absentParent = isFullScan && missingParentOf(path);
+        if (isFullScan && (base || absentParent)) {
+          reportLocalChanges(absentParent || path, base);
+          return;
+        }
         // For new files, use the local hash as remoteId (= the server checksum after upload).
         const remoteId = base?.remoteId ?? localHash;
         const idType: FileState['idType'] = base?.idType ?? 'sha256';
@@ -1527,7 +1598,7 @@ export class SyncEngine {
           await this.uploadFile(
             path, localHash, remoteId, idType,
             { path, fileId: base?.remoteFileId ?? null, checksum: null, etag: null, size: st.size, lastModified: st.mtime, creationTime: 0 },
-            summary,
+            summary, !base,
           );
         } catch (err) {
           // One failing file (e.g. a server-side 403) must not abort the whole session.
@@ -1597,26 +1668,31 @@ export class SyncEngine {
         if (this.isSystemExcluded(path) || remotePathSet.has(path)) continue;
         if (!localStats.has(path)) continue;
         const data = await this.opts.localAdapter.readBinary(path);
-        if (await sha256(data) !== fileState.localHash) continue;
+        if (await sha256(data) !== fileState.localHash || fileState.isConflicted) {
+          reportLocalChanges(missingParentOf(path) ?? path, fileState);
+          continue;
+        }
         candidates.push(path);
       }
 
       // Circuit breaker: too many apparent remote deletions means a partial or failed listing, so refuse.
       const tracked = this.opts.stateDB.getAllFiles().length;
-      const limit = this.effectiveMassDeleteLimit(tracked);
-      if (candidates.length > limit) {
-        void this.opts.logger?.log(`delete-local: SKIPPED ${candidates.length} absence-deletions — exceeds safety limit (${limit}); likely a partial remote listing`);
-        new Notice(`⚠️ ${candidates.length} files look deleted on the server — skipped to avoid mass deletion. Re-sync to retry.`, 10000);
+      const limit = this.effectiveMassDeleteLimit(tracked + this.opts.stateDB.getAllDirs().length);
+      const count = candidates.length + (remoteDirs ? this.directories.countMissingLocalCopies(remoteDirPaths) : 0);
+      if (count > limit) {
+        void this.opts.logger?.log(`delete-local: SKIPPED ${count} absence-deletions — exceeds safety limit (${limit}); likely a partial remote listing`);
+        new Notice(`⚠️ ${count} files and folders look deleted on the server — skipped to avoid mass deletion. Re-sync to retry.`, 10000);
         // An unresolved state: record it as an error so the UI surfaces it and the root-ETag short-circuit is invalidated;
         // otherwise "re-sync to retry" would never re-evaluate the deletions (docs/spec.md §8a.5).
-        this.recordError(summary, '(mass-delete breaker)', new Error(`Skipped ${candidates.length} absence-deletions — exceeds safety limit ${limit}`), {
+        this.recordError(summary, '(mass-delete breaker)', new Error(`Skipped ${count} absence-deletions — exceeds safety limit ${limit}`), {
           all: candidates,
         });
-        return;
+        return false;
       }
 
       // Re-verify each candidate with a targeted PROPFIND so a false negative in the bulk listing never deletes locally.
       for (const path of candidates) {
+        if (this.cancelled) break;
         let goneOnServer = false;
         try { goneOnServer = !(await this.client!.remoteExists(path)); } catch { goneOnServer = false; }
         if (!goneOnServer) {
@@ -1627,12 +1703,13 @@ export class SyncEngine {
         await this.processRemoteDeletion(path, summary);
       }
     }
+    return true;
   }
 
   // Runs only on a COMPLETE listing. Directories are first-class entities, never deleted merely for being empty
   // (docs/spec.md §8a.1, docs/plan.md §16).
-  private reconcileDirectories(summary: SyncSessionSummary, cachedDirs?: RemoteDirInfo[]): Promise<void> {
-    return this.directories.reconcileDirectories(this.client!, summary, cachedDirs);
+  private reconcileDirectories(summary: SyncSessionSummary, cachedDirs?: RemoteDirInfo[], skipLocalRemovals = false): Promise<void> {
+    return this.directories.reconcileDirectories(this.client!, summary, cachedDirs, skipLocalRemovals);
   }
 
   private async buildInitialPlan(
@@ -1687,7 +1764,7 @@ export class SyncEngine {
           // The local creation time is read before the upload; a server value for the same path is honoured (docs/spec.md §9.7).
           const before = await this.opts.localAdapter.stat(path);
           const ctime = uploadCreationTimeMs(before?.ctime, remoteMap.get(path)?.creationTime ?? 0);
-          const outcome = await this.uploadStrategy!.upload(this.client!, path, data, lf.mtime, { precomputedSha256: localHash, ctime });
+          const outcome = await this.uploadStrategy!.upload(this.client!, path, data, lf.mtime, { precomputedSha256: localHash, ctime, onlyIfAbsent: true });
           if (outcome === 'skipped') {
             // Over the size limit: counted for the end-of-sync notice (docs/spec.md §9.4a). This batch bypasses uploadFile.
             this.journal.recordOversizeSkip(summary, {

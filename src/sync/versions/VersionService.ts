@@ -8,6 +8,7 @@ import { FileVersion, FeatureUnsupportedError, NextcloudFeatures } from '../../t
 import { LocalAdapter } from '../../data/LocalAdapter';
 import { StateDB } from '../../data/StateDB';
 import { IWebDAVClient } from '../../network/IWebDAVClient';
+import { isSafeVaultRelativePath } from '../../network/remotePath';
 import { withLocalSignature } from '../../data/localSignature';
 import { sha256 } from '../../util/hash';
 import { LineHistoryResult, reconstructLineHistory, VersionSnapshot } from './lineHistory';
@@ -41,10 +42,9 @@ export class VersionService {
    * current remote file. Nextcloud includes that current revision in the versions collection.
    */
   async listVersions(client: IWebDAVClient, features: NextcloudFeatures, path: string): Promise<FileVersion[]> {
-    const fileId = this.requireFileId(features, path);
-    const versions = await client.listVersions(fileId);
-    const current = await client.statFile(path);
-    if (!current || current.lastModified <= 0) return versions;
+    const { fileId, current } = await this.verifyTarget(client, features, path);
+    const versions = (await client.listVersions(fileId)).map(version => ({ ...version, sourceFileId: fileId }));
+    if (current.lastModified <= 0) return versions;
 
     const currentRevision = String(Math.floor(current.lastModified / 1000));
     let found = false;
@@ -70,6 +70,7 @@ export class VersionService {
           mimeType: '',
           etag: current.etag ?? undefined,
           isCurrent: true,
+          sourceFileId: fileId,
         }, ...marked];
 
     return this.addCurrentRevisionAnchor(withCurrent);
@@ -107,7 +108,7 @@ export class VersionService {
     if (!this.deps.isTextEligible?.(path)) {
       throw new Error('Version compare is available for text files only.');
     }
-    const fileId = this.requireFileId(features, path);
+    const { fileId } = await this.verifyTarget(client, features, path, [before, after]);
     const [beforeData, afterData] = await Promise.all([
       this.readVersionData(client, path, fileId, before),
       this.readVersionData(client, path, fileId, after),
@@ -131,7 +132,7 @@ export class VersionService {
     if (!this.deps.isTextEligible?.(path)) {
       throw new Error('Line history is available for text files only.');
     }
-    const fileId = this.requireFileId(features, path);
+    const { fileId } = await this.verifyTarget(client, features, path, [...listedVersions, targetVersion]);
     const timeline = chronologicalVersionTimeline(listedVersions);
     const targetIndex = timeline.findIndex((version) =>
       version.versionId === targetVersion.versionId && version.isCurrent === targetVersion.isCurrent,
@@ -182,7 +183,7 @@ export class VersionService {
     if (!this.deps.isTextEligible?.(path)) {
       throw new Error('Version browser is available for text files only.');
     }
-    const fileId = this.requireFileId(features, path);
+    const { fileId } = await this.verifyTarget(client, features, path, [version]);
     const data = await this.readVersionData(client, path, fileId, version);
     return new TextDecoder().decode(data);
   }
@@ -192,9 +193,11 @@ export class VersionService {
     client: IWebDAVClient, features: NextcloudFeatures, path: string, version: FileVersion,
   ): Promise<void> {
     if (version.isCurrent || version.isCurrentRevisionAnchor) return;
-    const fileId = this.requireFileId(features, path);
+    const { fileId, current } = await this.verifyTarget(client, features, path, [version]);
+    if (!current.etag) throw new Error('Nextcloud did not supply a revision for the current file. Run Sync now and retry.');
 
-    await client.restoreVersion(version, fileId);
+    this.deps.stateDB.setRemoteRootEtag(null);
+    await client.restoreVersion(version, fileId, { path, etag: current.etag });
     // GET and PROPFIND are separate requests: a concurrent remote edit must not pair one body's
     // hash with another version's ETag. Read a stable identity around GET, retry once, then fail
     // without replacing the local file. The next full scan recovers the changed remote tree.
@@ -229,10 +232,10 @@ export class VersionService {
     try {
       for (let attempt = 0; attempt < 2; attempt++) {
         const before = await client.statFile(path);
-        if (!before || (before.fileId !== null && before.fileId !== expectedFileId)) break;
+        if (before?.fileId !== expectedFileId) break;
         const data = await client.downloadFile(path);
         const after = await client.statFile(path);
-        if (!after || (after.fileId !== null && after.fileId !== expectedFileId)) break;
+        if (after?.fileId !== expectedFileId) break;
         const stable = remoteIdOf(before).remoteId === remoteIdOf(after).remoteId
           && before.fileId === after.fileId && before.etag === after.etag && before.size === after.size
           && before.lastModified === after.lastModified;
@@ -256,11 +259,20 @@ export class VersionService {
       : client.getVersionContent(version, fileId);
   }
 
-  // Versions are addressed by fileId and live in the account-only versions namespace, which a public link share lacks.
-  private requireFileId(features: NextcloudFeatures, path: string): string {
-    if (!features.isNextcloud || !features.hasAccountDav) throw new FeatureUnsupportedError('versions');
+  // Account DAV can find a file ID after the object was moved out of the configured vault.
+  private async verifyTarget(
+    client: IWebDAVClient, features: NextcloudFeatures, path: string, versions: FileVersion[] = [],
+  ): Promise<{ fileId: string; current: RemoteFileInfo }> {
+    if (!features.isNextcloud || !features.hasAccountDav || !isSafeVaultRelativePath(path)) {
+      throw new FeatureUnsupportedError('versions');
+    }
     const fileId = this.deps.stateDB.getFile(path)?.remoteFileId;
     if (!fileId) throw new FeatureUnsupportedError('versions');
-    return fileId;
+    const current = await client.statFile(path);
+    if (current?.fileId !== fileId || versions.some(version => version.sourceFileId && version.sourceFileId !== fileId)) {
+      this.deps.stateDB.setRemoteRootEtag(null);
+      throw new Error('The file at this path has changed. Run Sync now and reopen version history.');
+    }
+    return { fileId, current };
   }
 }

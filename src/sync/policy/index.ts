@@ -12,6 +12,13 @@ export function parentDir(path: string): string {
   return i < 0 ? '' : path.slice(0, i);
 }
 
+export function ancestorMatching(path: string, matches: (directory: string) => boolean): string | undefined {
+  for (let parent = parentDir(path); parent; parent = parentDir(parent)) {
+    if (matches(parent)) return parent;
+  }
+  return undefined;
+}
+
 export function isDotName(path: string): boolean {
   const i = path.lastIndexOf('/');
   return (i < 0 ? path : path.slice(i + 1)).startsWith('.');

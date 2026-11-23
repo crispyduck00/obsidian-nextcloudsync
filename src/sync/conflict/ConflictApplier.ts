@@ -233,6 +233,8 @@ export class ConflictApplier {
       const lockToken = await this.deps.transfer.acquireLock(conn.client, path);
       try {
         const outcome = await conn.uploadStrategy.upload(conn.client, path, mergedData, mergeMtime, {
+          ifMatchEtag: remote.etag,
+          ...(remote.checksum ? { expectedRemoteChecksum: remote.checksum } : {}),
           ctime: uploadCreationTimeMs(before?.ctime, remote.creationTime),
         });
         if (outcome !== 'skipped') {
@@ -301,6 +303,8 @@ export class ConflictApplier {
       const lockToken = await this.deps.transfer.acquireLock(conn.client, path);
       try {
         const outcome = await conn.uploadStrategy.upload(conn.client, path, localData, mtime, {
+          ifMatchEtag: remote.etag,
+          ...(remote.checksum ? { expectedRemoteChecksum: remote.checksum } : {}),
           ctime: uploadCreationTimeMs(stat?.ctime, remote.creationTime),
         });
         if (outcome === 'skipped') {

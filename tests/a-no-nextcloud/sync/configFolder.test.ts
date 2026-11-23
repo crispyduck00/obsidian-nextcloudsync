@@ -114,9 +114,9 @@ describe('SyncEngine remote-deletion scope guard (config folder hard exclusions)
       settings: s,
       // getAllFiles/getAllDirs/deleteDir: the deletion sink forgets a trashed folder's
       // whole subtree, so it enumerates tracking even for a plain file path.
-      stateDB: { deleteFile, getAllFiles: () => [], getAllDirs: () => [], deleteDir: jest.fn() },
+      stateDB: { deleteFile, getFile: () => ({ localHash: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855' }), getAllFiles: () => [], getAllDirs: () => [], deleteDir: jest.fn() },
       configDir: CONFIG_DIR,
-      localAdapter: {}, statusBar: {}, webdavFactory: {}, pluginDir: PLUGIN_DIR,
+      localAdapter: { readBinary: async () => new ArrayBuffer(0), ignore: jest.fn() }, statusBar: {}, webdavFactory: {}, pluginDir: PLUGIN_DIR,
     } as never);
     const invoke = (path: string) =>
       (engine as unknown as {
