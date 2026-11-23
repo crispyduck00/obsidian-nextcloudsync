@@ -68,7 +68,7 @@ export class DeletionService {
       if (await this.deps.localAdapter.stat(remote.path)) return 'kept';
       void this.deps.logger?.log(`delete-remote: local deletion (server checksum matches base) → ${remote.path}`);
       try {
-        if (remote.etag) await client.deleteFile(remote.path, base.remoteId, remote.etag);
+        if (remote.etag) await client.deleteFile(remote.path, serverHash, remote.etag);
         else await client.deleteFile(remote.path, base.remoteId);
         summary.deletedCount++;
         this.deps.journal.recordHistory(remote.path, 'deleted', undefined, {

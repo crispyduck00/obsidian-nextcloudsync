@@ -439,7 +439,7 @@ export class NextcloudClient implements IWebDAVClient {
 
   async uploadFile(
     remotePath: string, data: ArrayBuffer, mtime?: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; onlyIfAbsent?: boolean; ctime?: number },
+    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; expectedRemoteChecksum?: string; onlyIfAbsent?: boolean; ctime?: number },
   ): Promise<void> {
     // PUT first and MKCOL the parents only on a missing parent, then retry once: drops the per-upload directory probe on the common path.
     const checksum = `SHA256:${opts?.precomputedSha256 ?? await sha256(data)}`;
@@ -455,11 +455,15 @@ export class NextcloudClient implements IWebDAVClient {
     // If-Match optimistic concurrency: a remote changed since this etag returns 412.
     if (opts?.ifMatchEtag) headers['If-Match'] = `"${opts.ifMatchEtag.replace(/^"|"$/g, '')}"`;
     if (opts?.onlyIfAbsent) headers['If-None-Match'] = '*';
+    if (opts?.ifMatchEtag && opts.expectedRemoteChecksum
+      && !(await this.matchesFileRevision(remotePath, opts.ifMatchEtag, opts.expectedRemoteChecksum))) {
+      throw new PreconditionFailedError(remotePath);
+    }
 
     let res = await this.req({ url: this.remoteUrl(remotePath), method: 'PUT', headers, body: data, throw: false });
     // Missing parent: create the ancestors, then retry the PUT once. Standard WebDAV answers 409, Nextcloud 404; handle both.
     let dirError: RemoteDirCreateError | null = null;
-    if (res.status === 409 || res.status === 404) {
+    if (!opts?.ifMatchEtag && (res.status === 409 || res.status === 404)) {
       dirError = await prepareMissingParentRetry({ baseUrl: this.baseUrl, authHeader: this.authHeader, timeoutMs: this.timeoutMs }, toRemotePath(this.remoteBase, remotePath), this.createdDirs);
       if (isTransportFailure(dirError)) throw dirError;
       res = await this.req({ url: this.remoteUrl(remotePath), method: 'PUT', headers, body: data, throw: false });
@@ -519,8 +523,18 @@ export class NextcloudClient implements IWebDAVClient {
     if (res.status < 200 || res.status >= 300) throw dirError ?? new NetworkError(res.status, res.text, 'MOVE');
   }
 
-  async deleteFile(path: string, _expectedRemoteId: string, ifMatchEtag?: string): Promise<void> {
-    const condition: Record<string, string> = ifMatchEtag ? { 'If-Match': `"${ifMatchEtag}"` } : {};
+  private async matchesFileRevision(path: string, etag: string, checksum: string): Promise<boolean> {
+    const current = await this.statFile(path);
+    return current?.etag === etag.replace(/^"|"$/g, '')
+      && (current.checksum ?? await this.recalcChecksum(path)) === checksum;
+  }
+
+  async deleteFile(path: string, expectedRemoteId: string, ifMatchEtag?: string): Promise<void> {
+    if (ifMatchEtag && /^[a-f0-9]{64}$/i.test(expectedRemoteId)
+      && !(await this.matchesFileRevision(path, ifMatchEtag, expectedRemoteId))) {
+      throw new NetworkError(412, '', 'DELETE');
+    }
+    const condition: Record<string, string> = ifMatchEtag ? { 'If-Match': `"${ifMatchEtag.replace(/^"|"$/g, '')}"` } : {};
     const res = await this.req({
       url: this.remoteUrl(path), method: 'DELETE', headers: { Authorization: this.authHeader, ...condition, ...NO_CACHE_HEADERS }, throw: false,
     });
@@ -631,7 +645,7 @@ export class NextcloudClient implements IWebDAVClient {
 
   async uploadChunked(
     remotePath: string, data: ArrayBuffer, chunkSizeBytes: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; onlyIfAbsent?: boolean; mtime?: number; ctime?: number },
+    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; expectedRemoteChecksum?: string; onlyIfAbsent?: boolean; mtime?: number; ctime?: number },
   ): Promise<void> {
     const uploadId = `obsidian-${this.settings.deviceId.slice(-8)}-${Date.now()}`;
     const sessionUrl = `${this.davBase('uploads')}/${uploadId}`;

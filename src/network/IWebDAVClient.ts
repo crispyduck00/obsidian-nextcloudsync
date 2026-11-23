@@ -59,10 +59,11 @@ export interface IWebDAVClient {
    * @param mtime ms epoch; sent as X-OC-MTime so Nextcloud preserves the timestamp.
    * @param opts.precomputedSha256 reused for the OC-Checksum header instead of re-hashing.
    * @param opts.ifMatchEtag sent as `If-Match`; a changed remote yields 412 (PreconditionFailedError).
+   * @param opts.expectedRemoteChecksum verifies the current Nextcloud body before a conditional write.
    */
   uploadFile(
     remotePath: string, data: ArrayBuffer, mtime?: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; onlyIfAbsent?: boolean; ctime?: number },
+    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; expectedRemoteChecksum?: string; onlyIfAbsent?: boolean; ctime?: number },
   ): Promise<void>;
   moveFile(oldPath: string, newPath: string): Promise<void>;
   deleteFile(path: string, expectedRemoteId: string, ifMatchEtag?: string): Promise<void>;
@@ -92,7 +93,7 @@ export interface IWebDAVClient {
    */
   uploadChunked(
     remotePath: string, data: ArrayBuffer, chunkSizeBytes: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; onlyIfAbsent?: boolean; mtime?: number; ctime?: number },
+    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; expectedRemoteChecksum?: string; onlyIfAbsent?: boolean; mtime?: number; ctime?: number },
   ): Promise<void>;
 
   /**

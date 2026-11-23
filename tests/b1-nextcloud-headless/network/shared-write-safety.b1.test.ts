@@ -24,12 +24,26 @@ describeLive('Shared Nextcloud mutations', getEnv => {
     await owner.uploadFile('delete-race.md', textBuf('original'));
     const original = (await owner.statFile('delete-race.md'))!;
     expect(original.etag).toBeTruthy();
+    expect(original.checksum).toMatch(/^[a-f0-9]{64}$/);
     await peer.uploadFile('delete-race.md', textBuf('new body'));
     await expect(owner.deleteFile('delete-race.md', original.checksum ?? '', original.etag!)).rejects.toMatchObject({ status: 412 });
     expect(decodeBuf(await owner.downloadFile('delete-race.md'))).toBe('new body');
     const current = (await owner.statFile('delete-race.md'))!;
     await owner.deleteFile('delete-race.md', current.checksum ?? '', current.etag!);
     expect(await owner.statFile('delete-race.md')).toBeNull();
+  });
+
+  it('rejects overwriting a peer edit of the same size and mtime', async () => {
+    const mtime = 1_700_000_000_000;
+    await owner.uploadFile('same-stat.md', textBuf('original'), mtime);
+    const original = (await owner.statFile('same-stat.md'))!;
+    expect(original.etag).toBeTruthy();
+    expect(original.checksum).toMatch(/^[a-f0-9]{64}$/);
+    await peer.uploadFile('same-stat.md', textBuf('new body'), mtime);
+    await expect(owner.uploadFile('same-stat.md', textBuf('old edit'), mtime, {
+      ifMatchEtag: original.etag, expectedRemoteChecksum: original.checksum!,
+    })).rejects.toBeInstanceOf(PreconditionFailedError);
+    expect(decodeBuf(await peer.downloadFile('same-stat.md'))).toBe('new body');
   });
 
   it('rejects a second create at the same path for both PUT and chunk assembly', async () => {
@@ -45,12 +59,16 @@ describeLive('Shared Nextcloud mutations', getEnv => {
     await owner.uploadFile('chunk.md', textBuf('old'));
     const original = (await owner.statFile('chunk.md'))!;
     await peer.uploadFile('chunk.md', textBuf('other device'));
-    expect((await owner.statFile('chunk.md'))?.etag).not.toBe(original.etag);
-    await expect(owner.uploadChunked('chunk.md', textBuf('do not overwrite'), 4, { ifMatchEtag: original.etag }))
+    expect((await owner.statFile('chunk.md'))?.checksum).not.toBe(original.checksum);
+    await expect(owner.uploadChunked('chunk.md', textBuf('do not overwrite'), 4, {
+      ifMatchEtag: original.etag, expectedRemoteChecksum: original.checksum!,
+    }))
       .rejects.toBeInstanceOf(PreconditionFailedError);
     expect(decodeBuf(await peer.downloadFile('chunk.md'))).toBe('other device');
     const current = (await owner.statFile('chunk.md'))!;
-    await owner.uploadChunked('chunk.md', textBuf('confirmed update'), 4, { ifMatchEtag: current.etag });
+    await owner.uploadChunked('chunk.md', textBuf('confirmed update'), 4, {
+      ifMatchEtag: current.etag, expectedRemoteChecksum: current.checksum!,
+    });
     expect(decodeBuf(await peer.downloadFile('chunk.md'))).toBe('confirmed update');
   });
 

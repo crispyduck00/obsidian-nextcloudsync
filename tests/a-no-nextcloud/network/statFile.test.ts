@@ -8,7 +8,7 @@
 import { requestUrl } from 'obsidian';
 import { NextcloudClient } from '../../../src/network/NextcloudClient';
 import { StandardWebDAVClient } from '../../../src/network/StandardWebDAVClient';
-import { DEFAULT_SETTINGS, DavSyncSettings, NetworkError } from '../../../src/types';
+import { DEFAULT_SETTINGS, DavSyncSettings, NetworkError, PreconditionFailedError } from '../../../src/types';
 
 const mockRequestUrl = requestUrl as unknown as jest.Mock;
 
@@ -137,6 +137,27 @@ describe('IWebDAVClient.statFile (C-0)', () => {
       const call = mockRequestUrl.mock.calls[0][0];
       expect(call.method).toBe('PROPFIND');
       expect(call.headers.Depth).toBe('0');
+    });
+
+    it('rejects a stale delete and PUT even when Nextcloud reused the ETag', async () => {
+      const live = NC_FILE_MULTISTATUS.replace('deadbeef00112233', 'b'.repeat(64));
+      mockRequestUrl.mockImplementation(() => res(207, { text: live }));
+      const client = makeClient();
+      const etag = 'etag-abc123';
+      const expectedRemoteChecksum = 'a'.repeat(64);
+      await expect(client.deleteFile(REMOTE_PATH, expectedRemoteChecksum, etag)).rejects.toMatchObject({ status: 412 });
+      await expect(client.uploadFile(REMOTE_PATH, new ArrayBuffer(1), undefined, {
+        ifMatchEtag: etag, expectedRemoteChecksum,
+      })).rejects.toBeInstanceOf(PreconditionFailedError);
+      expect(mockRequestUrl.mock.calls.map(([call]) => call.method)).toEqual(['PROPFIND', 'PROPFIND']);
+    });
+
+    it('does not recreate a missing parent during a conditional overwrite', async () => {
+      mockRequestUrl.mockImplementation(() => res(404));
+      await expect(makeClient().uploadFile(REMOTE_PATH, new ArrayBuffer(1), undefined, {
+        ifMatchEtag: 'expected',
+      })).rejects.toMatchObject({ status: 404 });
+      expect(mockRequestUrl.mock.calls.map(([call]) => call.method)).toEqual(['PUT']);
     });
   });
 

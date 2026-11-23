@@ -78,6 +78,7 @@ export class TransferService {
       // (PreconditionFailedError, a conflict). A new path must still be absent to create it.
       outcome = await uploadStrategy.upload(client, path, data, stat.mtime, {
         ifMatchEtag: remote.etag,
+        ...(remote.checksum ? { expectedRemoteChecksum: remote.checksum } : {}),
         ...(onlyIfAbsent ? { onlyIfAbsent } : {}),
         ctime: uploadCreationTimeMs(stat.ctime, remote.creationTime),
       });
