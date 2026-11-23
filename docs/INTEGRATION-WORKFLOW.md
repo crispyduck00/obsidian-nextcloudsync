@@ -122,7 +122,7 @@ Line History is retained-version provenance rather than Git blame; pruned interm
   - allows the public test suite to run without the intentionally untracked local settings mockup
 
 - `fixes/watch-folder-delete-safety`
-  - prevents recursive Watch deletion of a remote directory unless live emptiness is proven
+  - introduced a preflight check for shared folder deletion. The current folder reconciliation topic retains remote collections during routine sync and Watch.
 
 - `fixes/version-restore-state-convergence`
   - records the server's real remote identity, mtime and file ID after a version restore so the next sync does not falsely merge/re-upload the restored file
@@ -134,6 +134,8 @@ Line History is retained-version provenance rather than Git blame; pruned interm
   - verifies protected collections and child operations, preserves pending edits when a folder becomes invisible, and bounds local removal
   - checks live revision preconditions before shared writes and keeps an established Nextcloud root from being silently created again
   - refreshes the remote listing on explicit Sync now, including permission changes with an unchanged root ETag
+  - keeps the original Nextcloud folder ID across syncs and holds local work when a folder is replaced at the same path
+  - retains remote collections after local deletion, propagates independently verified file deletions, and keeps Watch moves within the selected sync scope
 
 - `fixes/scoped-version-history`
   - verifies the live vault path and file ID before opening, comparing or restoring versions

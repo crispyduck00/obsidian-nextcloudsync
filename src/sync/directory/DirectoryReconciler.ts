@@ -1,5 +1,5 @@
-// Three-way comparison (local / remote / tracked) applied to folders, so an empty folder created or deleted on
-// one device propagates to the others (docs/spec.md §8a, docs/plan.md §16). A partial remote listing looks like
+// Three-way comparison (local / remote / tracked) applied to folder creation and remote-to-local removal
+// (docs/spec.md §8a, docs/plan.md §16). A partial remote listing looks like
 // "the user deleted most folders", so beyond the mass-delete threshold the destructive half of the plan is
 // refused wholesale and recorded as a session error; the resolve* methods settle those paths on demand.
 import { TFolder, normalizePath, Vault, App } from 'obsidian';
@@ -8,14 +8,12 @@ import { StateDB } from '../../data/StateDB';
 import { IWebDAVClient } from '../../network/IWebDAVClient';
 import { SyncJournal } from '../session/SyncJournal';
 import { MergeBaseRecorder } from '../session/MergeBaseRecorder';
-import { TransferService } from '../transfer/TransferService';
 import {
   classifyDirectories, shouldTripMassDeleteBreaker, breakerDenominator,
 } from './classify';
 import { dropSubtreeTracking } from '../deletion/subtreeTracking';
 import { removeEmptyLocalDirectory } from '../deletion/removeEmptyLocalDirectory';
 import { ancestorMatching } from '../policy';
-import type { RemoteFolderGuard } from './RemoteFolderGuard';
 import { FileLogger } from '../../util/FileLogger';
 
 export interface DirectoryDeps {
@@ -23,8 +21,6 @@ export interface DirectoryDeps {
   stateDB: Pick<StateDB,
     'getAllDirs' | 'setDir' | 'deleteDir' | 'requestSave' | 'getAllFiles' | 'deleteFile'>;
   journal: SyncJournal;
-  // Used only for the lock taken around a remote collection delete.
-  transfer: TransferService;
   // Dropped alongside the file state when a trashed folder's subtree stops being tracked.
   mergeBase: Pick<MergeBaseRecorder, 'drop'>;
   dropCleanSnapshot(path: string): void;
@@ -33,7 +29,6 @@ export interface DirectoryDeps {
   markOwnEvent: (path: string) => void;
   isSystemExcluded(path: string): boolean;
   massDeleteLimit(): number;
-  remoteFolders?: RemoteFolderGuard;
   // Checked between directory operations so a cancel takes effect promptly.
   isCancelled(): boolean;
   logger?: Pick<FileLogger, 'log'>;
@@ -44,6 +39,7 @@ export class DirectoryReconciler {
 
   async reconcileDirectories(
     client: IWebDAVClient, summary: SyncSessionSummary, cachedDirs?: RemoteDirInfo[], skipLocalRemovals = false,
+    isHeld: (path: string) => boolean = () => false,
   ): Promise<void> {
     let remoteDirInfos: RemoteDirInfo[];
     if (cachedDirs) {
@@ -64,23 +60,21 @@ export class DirectoryReconciler {
     const localDirs = this.localDirectories();
     const tracked = new Map(this.deps.stateDB.getAllDirs().map(d => [d.path, d]));
 
-    const plan = classifyDirectories(remoteDirs, localDirs, tracked, (p) => this.deps.isSystemExcluded(p));
+    const plan = classifyDirectories(remoteDirs, localDirs, tracked, p => isHeld(p) || this.deps.isSystemExcluded(p));
     const { mkcolRemote, mkdirLocal, deleteRemote, trashLocal, ensureTracked, dropTracked } = plan;
 
     // Circuit breaker: a partial listing would make many dirs look deleted.
-    if (shouldTripMassDeleteBreaker(plan, breakerDenominator(remoteDirs, localDirs, tracked), this.deps.massDeleteLimit())) {
-      void this.deps.logger?.log(`dir-sync: SKIPPED ${deleteRemote.length + trashLocal.length} dir deletions — exceeds safety limit; likely a partial listing`);
+    if (shouldTripMassDeleteBreaker({ ...plan, deleteRemote: [] }, breakerDenominator(remoteDirs, localDirs, tracked), this.deps.massDeleteLimit())) {
+      void this.deps.logger?.log(`dir-sync: SKIPPED ${trashLocal.length} local dir deletions — exceeds safety limit; likely a partial listing`);
       // Recorded as an error so the root-ETag convergence gate invalidates the stored etag and the next sync
       // re-scans instead of short-circuiting on stale state (docs/spec.md §8a.5).
-      const skippedDeleteRemote = [...deleteRemote];
       const skippedTrashLocal = [...trashLocal];
       this.deps.journal.recordError(
         summary, '(dir mass-delete breaker)',
-        new Error(`Skipped ${deleteRemote.length + trashLocal.length} dir deletions — exceeds safety limit`),
+        new Error(`Skipped ${trashLocal.length} local dir deletions — exceeds safety limit`),
         undefined,
-        { deleteRemote: skippedDeleteRemote, trashLocal: skippedTrashLocal },
+        { deleteRemote: [], trashLocal: skippedTrashLocal },
       );
-      deleteRemote.length = 0;
       trashLocal.length = 0;
     }
 
@@ -112,28 +106,9 @@ export class DirectoryReconciler {
         summary.errors.push({ path: p, message: `dir create (local) failed: ${(err as Error).message}` });
       }
     }
-    // Children before parents; probe emptiness first, under an optional lock.
-    for (const p of deleteRemote.sort(deepFirst)) {
-      if (this.deps.isCancelled()) break;
-      let token: string | null = null;
-      try {
-        await this.deps.remoteFolders?.assertRemovalAllowed(client, p, true, summary);
-        token = await this.deps.transfer.acquireLock(client, p);
-        if (!(await client.isRemoteDirEmpty(p))) {
-          void this.deps.logger?.log(`dir-sync: remote dir not empty yet — keeping → ${p}`);
-          continue; // children pending; self-heals next sync
-        }
-        await client.deleteCollection(p);
-        this.deps.stateDB.deleteDir(p);
-        summary.deletedCount++;
-        this.deps.journal.recordHistory(p, 'deleted');
-      } catch (err) {
-        summary.errorCount++;
-        summary.errors.push({ path: p, message: `dir delete (remote) failed: ${(err as Error).message}` });
-      } finally {
-        await this.deps.transfer.releaseLock(client, p, token);
-      }
-    }
+    // WebDAV DELETE on a collection is recursive, with no portable "only if empty" condition.
+    // Keep the tracking entries so a known local removal does not re-create the folder on this device.
+    for (const path of deleteRemote) void this.deps.logger?.log(`dir-sync: remote folder retained → ${path}`);
     // Children before parents.
     for (const p of trashLocal.sort(deepFirst)) {
       if (skipLocalRemovals || this.deps.isCancelled()) break;
@@ -169,10 +144,10 @@ export class DirectoryReconciler {
     return new Set((vault.getAllFolders?.() ?? []).map(f => f.path).filter(p => p && p !== '/'));
   }
 
-  countMissingLocalCopies(remotePaths: ReadonlySet<string>): number {
+  countMissingLocalCopies(remotePaths: ReadonlySet<string>, isHeld: (path: string) => boolean): number {
     const local = this.localDirectories();
     return this.deps.stateDB.getAllDirs().filter(d => local.has(d.path)
-      && !remotePaths.has(d.path) && !this.deps.isSystemExcluded(d.path)).length;
+      && !remotePaths.has(d.path) && !isHeld(d.path) && !this.deps.isSystemExcluded(d.path)).length;
   }
 
   // Only ever called after a successful trash.
@@ -201,16 +176,7 @@ export class DirectoryReconciler {
         await this.deps.app.vault.adapter.mkdir(normalizePath(path));
         this.deps.stateDB.setDir({ path, remoteFileId: null });
       } else {
-        // Local absence is correct: let the deletion proceed on the remote.
-        await this.deps.remoteFolders?.assertRemovalAllowed(client, path, true);
-        const token = await this.deps.transfer.acquireLock(client, path);
-        try {
-          if (!(await client.isRemoteDirEmpty(path))) throw new Error('The remote folder still contains files or folders.');
-          await client.deleteCollection(path);
-        } finally {
-          await this.deps.transfer.releaseLock(client, path, token);
-        }
-        this.deps.stateDB.deleteDir(path);
+        throw new Error('Remove the folder in Nextcloud to remove it from the shared vault.');
       }
     } else {
       if (choice === 'remote') {

@@ -37,13 +37,22 @@ Shared writes retain HTTP preconditions and check the available SHA-256 for an e
 
 The integrated Nextcloud-independent suite passes 3,473 tests across 226 suites, with six optional settings-mockup tests skipped. An isolated Nextcloud 34.0.6.2 deployment with Team Folders 22.0.6 and Folder Protection 2.5.2 passes five access tests. They cover child-first Watch events at a mount, ACL-only revocation and regrant, disappearance of the configured mount during full sync and Watch, a write-to-read-only role change, and a protected descendant blocking deletion and MOVE of its parent. The separate headless sync checks use two devices and real Nextcloud DAV and notify_push connections.
 
+## Release candidate 2
+
+`0.2.0-rc.2` adds the directory changes to `fixes/guarded-folder-reconciliation` on upstream `1.0.18`. The integration retains Client Push, Android Watch and the enhanced Versions views. Push verifies the vault identifier along with the root ETag. Known-file reconciliation checks that the parent still belongs to the synced folder before processing the file.
+
+- A new upload checks its tracked parent live even when a stale root ETag allows a cached listing. The client skips MKCOL for previously tracked directories during PUT, MOVE and chunk assembly recovery.
+- Same-path replacements hold both file and directory tracking. A replaced vault root stops Sync now, Watch writes and the application of an earlier Mirror plan. An unreadable Nextcloud directory listing halts a full scan before file processing.
+- Routine sync and Watch leave remote collections in place after local removal. The Nextcloud 34.0.6.2 lab returned 412 for conditional collection DELETE even with its current ETag. The collection remained. The normal file deletion checks continue to apply to its children.
+- Watch skips a server MOVE when the source or destination crosses a sync exclusion. Folder moves also check excluded or protected children before sending the request.
+
 ## Real-vault acceptance before standalone promotion
 
-Use a separate Windows and Android test vault and a dedicated remote test folder. Back up that test vault's plugin directory, then close Obsidian and install `0.2.0-rc.1` manually under the same Fast Nextcloud Sync plugin ID. Preserve the test vault's existing device ID, state and Secret Storage selection.
+Use a separate Windows and Android test vault and a dedicated remote test folder. Back up that test vault's plugin directory, then close Obsidian and install `0.2.0-rc.2` manually under the same Fast Nextcloud Sync plugin ID. Preserve the test vault's existing device ID, state and Secret Storage selection.
 
 1. Confirm the resolved DAV path and run a two-way sync. Enable Client Push and verify a remote edit arrives. Use a second valid app password for the same test account. Change the selected secret in place and run Sync Now without restarting Obsidian. Verify another remote edit arrives. Repeat by selecting a different secret. Clear the selected secret's value, confirm that sync asks for credentials, then restore it and confirm that sync and Push recover.
 2. Put Android in the background, make a remote edit, and resume or recover Wi-Fi. Verify the note, the Push status, foreground Watch and Wi-Fi-only behavior. Test the existing internal share, a read-only or public share, and a Group Folder with expendable data.
-3. Change an ordinary note and a selected plugin's data together. Verify selective note delivery and plugin reconciliation in a regular full session. Create, rename and delete files or folders, and track the fallback for unknown or structural Push.
+3. Change an ordinary note and a selected plugin's data together. Verify selective note delivery and plugin reconciliation in a regular full session. Create, rename and delete files, create and rename folders, and track the fallback for unknown or structural Push. Confirm that a folder removed locally remains on Nextcloud and that intentional deletion on Nextcloud reconciles locally.
 4. Lower the size limit and make a remote file exceed it while editing an older local copy. Check that the server keeps the newer body and that the next sync can see both versions. Raise the limit and verify reconciliation. Repeat for an oversized file absent locally.
 5. Restore a test note in a Group Folder. Check the version list, then make independent edits on both devices. Verify the resulting content and version sequence.
 6. Revoke and restore read access for a disposable Team Folder subdirectory. Use Sync now after each change. Verify that unchanged copies follow the remote listing and that local edits and drafts are available when access returns. Repeat with a genuinely deleted test subdirectory and with a missing configured vault root. Verify that the missing root leaves local content intact.

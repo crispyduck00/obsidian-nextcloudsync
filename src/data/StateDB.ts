@@ -170,6 +170,15 @@ export class StateDB {
     this.state.remoteRootObserved = true;
   }
 
+  getRemoteRootFileId(): string | null {
+    return this.state.remoteRootFileId ?? null;
+  }
+
+  setRemoteRootFileId(fileId: string): void {
+    this.state.remoteRootFileId = fileId;
+    this.markRemoteRootObserved();
+  }
+
   // null => the next sync full-scans (docs/spec.md §8a.5).
   getRemoteRootEtag(): string | null {
     return this.state.remoteRootListing?.etag ?? null;

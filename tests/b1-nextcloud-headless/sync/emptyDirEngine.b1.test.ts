@@ -1,12 +1,12 @@
-// Layer B — full SyncEngine against a live Nextcloud: a folder emptied on one device is pruned from the remote AND
-// from the other device on its next sync.
+// Layer B — full SyncEngine against a live Nextcloud. A local folder removal propagates proven child deletions.
+// The collection remains until intentionally removed on Nextcloud.
 import { describeLive } from '../support/env';
 import { setupWorkspace } from '../support/workspace';
 import { cleanupWorkspace, IsolatedWorkspace } from '../support/isolation';
 import { NextcloudClient } from '../../../src/network/NextcloudClient';
 import { makeDevice } from '../support/engineDevice';
 
-describeLive('Layer B — empty-dir pruning end-to-end (engine)', (getEnv) => {
+describeLive('Layer B — empty directories end-to-end (engine)', (getEnv) => {
   let ws: IsolatedWorkspace;
   let baseClient: NextcloudClient;
 
@@ -20,7 +20,7 @@ describeLive('Layer B — empty-dir pruning end-to-end (engine)', (getEnv) => {
     if (baseClient && ws) await cleanupWorkspace(baseClient, ws);
   });
 
-  it('[SPEC:DP-e2e]: a folder emptied on device A is pruned on the remote and on device B', async () => {
+  it('[SPEC:DP-e2e]: child deletions propagate and device B removes the folder after deliberate server removal', async () => {
     const env = getEnv();
 
     // Device A creates a folder of notes plus an unrelated note that survives the test, so the remote listing is never
@@ -42,12 +42,17 @@ describeLive('Layer B — empty-dir pruning end-to-end (engine)', (getEnv) => {
     a.vault.deleteLocalTree('2011');
     await a.sync();
 
-    // The files are gone AND the now-empty directory is pruned.
-    expect((await baseClient.getFiles('')).map((f) => f.path)).not.toContain('2011/a.md');
-    expect(await baseClient.remoteExists('2011')).toBe(false);
+    const remaining = (await baseClient.getFiles('')).map(f => f.path);
+    expect(remaining).not.toContain('2011/a.md');
+    expect(remaining).not.toContain('2011/b.md');
+    expect(await baseClient.remoteExists('2011')).toBe(true);
 
     await b.sync();
     expect(b.vault.localExists('2011/a.md')).toBe(false);
+    expect(b.vault.folderExists('2011')).toBe(true);
+
+    await baseClient.deleteCollection('2011');
+    await b.sync();
     expect(b.vault.folderExists('2011')).toBe(false);
   });
 

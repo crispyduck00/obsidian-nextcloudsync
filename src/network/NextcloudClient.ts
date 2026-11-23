@@ -15,15 +15,16 @@ import {
   MaintenanceModeError,
   PreconditionFailedError,
   RemoteRootMissingError,
+  RemoteRootChangedError,
   RemoteDirCreateError,
   VaultRootOutcome,
   ServerLockedError,
   AppPasswordReader,
   CredentialsNotFoundError,
 } from '../types';
-import { IWebDAVClient, type RemoteRootInfo } from './IWebDAVClient';
+import { IWebDAVClient, type RemoteRootInfo, type TrackedDirectories } from './IWebDAVClient';
 import { DavSyncSettings } from '../types';
-import { toRemotePath, hrefToRelative, encodeRemoteUrl, encodeServerUrl, ensureRemoteDir, mkcolStrict, prepareMissingParentRetry, isTransportFailure } from './remotePath';
+import { toRemotePath, fromRemotePath, hrefToRelative, encodeRemoteUrl, encodeServerUrl, ensureRemoteDir, mkcolStrict, prepareMissingParentRetry, isTransportFailure } from './remotePath';
 import { RemoteDirCache } from './RemoteDirCache';
 import { sha256 } from '../util/hash';
 import { PARSE_YIELD_EVERY } from '../util/limits';
@@ -93,6 +94,7 @@ export class NextcloudClient implements IWebDAVClient {
   private features: NextcloudFeatures | null = null;
   private readonly createdDirs = new RemoteDirCache();
   private existingRootRequired = false;
+  private knownDirectories?: TrackedDirectories;
 
   constructor(
     private readonly settings: DavSyncSettings,
@@ -285,6 +287,7 @@ export class NextcloudClient implements IWebDAVClient {
       });
       if (res.status !== 207) return { etag: null, fileId: null };
       const responses = readMultistatus(res.text, { op: 'getRootInfo', path: '', status: res.status, method: 'PROPFIND' });
+      this.verifyListedRoot(responses);
       const prop = readProp(responses[0]);
       if (!prop) return { etag: null, fileId: null };
 
@@ -314,12 +317,15 @@ export class NextcloudClient implements IWebDAVClient {
       body: PROPFIND_BODY,
       throw: false,
     });
-    if (res.status === 404) return [];
+    if (res.status === 404) {
+      if (!path && this.existingRootRequired) throw new RemoteRootMissingError();
+      return [];
+    }
     if (res.status !== 207) throw new NetworkError(res.status, res.text, 'PROPFIND');
     return await this.parsePropfindDirectories(res.text, { op: 'getDirectories', path, status: res.status, method: 'PROPFIND' });
   }
 
-  async inspectDirectory(path: string, includeDescendants = false): Promise<{ protected: boolean; fileId: string | null } | null> {
+  async inspectDirectory(path: string, includeDescendants = false, isExcluded?: (path: string) => boolean): Promise<{ protected: boolean; fileId: string | null } | null> {
     const res = await this.reqReadonly({
       url: this.remoteUrl(path), method: 'PROPFIND', body: DIRECTORY_PROTECTION_BODY, throw: false,
       headers: { Authorization: this.authHeader, Depth: includeDescendants ? 'infinity' : '0',
@@ -340,7 +346,7 @@ export class NextcloudClient implements IWebDAVClient {
         found = true;
         fileId = readOwncloudProps(prop).fileId;
       }
-      if (!prop || readRemovalProtection(prop)) protectedEntry = true;
+      if (!prop || readRemovalProtection(prop) || (relative !== null && isExcluded?.(relative))) protectedEntry = true;
     }
     if (!found) throw new Error(`Nextcloud did not confirm directory ${path}.`);
     return { protected: protectedEntry, fileId };
@@ -369,16 +375,32 @@ export class NextcloudClient implements IWebDAVClient {
     this.existingRootRequired = required;
   }
 
+  trackKnownDirectories(state: TrackedDirectories): void {
+    this.knownDirectories = state;
+  }
+
   private get directoryContext() {
     return {
       baseUrl: this.baseUrl, authHeader: this.authHeader, timeoutMs: this.timeoutMs,
       existingRoot: this.existingRootRequired ? this.remoteBase : undefined,
+      mayCreateDirectory: (path: string) => {
+        const relative = fromRemotePath(this.remoteBase, path);
+        return !relative || !this.knownDirectories?.getDir(relative);
+      },
     };
   }
 
   // Fails if any level could not be created: watch mode tracks the folder right after this returns, and a tracked folder
   // the server lacks drives delete propagation (issue #46).
   async createDirectory(path: string): Promise<void> {
+    const tracked = this.knownDirectories?.getDir(path);
+    if (tracked) {
+      const current = await this.inspectDirectory(path);
+      if (!current || (tracked.remoteFileId && current.fileId !== tracked.remoteFileId)) {
+        throw new Error(`Folder ${path} is missing, inaccessible or a different collection on Nextcloud.`);
+      }
+      return;
+    }
     // ensureRemoteDir MKCOLs every segment of the path it is given EXCEPT the last (it assumes a
     // trailing file name), so append a dummy segment to have `path` itself (and its ancestors) created.
     await ensureRemoteDir(
@@ -875,11 +897,23 @@ export class NextcloudClient implements IWebDAVClient {
     }
   }
 
+  private verifyListedRoot(responses: Element[]): void {
+    const state = this.knownDirectories;
+    if (!state) return;
+    const root = responses.find(response => hrefToRelative(this.baseUrl, this.remoteBase, readHref(response)) === '');
+    const prop = root && readProp(root);
+    const fileId = prop && readIsCollection(prop) ? readOwncloudProps(prop).fileId : null;
+    const expected = state.getRemoteRootFileId();
+    if (expected && fileId !== expected) throw new RemoteRootChangedError();
+    if (fileId && !expected) state.setRemoteRootFileId(fileId);
+  }
+
   private async parsePropfindResponse(
     xml: string, ctx: { op: string; path: string; status: number; method: 'PROPFIND' | 'REPORT' },
   ): Promise<RemoteFileInfo[]> {
     const results: RemoteFileInfo[] = [];
     const responses = readMultistatus(xml, ctx);
+    if (ctx.op === 'getFiles' && ctx.path === '') this.verifyListedRoot(responses);
     for (let i = 0; i < responses.length; i++) {
       // Yield periodically so parsing a large Depth:infinity listing does not freeze the UI or trigger an Android ANR (FR-027).
       if (i > 0 && i % PARSE_YIELD_EVERY === 0) await new Promise((r) => window.setTimeout(r, 0));
@@ -903,6 +937,7 @@ export class NextcloudClient implements IWebDAVClient {
   ): Promise<RemoteDirInfo[]> {
     const results: RemoteDirInfo[] = [];
     const responses = readMultistatus(xml, ctx);
+    if (ctx.path === '') this.verifyListedRoot(responses);
     for (let i = 0; i < responses.length; i++) {
       if (i > 0 && i % PARSE_YIELD_EVERY === 0) await new Promise((r) => window.setTimeout(r, 0));
       const resp = responses[i];

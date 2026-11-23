@@ -1,4 +1,4 @@
-// [SPEC:WF-1] Watch-mode single-folder ops: create (MKCOL, idempotent), delete (tracked-only, trashbin),
+// [SPEC:WF-1] Watch-mode single-folder ops: create (MKCOL, idempotent), delete (retain the remote collection),
 // rename (MOVE). Exclusions honored; status bar shows activity. Mirrors the file-side
 // syncSingleFile/deleteSingleFile/renameSingleFile behavior.
 import { SyncEngine } from '../../../src/sync/SyncEngine';
@@ -22,6 +22,8 @@ function makeEngine(opts: { tracked?: DirState[]; settings?: DavSyncSettings } =
     deleteCollection: jest.fn(async () => undefined),
     isRemoteDirEmpty: jest.fn(async () => true),
     moveFile: jest.fn(async () => undefined),
+    getFiles: jest.fn(async () => []),
+    getDirectories: jest.fn(async () => []),
   };
   const features = { isNextcloud: true, version: '30', hasChecksums: true, hasFilesLocking: false, hasBulkUpload: false, hasAccountDav: true, syncToken: null };
   const statusBar = { setStatus: jest.fn(), setProgress: jest.fn(), setSyncComplete: jest.fn(), setErrorCount: jest.fn() };
@@ -72,11 +74,11 @@ describe('[SPEC:WF-1] SyncEngine.createSingleFolder', () => {
 });
 
 describe('[SPEC:WF-2] SyncEngine.deleteSingleFolder', () => {
-  it('deletes a TRACKED folder on the remote (trashbin) and drops tracking', async () => {
+  it('retains a TRACKED folder on the remote and keeps tracking', async () => {
     const { engine, client, dirs } = makeEngine({ tracked: [dirState('Old')] });
     await engine.deleteSingleFolder('Old');
-    expect(client.deleteCollection).toHaveBeenCalledWith('Old');
-    expect(dirs.has('Old')).toBe(false);
+    expect(client.deleteCollection).not.toHaveBeenCalled();
+    expect(dirs.has('Old')).toBe(true);
   });
 
   it('is a no-op for an UNTRACKED folder (never on the server)', async () => {
@@ -109,9 +111,18 @@ describe('[SPEC:WF-3] SyncEngine.renameSingleFolder', () => {
     expect(dirs.has('B')).toBe(true);
   });
 
-  it('is a no-op only when BOTH old and new are excluded', async () => {
+  it.each([['.obsidian/a', 'B'], ['A', '.obsidian/b'], ['.obsidian/a', '.obsidian/b']])('keeps %s → %s local across excluded roots', async (source, destination) => {
     const { engine, client } = makeEngine();
-    await engine.renameSingleFolder('.obsidian/a', '.obsidian/b');
+    await engine.renameSingleFolder(source, destination);
     expect(client.moveFile).not.toHaveBeenCalled();
+  });
+});
+
+describe('Watch folder renames with nested scope exclusions', () => {
+  it.each(['A/private', 'B/private'])('blocks a collection MOVE containing %s', async (excluded) => {
+    const { engine, client, dirs } = makeEngine({ tracked: [dirState('A')], settings: settings({ excludedFolders: [excluded] }) });
+    await engine.renameSingleFolder('A', 'B');
+    expect(client.moveFile).not.toHaveBeenCalled();
+    expect(dirs.get('A')).toBeDefined();
   });
 });

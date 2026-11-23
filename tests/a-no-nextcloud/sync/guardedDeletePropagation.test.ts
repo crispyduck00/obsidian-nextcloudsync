@@ -17,6 +17,7 @@ import {
   DEFAULT_SETTINGS, FileState, RemoteDirInfo, RemoteFileInfo, SyncSessionSummary, NetworkError,
 } from '../../../src/types';
 import { sha256 } from '../../../src/util/hash';
+import { computeSyncScopeFingerprint } from '../../../src/sync/plugins/scopeFingerprint';
 import { TFile, TFolder } from '../support/obsidian';
 
 const enc = new TextEncoder();
@@ -303,7 +304,8 @@ describe('Missing shared folders and concurrent directory changes', () => {
 
     await h.engine.deleteSingleFile(note.path);
     expect(h.client.deleteFile).toHaveBeenCalledWith(note.path, expect.any(String), 'revision-a');
-    expect(inspectDirectory).not.toHaveBeenCalled();
+    expect(inspectDirectory).toHaveBeenCalledTimes(1);
+    expect(inspectDirectory).toHaveBeenCalledWith('Shared');
   });
 
   it('checks the filesystem when the vault index still shows a removed mount', async () => {
@@ -336,6 +338,47 @@ describe('Missing shared folders and concurrent directory changes', () => {
     expect(h.client.uploadFile).not.toHaveBeenCalled();
     expect(h.client.createDirectory).not.toHaveBeenCalled();
     expect(h.vault['Shared/sub/new.md']).toBe('new local work');
+  });
+
+  it('holds a new draft when the entire listing comes from a stale root ETag', async () => {
+    const path = 'Shared/draft.md';
+    const h = await buildEngine({ [path]: 'new local work' }, ['Shared'], world());
+    trackDir(h.stateDB, 'Shared');
+    h.stateDB.setSyncScopeFingerprint(computeSyncScopeFingerprint(DEFAULT_SETTINGS));
+    h.stateDB.setRemoteRootEtag('unchanged');
+    h.client.getRootEtag.mockResolvedValue('unchanged');
+    const inspectDirectory = jest.fn(async () => null);
+    Object.assign(h.client, { inspectDirectory });
+
+    const result = await h.sync();
+
+    expect(h.client.getFiles).not.toHaveBeenCalled();
+    expect(inspectDirectory).toHaveBeenCalledWith('Shared');
+    expect(h.client.uploadFile).not.toHaveBeenCalled();
+    expect(result.errors).toEqual([expect.objectContaining({ path })]);
+    expect(h.vault[path]).toBe('new local work');
+  });
+
+  it('keeps tracking and pending changes across repeated listings of a replacement folder', async () => {
+    const path = 'Shared/draft.md';
+    const remote = world({ dirs: [{ ...remoteDir('Shared'), fileId: 'replacement' }] });
+    const h = await buildEngine({ [path]: 'new local work' }, ['Shared'], remote);
+    trackDir(h.stateDB, 'Shared');
+    const inspectDirectory = jest.fn(async () => ({ protected: false, fileId: remote.dirs[0].fileId }));
+    Object.assign(h.client, { inspectDirectory });
+
+    for (let i = 0; i < 2; i++) {
+      const result = await h.sync();
+      expect(result.errors).toContainEqual(expect.objectContaining({ path: 'Shared' }));
+      expect(h.stateDB.getDir('Shared')?.remoteFileId).toBe('dir-Shared');
+    }
+    expect(h.client.uploadFile).not.toHaveBeenCalled();
+    expect(h.vault[path]).toBe('new local work');
+
+    remote.dirs = [remoteDir('Shared')];
+    const restored = await h.sync();
+    expect(restored.errorCount).toBe(0);
+    expect(h.client.uploadFile).toHaveBeenCalledWith(path, expect.any(ArrayBuffer), expect.any(Number), expect.anything());
   });
 });
 
@@ -624,10 +667,9 @@ describe('[SPEC:GDP-26] a genuine local deletion still reaches the server', () =
 });
 
 describe('[SPEC:GDP-27] a genuine local folder deletion still reaches the server', () => {
-  it('deletes the child file and then the emptied collection', async () => {
+  it('deletes proven matching child files and keeps the collection', async () => {
     // Everything under F is gone from the vault and from the folder list, but the server still has
-    // all of it and agrees with our base. Tracked-and-absent on this side, present on that one: a
-    // deletion the user made here, in both its file and folder halves.
+    // all of it and agrees with our base. The normal guarded file deletion still applies.
     const h = await buildEngine({ 'keep.md': 'kept' }, [], world({
       listing: [await listed('F/a.md', 'a body'), await listed('keep.md', 'kept')],
       dirs: [remoteDir('F')],
@@ -640,9 +682,9 @@ describe('[SPEC:GDP-27] a genuine local folder deletion still reaches the server
     const summary = await h.sync();
 
     expect(h.client.deleteFile).toHaveBeenCalledWith('F/a.md', expect.anything());
-    expect(h.client.deleteCollection).toHaveBeenCalledWith('F');
+    expect(h.client.deleteCollection).not.toHaveBeenCalled();
     expect(h.stateDB.getFile('F/a.md')).toBeUndefined();
-    expect(h.stateDB.getDir('F')).toBeUndefined();
+    expect(h.stateDB.getDir('F')).toBeDefined();
     expect(summary.errorCount).toBe(0);
   });
 });

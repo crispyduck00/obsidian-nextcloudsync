@@ -16,6 +16,7 @@ import {
   NetworkError,
   PreconditionFailedError,
   RemoteCompareResult,
+  RemoteRootChangedError,
   RemoteRootMissingError,
   AppPasswordReader,
   CredentialsNotFoundError,
@@ -48,7 +49,7 @@ import { ResolutionService } from './resolution/ResolutionService';
 import { ConflictApplier } from './conflict/ConflictApplier';
 import { hasCompleteMarkerSet } from './ConflictResolver';
 import { DirectoryReconciler } from './directory/DirectoryReconciler';
-import { RemoteFolderGuard, assertTrackedParentReadable } from './directory/RemoteFolderGuard';
+import { RemoteFolderGuard, assertTrackedParentReadable, replacedRemoteFolders } from './directory/RemoteFolderGuard';
 import { WatchOperations } from './watch/WatchOperations';
 import { SyncActivityGate } from './SyncActivityGate';
 import { RemotePushReconciler, type RemoteBatchReconcileResult, type RemotePushBatch } from './push/RemotePushReconciler';
@@ -306,13 +307,11 @@ export class SyncEngine {
       app: opts.app,
       stateDB: opts.stateDB,
       journal: this.journal,
-      transfer: this.transfer,
       mergeBase: this.mergeBase,
       dropCleanSnapshot: (p) => this.resolution.dropCleanSnapshot(p),
       markOwnEvent: (p) => this.opts.localAdapter.ignore(p),
       isSystemExcluded: (p) => this.isSystemExcluded(p),
       massDeleteLimit: () => this.opts.settings.massDeleteLimit,
-      remoteFolders: this.remoteFolders,
       isCancelled: () => this.cancelled,
       logger: opts.logger,
     });
@@ -328,6 +327,7 @@ export class SyncEngine {
       remoteFolders: this.remoteFolders,
       resolution: this.resolution,
       isSystemExcluded: (p) => this.isSystemExcluded(p),
+      containsExcludedFolder: (p) => this.opts.settings.excludedFolders?.some(excluded => excluded.startsWith(`${p}/`)) ?? false,
       isPluginPath: (p) => this.plugins.isPluginPath(p),
       connect: () => this.connection(),
       renameTracker: () => this.getOrCreateRenameTracker(),
@@ -391,6 +391,7 @@ export class SyncEngine {
     if (!this.renameTracker) {
       const client = this.client!;
       this.renameTracker = new RenameTracker(this.opts.stateDB, client, async (source, destination) => {
+        if (client.inspectDirectory) await assertTrackedParentReadable(client, this.opts.stateDB, source);
         await this.remoteFolders.assertRemovalAllowed(client, source);
         await assertTrackedParentReadable(client, this.opts.stateDB, destination);
       });
@@ -429,6 +430,7 @@ export class SyncEngine {
     const rebuild = !!read && !!this.client && password !== this.connectedPassword;
     if (!this.client || !this.features || rebuild) {
       const { client, features } = await this.opts.webdavFactory.createClient();
+      client.trackKnownDirectories?.(this.opts.stateDB);
       this.client = client;
       this.features = features;
       this.connectedPassword = password;
@@ -870,11 +872,11 @@ export class SyncEngine {
   }
 
   async applyCleanRemote(path: string): Promise<void> {
-    return this.resolution.applyCleanRemote(await this.connection(), path);
+    return this.resolution.applyCleanRemote(await this.connectionForWrite(path), path);
   }
 
   async applyCleanLocal(path: string): Promise<void> {
-    return this.resolution.applyCleanLocal(await this.connection(), path);
+    return this.resolution.applyCleanLocal(await this.connectionForWrite(path), path);
   }
 
   // "remote" makes local match remote, "local" makes remote match local (directory create/delete).
@@ -970,7 +972,7 @@ export class SyncEngine {
 
 
   async pushLocalToRemote(path: string): Promise<void> {
-    return this.resolution.pushLocalToRemote(await this.connection(), path);
+    return this.resolution.pushLocalToRemote(await this.connectionForWrite(path), path);
   }
 
   async pullRemoteToLocal(path: string): Promise<void> {
@@ -996,6 +998,12 @@ export class SyncEngine {
     return { client, uploadStrategy: this.uploadStrategy! };
   }
 
+
+  private async connectionForWrite(path: string): Promise<{ client: IWebDAVClient; uploadStrategy: IUploadStrategy }> {
+    const conn = await this.connection();
+    if (conn.client.inspectDirectory) await assertTrackedParentReadable(conn.client, this.opts.stateDB, path);
+    return conn;
+  }
 
   private initSummary(): SyncSessionSummary {
     return this.journal.newSummary();
@@ -1136,10 +1144,29 @@ export class SyncEngine {
     }
     if (fullScan) this.rememberRemoteRoot(client);
 
+    // Verify the directory view before any writes based on the file listing.
+    let remoteDirs = fullScan?.cachedDirs ?? undefined;
+    if (fullScan && !remoteDirs) {
+      try { remoteDirs = await client.getDirectories(''); }
+      catch (err) {
+        if (client.inspectDirectory || err instanceof RemoteRootChangedError || err instanceof RemoteRootMissingError) throw err;
+        void this.opts.logger?.log(`dir-sync: listing failed — skip this session: ${(err as Error).message}`);
+      }
+    }
+
+    const replaced = replacedRemoteFolders(remoteDirs ?? [], this.opts.stateDB, path => this.isSystemExcluded(path));
+    const isHeld = (path: string): boolean => replaced.size > 0
+      && (replaced.has(path) || ancestorMatching(path, parent => replaced.has(parent)) !== undefined);
+    for (const path of replaced) {
+      if (ancestorMatching(path, parent => replaced.has(parent))) continue;
+      this.recordError(summary, path, new Error('A different Nextcloud folder is now at this path. Local files and sync tracking were kept.'));
+    }
+
     summary.retriedFiles = this.retryQueue.splice(0);
 
-    await this.preparePluginSession(client, remoteFiles);
-    const eligible = remoteFiles.filter(f => !this.isSystemExcluded(f.path));
+    const scopeFiles = replaced.size > 0 ? remoteFiles.filter(f => !isHeld(f.path)) : remoteFiles;
+    await this.preparePluginSession(client, scopeFiles);
+    const eligible = scopeFiles.filter(f => !this.isSystemExcluded(f.path));
     this.syncProgress = { processed: 0, total: eligible.length };
     if (eligible.length > 0) this.opts.statusBar.setProgress(0, eligible.length);
     // Bounded parallel; uploads to the same directory are serialized to avoid 423s. A plugin's manifest.json goes last so a
@@ -1153,17 +1180,10 @@ export class SyncEngine {
       true,
     );
 
-    // Read the directory view before using absence to decide whether to upload a local-only path.
-    // In particular, an accessible vault can contain a now-inaccessible share or Team Folder.
-    let remoteDirs = fullScan?.cachedDirs ?? undefined;
-    if (fullScan && !remoteDirs) {
-      try { remoteDirs = await client.getDirectories(''); }
-      catch (err) { void this.opts.logger?.log(`dir-sync: listing failed — skip this session: ${(err as Error).message}`); }
-    }
-    const withinLocalDeleteLimit = await this.processLocalModifications(remoteFiles, summary, fullScan !== undefined, remoteDirs);
+    const withinLocalDeleteLimit = await this.processLocalModifications(remoteFiles, summary, fullScan !== undefined, remoteDirs, isHeld);
 
     // Only a COMPLETE listing can show directory absence; the token path's partial diff cannot.
-    if (remoteDirs) await this.reconcileDirectories(summary, remoteDirs, !withinLocalDeleteLimit);
+    if (remoteDirs) await this.reconcileDirectories(summary, remoteDirs, !withinLocalDeleteLimit, isHeld);
 
     // Drop captured clean sides for paths that converged, keeping snapshots bounded to currently-conflicted files.
     this.sweepResolvedSnapshots();
@@ -1547,6 +1567,7 @@ export class SyncEngine {
 
   private async processLocalModifications(
     remoteFiles: RemoteFileInfo[], summary: SyncSessionSummary, isFullScan = false, remoteDirs?: RemoteDirInfo[],
+    isHeld: (path: string) => boolean = () => false,
   ): Promise<boolean> {
     const remotePathSet = new Set(remoteFiles.map(f => f.path));
     const remoteDirPaths = new Set(remoteDirs?.map(dir => dir.path.replace(/\/+$/, '')));
@@ -1571,7 +1592,7 @@ export class SyncEngine {
 
     // Cheap synchronous pre-filter, then bounded-parallel upload; the content-hash check stays in the worker because it needs a read.
     const uploadCandidates = [...localStats.entries()].filter(([path, st]) => {
-      if (remotePathSet.has(path) || this.pluginSkips(path, 'local-only')) return false;
+      if (isHeld(path) || remotePathSet.has(path) || this.pluginSkips(path, 'local-only')) return false;
       const base = this.opts.stateDB.getFile(path);
       // Skip files whose post-write stat signature is unchanged (no read, no hash); an mtime filter is always false on mobile.
       return !(base && this.isLocallyUnchanged(base, st));
@@ -1595,6 +1616,7 @@ export class SyncEngine {
         const idType: FileState['idType'] = base?.idType ?? 'sha256';
         void this.opts.logger?.log(`upload: ${path} (${base ? 'modified, re-upload' : 'new local file'})`);
         try {
+          if (this.client!.inspectDirectory) await assertTrackedParentReadable(this.client!, this.opts.stateDB, path);
           await this.uploadFile(
             path, localHash, remoteId, idType,
             { path, fileId: base?.remoteFileId ?? null, checksum: null, etag: null, size: st.size, lastModified: st.mtime, creationTime: 0 },
@@ -1615,7 +1637,7 @@ export class SyncEngine {
     // New (unsynced) local files, for hash-based rename detection.
     const newLocalFiles = new Map<string, { hash: string; size: number }>();
     for (const [path, st] of localStats) {
-      if (!this.opts.stateDB.getFile(path)) {
+      if (!isHeld(path) && !this.opts.stateDB.getFile(path)) {
         const data = await this.opts.localAdapter.readBinary(path);
         const hash = await sha256(data);
         newLocalFiles.set(path, { hash, size: st.size });
@@ -1624,7 +1646,7 @@ export class SyncEngine {
 
     const missingPaths = this.opts.stateDB.getAllFiles()
       .map(f => f.path)
-      .filter(p => !this.isSystemExcluded(p) && !localStats.has(p) && !remotePathSet.has(p));
+      .filter(p => !isHeld(p) && !this.isSystemExcluded(p) && !localStats.has(p) && !remotePathSet.has(p));
 
     const localRenames = rt.detectLocalRenamesByHash(missingPaths, newLocalFiles);
 
@@ -1665,7 +1687,7 @@ export class SyncEngine {
       const candidates: string[] = [];
       for (const fileState of this.opts.stateDB.getAllFiles()) {
         const path = fileState.path;
-        if (this.isSystemExcluded(path) || remotePathSet.has(path)) continue;
+        if (isHeld(path) || this.isSystemExcluded(path) || remotePathSet.has(path)) continue;
         if (!localStats.has(path)) continue;
         const data = await this.opts.localAdapter.readBinary(path);
         if (await sha256(data) !== fileState.localHash || fileState.isConflicted) {
@@ -1678,7 +1700,7 @@ export class SyncEngine {
       // Circuit breaker: too many apparent remote deletions means a partial or failed listing, so refuse.
       const tracked = this.opts.stateDB.getAllFiles().length;
       const limit = this.effectiveMassDeleteLimit(tracked + this.opts.stateDB.getAllDirs().length);
-      const count = candidates.length + (remoteDirs ? this.directories.countMissingLocalCopies(remoteDirPaths) : 0);
+      const count = candidates.length + (remoteDirs ? this.directories.countMissingLocalCopies(remoteDirPaths, isHeld) : 0);
       if (count > limit) {
         void this.opts.logger?.log(`delete-local: SKIPPED ${count} absence-deletions — exceeds safety limit (${limit}); likely a partial remote listing`);
         new Notice(`⚠️ ${count} files and folders look deleted on the server — skipped to avoid mass deletion. Re-sync to retry.`, 10000);
@@ -1708,8 +1730,10 @@ export class SyncEngine {
 
   // Runs only on a COMPLETE listing. Directories are first-class entities, never deleted merely for being empty
   // (docs/spec.md §8a.1, docs/plan.md §16).
-  private reconcileDirectories(summary: SyncSessionSummary, cachedDirs?: RemoteDirInfo[], skipLocalRemovals = false): Promise<void> {
-    return this.directories.reconcileDirectories(this.client!, summary, cachedDirs, skipLocalRemovals);
+  private reconcileDirectories(
+    summary: SyncSessionSummary, cachedDirs?: RemoteDirInfo[], skipLocalRemovals = false, isHeld?: (path: string) => boolean,
+  ): Promise<void> {
+    return this.directories.reconcileDirectories(this.client!, summary, cachedDirs, skipLocalRemovals, isHeld);
   }
 
   private async buildInitialPlan(
