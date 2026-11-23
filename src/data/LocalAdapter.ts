@@ -274,6 +274,10 @@ export class LocalAdapter {
     return this.adapter.exists(normalizePath(path));
   }
 
+  async isFile(path: string): Promise<boolean> {
+    return (await this.adapter.stat(normalizePath(path)))?.type === 'file';
+  }
+
   /** adapter.stat plus `ctime` only when trusted (support !== 'untrusted') and valid. null when absent. */
   async stat(path: string): Promise<LocalStat | null> {
     const st = await this.adapter.stat(normalizePath(path));

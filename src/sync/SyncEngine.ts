@@ -290,6 +290,7 @@ export class SyncEngine {
     });
     this.directories = new DirectoryReconciler({
       hasRenameInFolder: (p) => this.pendingFileRenames.touchesFolder(p),
+      isRenameHeld: (p) => this.pendingFileRenames.holds(p),
       app: opts.app,
       stateDB: opts.stateDB,
       journal: this.journal,
@@ -317,10 +318,8 @@ export class SyncEngine {
       connect: () => this.connection(),
       isRenameHeld: (p) => this.pendingFileRenames.holds(p),
       hasRenameInFolder: (p) => this.pendingFileRenames.touchesFolder(p),
-      retryFileRename: (client, source, destination) => {
-        this.rememberFileRename(source, destination);
-        return this.pendingFileRenames.retry(client, rename => rename.destination === destination);
-      },
+      retryFileRename: (client, _source, destination) =>
+        this.pendingFileRenames.retry(client, rename => rename.destination === destination),
       isBlockedByWifiOnly: () => this.isBlockedByWifiOnly(),
       isSyncRunning: () => this.running,
       processFile: (remote, summary) => this.processFileWithRetry(remote, summary),
@@ -638,6 +637,10 @@ export class SyncEngine {
 
   renameSingleFile(oldPath: string, newPath: string): Promise<void> {
     this.rememberFileRename(oldPath, newPath);
+    return this.syncRememberedFileRename(oldPath, newPath);
+  }
+
+  syncRememberedFileRename(oldPath: string, newPath: string): Promise<void> {
     if (this.running) return Promise.resolve();
     return this.watch.renameSingleFile(oldPath, newPath);
   }
@@ -1016,7 +1019,7 @@ export class SyncEngine {
     }
   }
 
-  /** Recover an unobserved rename only from an unambiguous match to a tracked Nextcloud file. */
+  /** Infer a rename only within one folder and only from an unchanged local file signature. */
   private async inferUnobservedFileRenames(remoteFiles: readonly RemoteFileInfo[]): Promise<Set<string>> {
     const inferred = new Set<string>();
     if (!this.features?.isNextcloud || !remoteFiles.length) return inferred;
@@ -1029,7 +1032,7 @@ export class SyncEngine {
     for (const file of remoteFiles) {
       if (!file.fileId || localPaths.has(file.path) || !eligible(file.path)) continue;
       const base = this.opts.stateDB.getFile(file.path);
-      if (base?.remoteFileId !== file.fileId || base.size > MAX_HASH_SIZE) continue;
+      if (base?.remoteFileId !== file.fileId || base.localMtime === undefined || base.isConflicted || base.size > MAX_HASH_SIZE) continue;
       const sameSize = missing.get(base.size) ?? [];
       sameSize.push(base);
       missing.set(base.size, sameSize);
@@ -1043,7 +1046,8 @@ export class SyncEngine {
       const bytes = await this.opts.localAdapter.readBinary(file.path).catch(() => null);
       if (!bytes || bytes.byteLength !== file.size) continue;
       const hash = await sha256(bytes);
-      const originals = sameSize.filter(base => base.localHash === hash);
+      const originals = sameSize.filter(base => base.localHash === hash
+        && base.localMtime === file.mtime && parentDirOf(base.path) === parentDirOf(file.path));
       if (originals.length !== 1) continue;
       const source = originals[0].path;
       const destinations = matches.get(source) ?? [];
@@ -1052,7 +1056,7 @@ export class SyncEngine {
     }
     for (const [source, destinations] of matches) {
       if (destinations.length === 1 && !(await this.opts.localAdapter.stat(source))
-        && this.pendingFileRenames.capture(source, destinations[0])) inferred.add(source);
+        && this.pendingFileRenames.capture(source, destinations[0], 'inferred')) inferred.add(source);
     }
     if (inferred.size) await this.opts.stateDB.save();
     return inferred;

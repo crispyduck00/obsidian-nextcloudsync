@@ -207,7 +207,7 @@ export default class ObsidianNextcloudsync extends Plugin {
           if (watchOn()) void this.syncEngine?.renameSingleFolder(oldPath, file.path);
         } else if (file instanceof TFile) {
           this.syncEngine?.rememberFileRename(oldPath, file.path);
-          if (watchOn()) void this.syncEngine?.renameSingleFile(oldPath, file.path);
+          if (watchOn()) void this.syncEngine?.syncRememberedFileRename(oldPath, file.path);
         }
       }));
 

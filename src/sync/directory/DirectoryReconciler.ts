@@ -30,6 +30,7 @@ export interface DirectoryDeps {
   markOwnEvent(path: string): void;
   isSystemExcluded(path: string): boolean;
   hasRenameInFolder?(path: string): boolean;
+  isRenameHeld?(path: string): boolean;
   massDeleteLimit(): number;
   // Checked between directory operations so a cancel takes effect promptly.
   isCancelled(): boolean;
@@ -64,7 +65,8 @@ export class DirectoryReconciler {
     );
     const tracked = new Map(this.deps.stateDB.getAllDirs().map(d => [d.path, d]));
 
-    const plan = classifyDirectories(remoteDirs, localDirs, tracked, (p) => this.deps.isSystemExcluded(p));
+    const plan = classifyDirectories(remoteDirs, localDirs, tracked, p =>
+      this.deps.isSystemExcluded(p) || this.deps.isRenameHeld?.(p) === true);
     plan.deleteRemote = plan.deleteRemote.filter(path => !this.deps.hasRenameInFolder?.(path));
     plan.trashLocal = plan.trashLocal.filter(path => !this.deps.hasRenameInFolder?.(path));
     const { mkcolRemote, mkdirLocal, deleteRemote, trashLocal, ensureTracked, dropTracked } = plan;
@@ -92,6 +94,7 @@ export class DirectoryReconciler {
     // Parents before children.
     for (const p of mkcolRemote.sort(shallowFirst)) {
       if (this.deps.isCancelled()) break;
+      if (this.deps.isRenameHeld?.(p)) continue;
       try {
         await client.createDirectory(p);
         this.deps.stateDB.setDir({ path: p, remoteFileId: remoteDirs.get(p)?.fileId ?? null });
@@ -104,6 +107,7 @@ export class DirectoryReconciler {
     // Parents before children.
     for (const p of mkdirLocal.sort(shallowFirst)) {
       if (this.deps.isCancelled()) break;
+      if (this.deps.isRenameHeld?.(p)) continue;
       try {
         await this.deps.app.vault.adapter.mkdir(normalizePath(p));
         this.deps.stateDB.setDir({ path: p, remoteFileId: remoteDirs.get(p)?.fileId ?? null });

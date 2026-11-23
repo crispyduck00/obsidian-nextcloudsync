@@ -194,6 +194,8 @@ export interface PendingFileRename {
   destination: string;
   scope: string;
   fileId: string | null;
+  /** Only a local rename event can authorize a MOVE across folders or after a remote edit. */
+  observed?: true;
   /** Persisted before MOVE so a lost response or an app restart can be reconciled by identity. */
   attemptedDestination?: string;
   issue?: FileRenameIssue;
