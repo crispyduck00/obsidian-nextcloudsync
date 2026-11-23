@@ -12,7 +12,6 @@ import { MergeBaseRecorder } from '../../../../src/sync/session/MergeBaseRecorde
 import { TransferService } from '../../../../src/sync/transfer/TransferService';
 import { DeletionService } from '../../../../src/sync/deletion/DeletionService';
 import { ResolutionService } from '../../../../src/sync/resolution/ResolutionService';
-import { RenameTracker } from '../../../../src/sync/RenameTracker';
 import { FileState, RemoteFileInfo, SyncSessionSummary } from '../../../../src/types';
 import { IWebDAVClient } from '../../../../src/network/IWebDAVClient';
 import { IUploadStrategy } from '../../../../src/sync/upload/IUploadStrategy';
@@ -80,7 +79,7 @@ function buildRacy() {
     isSystemExcluded: () => false,
     isPluginPath: noPluginPath,
     connect: async () => ({ client, uploadStrategy: {} as unknown as IUploadStrategy }),
-    renameTracker: () => ({}) as unknown as RenameTracker,
+    retryFileRename: async () => true,
     isBlockedByWifiOnly: () => false,
     isSyncRunning: () => false,
     // Stands in for the real classifier. It reproduces the two facts that matter: the decision is

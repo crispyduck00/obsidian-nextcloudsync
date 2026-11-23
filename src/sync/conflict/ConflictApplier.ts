@@ -49,6 +49,7 @@ export interface ConflictDeps {
   // Read at call time so a settings change takes effect.
   resolverConfig(): MergeConfig;
   maxFileSizeMB(): number;
+  isRenameHeld?(path: string): boolean;
   queueRetry(path: string): void;
   onConflictEncountered(): void;
   logger?: Pick<FileLogger, 'log'>;
@@ -216,6 +217,7 @@ export class ConflictApplier {
     // (PROPPATCH of mtime is silently ignored on Nextcloud, so the upload header is what sets the remote time.)
     const mergeMtime = Date.now();
     const before = await this.deps.localAdapter.stat(path);
+    if (this.deps.isRenameHeld?.(path)) return;
     await this.deps.localAdapter.atomicWrite(
       path, content, mergeMtime, writeCreationTimeMs(before?.ctime, remote.creationTime),
     );
@@ -227,6 +229,7 @@ export class ConflictApplier {
     try {
       const lockToken = await this.deps.transfer.acquireLock(conn.client, path);
       try {
+        if (this.deps.isRenameHeld?.(path)) return;
         const outcome = await conn.uploadStrategy.upload(conn.client, path, mergedData, mergeMtime, {
           ctime: uploadCreationTimeMs(before?.ctime, remote.creationTime),
         });
@@ -295,6 +298,7 @@ export class ConflictApplier {
     try {
       const lockToken = await this.deps.transfer.acquireLock(conn.client, path);
       try {
+        if (this.deps.isRenameHeld?.(path)) return;
         const outcome = await conn.uploadStrategy.upload(conn.client, path, localData, mtime, {
           ctime: uploadCreationTimeMs(stat?.ctime, remote.creationTime),
         });
@@ -346,6 +350,7 @@ export class ConflictApplier {
     }
     try {
       const before = await this.deps.localAdapter.stat(path);
+      if (this.deps.isRenameHeld?.(path)) return;
       await this.deps.localAdapter.atomicWriteBinary(
         path, remoteData, this.deps.localWrite.mtimeFor(path, remote.lastModified || undefined),
         writeCreationTimeMs(before?.ctime, remote.creationTime),

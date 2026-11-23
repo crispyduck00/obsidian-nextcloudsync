@@ -26,6 +26,8 @@ export interface DeletionDeps {
   mergeBase: MergeBaseRecorder;
   transfer: TransferService;
   isSystemExcluded(path: string): boolean;
+  isRenameHeld?(path: string): boolean;
+  hasRenameInFolder?(path: string): boolean;
   dropCleanSnapshot(path: string): void;
   // Registers a path so the vault event this plugin causes is not fed back to the watcher. Required: an
   // unwired no-op here turns a plugin trash back into a server DELETE.
@@ -49,6 +51,7 @@ export class DeletionService {
       try { serverHash = await client.recalcChecksum(remote.path); } catch { serverHash = null; }
     }
 
+    if (this.deps.isRenameHeld?.(remote.path)) return 'kept';
     if (serverHash && serverHash === base.localHash) {
       void this.deps.logger?.log(`delete-remote: local deletion (server checksum matches base) → ${remote.path}`);
       try {
@@ -86,6 +89,7 @@ export class DeletionService {
     // A throw reaches the caller, which keeps the tracking entry: an unanswerable probe must never be read as
     // "gone", or an outage would quietly discard the file's history.
     const remote = await client.statFile(path);
+    if (this.deps.isRenameHeld?.(path)) return 'kept';
     if (!remote) {
       void this.deps.logger?.log(`delete-remote: not on the server (Depth:0 404) — dropping tracking, no DELETE → ${path}`);
       this.deps.journal.recordHistory(path, 'deleted');
@@ -109,6 +113,7 @@ export class DeletionService {
   }
 
   async processRemoteDeletion(path: string, summary: SyncSessionSummary): Promise<RemoteDeletionOutcome> {
+    if (this.deps.isRenameHeld?.(path)) return { status: 'ignored' };
     // Security boundary at the delete sink: a compromised server could fabricate a deletion for
     // `.obsidian/...`, which would otherwise reach the raw fs remove below. Enforced here for all callers.
     if (this.deps.isSystemExcluded(path)) {
@@ -125,6 +130,7 @@ export class DeletionService {
         // Obsidian fires a `delete` event for each; register the subtree as our own so watch mode does not
         // push them to the server as user deletions.
         if (file instanceof TFolder) {
+          if (this.deps.hasRenameInFolder?.(path)) return { status: 'ignored' };
           const stale = collectSubtreePaths(this.deps.stateDB, path);
           // The set keeps `path` from registering twice when it is already in stale.dirs.
           for (const p of new Set([path, ...stale.files, ...stale.dirs])) this.deps.markOwnEvent(p);

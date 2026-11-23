@@ -199,12 +199,16 @@ export default class ObsidianNextcloudsync extends Plugin {
         void this.syncEngine?.deleteSingleFile(file.path);
       }));
       this.registerEvent(this.app.vault.on('rename', (file: TAbstractFile, oldPath: string) => {
-        if (!watchOn()) return;
         pendingUploads.delete(oldPath);
         // tmp -> target renames are the tail of the plugin's own atomic writes.
         if (isOwnSyncEvent(oldPath) || isOwnSyncEvent(file.path)) return;
-        if (file instanceof TFolder) { void this.syncEngine?.renameSingleFolder(oldPath, file.path); return; }
-        void this.syncEngine?.renameSingleFile(oldPath, file.path);
+        if (file instanceof TFolder) {
+          this.syncEngine?.rememberFolderRename(oldPath, file.path);
+          if (watchOn()) void this.syncEngine?.renameSingleFolder(oldPath, file.path);
+        } else if (file instanceof TFile) {
+          this.syncEngine?.rememberFileRename(oldPath, file.path);
+          if (watchOn()) void this.syncEngine?.renameSingleFile(oldPath, file.path);
+        }
       }));
 
       // Sync on foreground resume, on every platform (docs/spec.md §5.8). The cooldown inside the

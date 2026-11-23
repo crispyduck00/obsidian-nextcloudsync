@@ -1,0 +1,193 @@
+import type { LocalAdapter } from '../data/LocalAdapter';
+import type { StateDB } from '../data/StateDB';
+import type { IWebDAVClient } from '../network/IWebDAVClient';
+import { isSafeVaultRelativePath } from '../network/remotePath';
+import { ConflictError, NetworkError, type FileRenameIssue, type FileState, type PendingFileRename, type RemoteFileInfo } from '../types';
+import { AsyncMutex } from '../util/AsyncMutex';
+import { remoteIdOf } from './remoteIdentity';
+
+const issueMessages: Record<FileRenameIssue, string> = {
+  locked: 'Nextcloud has locked the file. The rename will be retried.',
+  'read-only': 'Nextcloud reports read-only access. The rename is waiting for write access.',
+  denied: 'Nextcloud denied the rename. Check access to the source and destination.',
+  conflict: 'The original file or destination changed on Nextcloud. Review both paths.',
+  'local-missing': 'The renamed local file is missing. Restore it or move it back to the original path.',
+  scope: 'The rename is outside the current sync target or included folders.',
+  retry: 'The rename could not finish. It will be checked again during sync.',
+};
+
+export function fileRenameStatus(rename: PendingFileRename): string {
+  return rename.issue ? issueMessages[rename.issue] : 'Waiting to sync the rename.';
+}
+
+function validFilePath(path: string): boolean {
+  return !!path && isSafeVaultRelativePath(path);
+}
+
+function touches(rename: PendingFileRename, path: string): boolean {
+  return rename.source === path || rename.destination === path || rename.attemptedDestination === path;
+}
+
+function issueFor(error: unknown): FileRenameIssue {
+  if (error instanceof NetworkError) {
+    if (error.status === 423) return 'locked';
+    if (error.status === 403) return 'denied';
+  }
+  return error instanceof ConflictError ? 'conflict' : 'retry';
+}
+
+interface RenamePorts {
+  state: Pick<StateDB, 'getPendingFileRenames' | 'setPendingFileRenames' | 'getFile' | 'save'>;
+  local: Pick<LocalAdapter, 'stat'>;
+  scope(): string;
+  isExcluded(path: string): boolean;
+  move(source: string, destination: string, etag: string): Promise<void>;
+  moveTracking(source: string, destination: string, file: FileState): void;
+  isCancelled(): boolean;
+}
+
+/** Records the user's local rename before either path can fall into normal upload/deletion. */
+export class PendingFileRenames {
+  private readonly mutex = new AsyncMutex();
+
+  constructor(private readonly deps: RenamePorts) {}
+
+  list(): readonly PendingFileRename[] {
+    return this.deps.state.getPendingFileRenames?.() ?? [];
+  }
+
+  holds(path: string): boolean {
+    return this.list().some(rename => touches(rename, path));
+  }
+
+  touchesFolder(path: string): boolean {
+    const within = (candidate: string | undefined): boolean => !!candidate && (candidate === path || candidate.startsWith(`${path}/`));
+    return this.list().some(rename => within(rename.source) || within(rename.destination) || within(rename.attemptedDestination));
+  }
+
+  /** Recording is synchronous so an already-running sync can see the hold at its next write. */
+  capture(oldPath: string, newPath: string): boolean {
+    if (oldPath === newPath || !validFilePath(oldPath) || !validFilePath(newPath)) return false;
+    const scope = this.deps.scope();
+    const chain = this.list().find(rename => rename.destination === oldPath && rename.scope === scope);
+    if (chain) {
+      // An attempted MOVE may have reached the server even after a lost response. Verify before undoing.
+      this.replace(chain.source, newPath === chain.source && !chain.attemptedDestination
+        ? null : { ...chain, destination: newPath, issue: undefined });
+      return true;
+    }
+    if (this.holds(oldPath) || this.deps.isExcluded(oldPath) || this.deps.isExcluded(newPath)) return false;
+    const base = this.deps.state.getFile(oldPath);
+    if (!base) return false;
+    this.deps.state.setPendingFileRenames([...this.list(), { source: oldPath, destination: newPath, scope, fileId: base.remoteFileId }]);
+    return true;
+  }
+
+  captureFolder(oldPath: string, newPath: string): boolean {
+    let changed = false;
+    for (const rename of this.list()) {
+      if (rename.destination.startsWith(`${oldPath}/`)) {
+        changed = this.capture(rename.destination, newPath + rename.destination.slice(oldPath.length)) || changed;
+      }
+    }
+    return changed;
+  }
+
+  retry(client: IWebDAVClient, shouldRetry: (rename: PendingFileRename) => boolean = () => true): Promise<boolean> {
+    return this.mutex.run(async () => {
+      let moved = false;
+      for (const rename of this.list()) {
+        if (this.deps.isCancelled()) break;
+        if (!shouldRetry(rename)) continue;
+        moved = await this.attempt(client, rename) || moved;
+      }
+      return moved;
+    });
+  }
+
+  private async attempt(client: IWebDAVClient, rename: PendingFileRename): Promise<boolean> {
+    const { source, destination, attemptedDestination } = rename;
+    if (this.current(source) !== rename) return false;
+    if (rename.scope !== this.deps.scope() || [source, destination, attemptedDestination].some(path =>
+      path !== undefined && (!validFilePath(path) || this.deps.isExcluded(path)))) {
+      return this.recordIssue(source, 'scope');
+    }
+    if (this.list().some(other => other !== rename && (touches(other, source) || touches(other, destination)
+      || (attemptedDestination !== undefined && touches(other, attemptedDestination))))) {
+      return this.recordIssue(source, 'conflict');
+    }
+    const base = this.deps.state.getFile(source);
+    if (!base || base.remoteFileId !== rename.fileId) return this.recordIssue(source, 'conflict');
+
+    try {
+      const [original, target, attempted] = await Promise.all([
+        client.statFile(source, true),
+        source !== destination ? client.statFile(destination) : Promise.resolve(null),
+        attemptedDestination && attemptedDestination !== destination && attemptedDestination !== source
+          ? client.statFile(attemptedDestination) : Promise.resolve(null),
+      ]);
+      if (this.current(source) !== rename) return false;
+      const sameSource = original !== null && this.matchesOriginal(original, base);
+      const arrived = [target, attempted].find(remote => remote !== null && rename.fileId && remote.fileId === rename.fileId);
+      // An acknowledged or discovered MOVE may leave a new object at the old path. Its different identity is safe to leave alone.
+      if (!sameSource && arrived) {
+        await this.finishMove(rename, arrived.path, base);
+        return true;
+      }
+      if (!sameSource || !original?.etag || target) return this.recordIssue(source, 'conflict');
+      if (source === destination) {
+        this.replace(source, null);
+        await this.deps.state.save();
+        return false;
+      }
+      if (!(await this.deps.local.stat(destination))) return this.recordIssue(source, 'local-missing');
+      // The absence of all file-change rights is a useful explicit signal. The actual MOVE still decides
+      // for mixed permissions and for servers that omit the property.
+      if (original.permissions && !/[DNVW]/.test(original.permissions)) return this.recordIssue(source, 'read-only');
+      if (this.current(source) !== rename || this.deps.isCancelled()) return false;
+      const prepared = { ...rename, attemptedDestination: destination };
+      this.replace(source, prepared);
+      await this.deps.state.save();
+      if (this.current(source) !== prepared || this.deps.isCancelled() || prepared.scope !== this.deps.scope()) return false;
+      await this.deps.move(source, destination, original.etag);
+      await this.finishMove(prepared, destination, base);
+      return true;
+    } catch (error) {
+      return this.recordIssue(source, issueFor(error));
+    }
+  }
+
+  private matchesOriginal(remote: RemoteFileInfo, base: FileState): boolean {
+    if (base.remoteFileId) return remote.fileId === base.remoteFileId;
+    const revision = remoteIdOf(remote);
+    return revision.idType !== 'size' && revision.idType === base.idType && revision.remoteId === base.remoteId;
+  }
+
+  private async finishMove(rename: PendingFileRename, destination: string, base: FileState): Promise<void> {
+    const current = this.current(rename.source);
+    if (!current || current.scope !== rename.scope) return;
+    this.deps.moveTracking(rename.source, destination, base);
+    this.replace(rename.source, current.destination === destination ? null : {
+      ...current, source: destination, attemptedDestination: undefined, issue: undefined,
+    });
+    await this.deps.state.save();
+  }
+
+  private current(source: string): PendingFileRename | undefined {
+    return this.list().find(rename => rename.source === source);
+  }
+
+  private replace(source: string, next: PendingFileRename | null): void {
+    const remaining = this.list().filter(rename => rename.source !== source);
+    this.deps.state.setPendingFileRenames(next ? [...remaining, next] : remaining);
+  }
+
+  private async recordIssue(source: string, issue: FileRenameIssue): Promise<false> {
+    const current = this.current(source);
+    if (current && current.issue !== issue) {
+      this.replace(source, { ...current, issue });
+      await this.deps.state.save();
+    }
+    return false;
+  }
+}

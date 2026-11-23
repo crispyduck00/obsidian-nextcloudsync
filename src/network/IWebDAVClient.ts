@@ -16,7 +16,7 @@ export interface IWebDAVClient {
    * @throws NetworkError on any other non-207 (an ambiguous failure must not read as "absent").
    * @throws RemoteListingUnreadableError when a 207 body cannot be parsed.
    */
-  statFile(remotePath: string): Promise<RemoteFileInfo | null>;
+  statFile(remotePath: string, includePermissions?: boolean): Promise<RemoteFileInfo | null>;
   /**
    * ETag of the sync-root collection, or null when unavailable or not meaningful for change detection
    * (standard WebDAV always returns null). Never throws: any failure, including an unreadable body, yields null.
@@ -57,7 +57,8 @@ export interface IWebDAVClient {
     remotePath: string, data: ArrayBuffer, mtime?: number,
     opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; ctime?: number },
   ): Promise<void>;
-  moveFile(oldPath: string, newPath: string): Promise<void>;
+  /** MOVE with Overwrite:F, optionally conditioned on the source revision. */
+  moveFile(oldPath: string, newPath: string, ifMatchEtag?: string): Promise<void>;
   deleteFile(path: string, expectedRemoteId: string): Promise<void>;
   getSyncToken(): Promise<string | null>;
   /**

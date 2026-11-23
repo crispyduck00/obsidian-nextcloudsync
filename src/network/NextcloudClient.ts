@@ -244,7 +244,7 @@ export class NextcloudClient implements IWebDAVClient {
   // Depth:0 state of ONE file (docs/spec.md §5.7), parsed by the SAME parsePropfindResponse as the full scan so processRemoteFile
   // can be reused. A collection yields no entry, hence null. Unlike getFiles, a non-207 other than 404 THROWS: reading an
   // ambiguous failure as "absent" would send the caller down the create path and blind-overwrite the file.
-  async statFile(remotePath: string): Promise<RemoteFileInfo | null> {
+  async statFile(remotePath: string, includePermissions = false): Promise<RemoteFileInfo | null> {
     const res = await this.reqReadonly({
       url: this.remoteUrl(remotePath),
       method: 'PROPFIND',
@@ -254,7 +254,7 @@ export class NextcloudClient implements IWebDAVClient {
         'Content-Type': 'application/xml; charset=utf-8',
         ...NO_CACHE_HEADERS,
       },
-      body: PROPFIND_BODY,
+      body: includePermissions ? PROPFIND_BODY.replace('<oc:fileid/>', '<oc:fileid/><oc:permissions/>') : PROPFIND_BODY,
       throw: false,
     });
     if (res.status === 404) return null; // no such file (or its parent folder does not exist)
@@ -463,7 +463,7 @@ export class NextcloudClient implements IWebDAVClient {
     return m ? m[1].toLowerCase() : null;
   }
 
-  async moveFile(oldPath: string, newPath: string): Promise<void> {
+  async moveFile(oldPath: string, newPath: string, ifMatchEtag?: string): Promise<void> {
     // Ensure the destination parent exists before MOVE. This deliberately does NOT drop stale cache entries: if the folder went away
     // after we created it, the MKCOL is skipped, the MOVE 404s, and the recovery below puts it back.
     const ctx = { baseUrl: this.baseUrl, authHeader: this.authHeader, timeoutMs: this.timeoutMs };
@@ -474,17 +474,18 @@ export class NextcloudClient implements IWebDAVClient {
     await ensureRemoteDir(ctx, target, this.createdDirs).catch((err) => {
       if (!(err instanceof RemoteDirCreateError)) throw err;
     });
+    const condition: Record<string, string> = ifMatchEtag ? { 'If-Match': `"${ifMatchEtag.replace(/^"|"$/g, '')}"` } : {};
     const move = () => this.req({
       url: this.remoteUrl(oldPath),
       method: 'MOVE',
-      headers: { Authorization: this.authHeader, Destination: this.remoteUrl(newPath), Overwrite: 'F', ...NO_CACHE_HEADERS },
+      headers: { Authorization: this.authHeader, Destination: this.remoteUrl(newPath), Overwrite: 'F', ...condition, ...NO_CACHE_HEADERS },
       throw: false,
     });
     let res = await move();
     let dirError: RemoteDirCreateError | null = null;
     // Same missing-parent recovery as uploadFile: a destination folder another device deleted leaves a stale "already created" entry
     // that makes the MKCOL above a no-op.
-    if (res.status === 409 || res.status === 404) {
+    if (!ifMatchEtag && (res.status === 409 || res.status === 404)) {
       dirError = await prepareMissingParentRetry(ctx, target, this.createdDirs);
       if (isTransportFailure(dirError)) throw dirError;
       res = await move();
@@ -799,7 +800,8 @@ export class NextcloudClient implements IWebDAVClient {
       const { etag, size, lastModified } = readDavProps(prop);
       const { checksum, fileId } = readOwncloudProps(prop);
       const { creationTime } = readNextcloudProps(prop);
-      results.push({ path, fileId, checksum, etag, size, lastModified, creationTime });
+      const permissions = prop.getElementsByTagNameNS('http://owncloud.org/ns', 'permissions')[0]?.textContent?.trim();
+      results.push({ path, fileId, checksum, etag, size, lastModified, creationTime, ...(permissions ? { permissions } : {}) });
     }
     return results;
   }

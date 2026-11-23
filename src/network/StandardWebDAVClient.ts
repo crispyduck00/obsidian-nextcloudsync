@@ -266,7 +266,7 @@ export class StandardWebDAVClient implements IWebDAVClient {
     }
   }
 
-  async moveFile(oldPath: string, newPath: string): Promise<void> {
+  async moveFile(oldPath: string, newPath: string, ifMatchEtag?: string): Promise<void> {
     // Same missing-parent recovery as NextcloudClient.moveFile.
     const ctx = { baseUrl: this.baseUrl, authHeader: this.authHeader, timeoutMs: this.timeoutMs };
     const target = toRemotePath(this.remoteBase, newPath);
@@ -276,10 +276,14 @@ export class StandardWebDAVClient implements IWebDAVClient {
     await ensureRemoteDir(ctx, target, this.createdDirs).catch((err) => {
       if (!(err instanceof RemoteDirCreateError)) throw err;
     });
-    const move = () => this.req({ url: this.remoteUrl(oldPath), method: 'MOVE', headers: { Authorization: this.authHeader, Destination: this.remoteUrl(newPath), Overwrite: 'F', ...NO_CACHE_HEADERS }, throw: false });
+    const condition: Record<string, string> = ifMatchEtag ? { 'If-Match': `"${ifMatchEtag.replace(/^"|"$/g, '')}"` } : {};
+    const move = () => this.req({
+      url: this.remoteUrl(oldPath), method: 'MOVE', throw: false,
+      headers: { Authorization: this.authHeader, Destination: this.remoteUrl(newPath), Overwrite: 'F', ...condition, ...NO_CACHE_HEADERS },
+    });
     let res = await move();
     let dirError: RemoteDirCreateError | null = null;
-    if (res.status === 409 || res.status === 404) {
+    if (!ifMatchEtag && (res.status === 409 || res.status === 404)) {
       dirError = await prepareMissingParentRetry(ctx, target, this.createdDirs);
       if (isTransportFailure(dirError)) throw dirError;
       res = await move();

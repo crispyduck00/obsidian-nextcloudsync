@@ -11,7 +11,6 @@ import {
   SyncSessionSummary,
   SyncFileOp,
   SyncHistoryDetail,
-  SyncHistoryEntry,
   SyncTokenExpiredError,
   NetworkError,
   PreconditionFailedError,
@@ -52,6 +51,8 @@ import { IStatusBar } from '../ui/StatusBarItem';
 import { WebDAVFactory } from '../network/WebDAVFactory';
 import { IWebDAVClient } from '../network/IWebDAVClient';
 import { RenameTracker } from './RenameTracker';
+import { PendingFileRenames, fileRenameStatus } from './PendingFileRenames';
+import type { SyncStatusReport } from '../ui/statusFilter';
 import { ConfigSyncResolver } from './ConfigSyncResolver';
 import { PluginSyncCoordinator } from './plugins/PluginSyncCoordinator';
 import { partitionPluginManifestsLast, pluginDirPath } from './plugins/pluginPaths';
@@ -151,6 +152,7 @@ export class SyncEngine {
   // Summary counters cannot say: conflicts settled by a deterministic strategy count as plain uploads/downloads.
   private conflictEncounters = 0;
   private renameTracker: RenameTracker | null = null;
+  private readonly pendingFileRenames: PendingFileRenames;
   // Single source of truth for which config-folder paths sync (shared by isSystemExcluded, the remote filter
   // and the remote-deletion scope guard).
   private readonly configSync: ConfigSyncResolver;
@@ -190,6 +192,15 @@ export class SyncEngine {
       localAdapter: opts.localAdapter,
       pluginGate: this.plugins,
     });
+    this.pendingFileRenames = new PendingFileRenames({
+      state: opts.stateDB,
+      local: opts.localAdapter,
+      scope: () => this.fileRenameScope(),
+      isExcluded: (p) => this.isSystemExcluded(p) || this.plugins.isPluginPath(p),
+      move: (source, destination, etag) => this.getOrCreateRenameTracker().moveRemoteFile(source, destination, etag),
+      moveTracking: (source, destination, file) => this.moveFileTracking(source, destination, file),
+      isCancelled: () => this.cancelled,
+    });
     this.localScanner = new LocalScanner({
       localAdapter: opts.localAdapter,
       isSystemExcluded: (p) => this.isSystemExcluded(p),
@@ -209,6 +220,7 @@ export class SyncEngine {
       logger: opts.logger,
     });
     this.transfer = new TransferService({
+      isRenameHeld: (p) => this.pendingFileRenames.holds(p),
       creationTime: this.creationTime,
       localAdapter: opts.localAdapter,
       stateDB: opts.stateDB,
@@ -224,6 +236,8 @@ export class SyncEngine {
     });
     this.versions = new VersionService({ localAdapter: opts.localAdapter, stateDB: opts.stateDB });
     this.deletion = new DeletionService({
+      isRenameHeld: (p) => this.pendingFileRenames.holds(p),
+      hasRenameInFolder: (p) => this.pendingFileRenames.touchesFolder(p),
       app: opts.app,
       stateDB: opts.stateDB,
       journal: this.journal,
@@ -249,6 +263,7 @@ export class SyncEngine {
       logger: opts.logger,
     });
     this.conflicts = new ConflictApplier({
+      isRenameHeld: (p) => this.pendingFileRenames.holds(p),
       creationTime: this.creationTime,
       app: opts.app,
       localAdapter: opts.localAdapter,
@@ -274,6 +289,7 @@ export class SyncEngine {
       logger: opts.logger,
     });
     this.directories = new DirectoryReconciler({
+      hasRenameInFolder: (p) => this.pendingFileRenames.touchesFolder(p),
       app: opts.app,
       stateDB: opts.stateDB,
       journal: this.journal,
@@ -299,7 +315,12 @@ export class SyncEngine {
       isSystemExcluded: (p) => this.isSystemExcluded(p),
       isPluginPath: (p) => this.plugins.isPluginPath(p),
       connect: () => this.connection(),
-      renameTracker: () => this.getOrCreateRenameTracker(),
+      isRenameHeld: (p) => this.pendingFileRenames.holds(p),
+      hasRenameInFolder: (p) => this.pendingFileRenames.touchesFolder(p),
+      retryFileRename: (client, source, destination) => {
+        this.rememberFileRename(source, destination);
+        return this.pendingFileRenames.retry(client, rename => rename.destination === destination);
+      },
       isBlockedByWifiOnly: () => this.isBlockedByWifiOnly(),
       isSyncRunning: () => this.running,
       processFile: (remote, summary) => this.processFileWithRetry(remote, summary),
@@ -319,6 +340,7 @@ export class SyncEngine {
       logger: opts.logger,
     });
     this.mirror = new MirrorService({
+      hasPendingFileRenames: () => this.pendingFileRenames.list().length > 0,
       app: opts.app,
       localAdapter: opts.localAdapter,
       stateDB: opts.stateDB,
@@ -354,6 +376,36 @@ export class SyncEngine {
     return this.renameTracker;
   }
 
+  private fileRenameScope(): string {
+    const { serverUrl, username } = this.opts.settings;
+    let endpoint = serverUrl ?? '';
+    try {
+      const url = new URL(endpoint);
+      endpoint = url.origin + url.pathname.replace(/\/+$/, '');
+    } catch { endpoint = ''; }
+    return JSON.stringify([endpoint, username, this.opts.app.vault?.getName?.()]);
+  }
+
+  private moveFileTracking(source: string, destination: string, file: FileState): void {
+    this.opts.stateDB.deleteFile(source);
+    this.opts.stateDB.setFile({ ...file, path: destination });
+    this.opts.stateDB.setRemoteRootEtag(null);
+    if (this.opts.baseStore) {
+      const base = this.opts.baseStore.get(source);
+      this.opts.baseStore.delete(source);
+      this.opts.baseStore.delete(destination);
+      if (base !== undefined) this.opts.baseStore.set(destination, base);
+      this.opts.baseStore.requestSave();
+    }
+    if (this.opts.cleanSideStore) {
+      const snapshot = this.opts.cleanSideStore.get(source);
+      this.opts.cleanSideStore.delete(source);
+      this.opts.cleanSideStore.delete(destination);
+      if (snapshot) this.opts.cleanSideStore.set(destination, snapshot);
+      this.opts.cleanSideStore.requestSave();
+    }
+  }
+
   /** Lists community plugins on this device and (when reachable) the server for the picker. */
   async listCommunityPluginCandidates(): Promise<PluginCandidateList> {
     let client: IWebDAVClient | null;
@@ -386,6 +438,7 @@ export class SyncEngine {
     if (!this.client || !this.features || rebuild) {
       const { client, features } = await this.opts.webdavFactory.createClient();
       this.client = client;
+      this.renameTracker = null;
       this.features = features;
       this.connectedPassword = password;
       // Chunked upload needs the account-only uploads namespace, which a public link share lacks (docs/spec.md §3);
@@ -454,6 +507,7 @@ export class SyncEngine {
       this.syncProgress = { processed: 0, total: 0 };
       this.opts.statusBar.setStatus('syncing', { automatic: !manual });
 
+      if (this.pendingFileRenames.list().length) await this.pendingFileRenames.retry(this.client!);
       const isFirstSync = !this.opts.stateDB.getSyncToken() && this.opts.stateDB.getAllFiles().length === 0;
 
       if (isFirstSync) {
@@ -470,6 +524,12 @@ export class SyncEngine {
       // Clear `running` FIRST: the teardown below can throw (state/history save), which would otherwise leave the
       // engine permanently "running".
       this.running = false;
+      for (const rename of this.pendingFileRenames.list()) {
+        if (rename.issue) {
+          summary.errorCount++;
+          summary.errors.push({ path: rename.source, message: fileRenameStatus(rename), pendingRename: true });
+        }
+      }
       this.journal.endRun();
 
       void this.opts.logger?.log(
@@ -561,7 +621,24 @@ export class SyncEngine {
     return this.watch.deleteSingleFile(path);
   }
 
+  /** Records local intent even when Watch is off, on cellular, or a full scan is active. */
+  rememberFileRename(oldPath: string, newPath: string): void {
+    if (this.pendingFileRenames.capture(oldPath, newPath)) this.persistRenameIntent();
+  }
+
+  rememberFolderRename(oldPath: string, newPath: string): void {
+    if (this.pendingFileRenames.captureFolder(oldPath, newPath)) this.persistRenameIntent();
+  }
+
+  private persistRenameIntent(): void {
+    void this.opts.stateDB.save().catch(err => {
+      console.warn('[SyncEngine] Could not save the file rename:', err);
+    });
+  }
+
   renameSingleFile(oldPath: string, newPath: string): Promise<void> {
+    this.rememberFileRename(oldPath, newPath);
+    if (this.running) return Promise.resolve();
     return this.watch.renameSingleFile(oldPath, newPath);
   }
 
@@ -631,10 +708,12 @@ export class SyncEngine {
   }
 
   async applyCleanRemote(path: string): Promise<void> {
+    this.assertFileRenameSettled(path);
     return this.resolution.applyCleanRemote(await this.connection(), path);
   }
 
   async applyCleanLocal(path: string): Promise<void> {
+    this.assertFileRenameSettled(path);
     return this.resolution.applyCleanLocal(await this.connection(), path);
   }
 
@@ -701,12 +780,7 @@ export class SyncEngine {
     return this.opts.stateDB.getLastSyncTime();
   }
 
-  getStatusReport(): {
-    summary: SyncSessionSummary | null;
-    conflictedFiles: string[];
-    retryFiles: string[];
-    history: SyncHistoryEntry[];
-  } {
+  getStatusReport(): SyncStatusReport {
     const conflictedFiles = this.opts.stateDB.getAllFiles()
       .filter(f => f.isConflicted)
       .map(f => f.path);
@@ -715,6 +789,7 @@ export class SyncEngine {
       conflictedFiles,
       retryFiles: [...this.retryQueue],
       history: this.opts.historyStore?.recent() ?? [],
+      pendingFileRenames: this.pendingFileRenames.list(),
     };
   }
 
@@ -729,12 +804,18 @@ export class SyncEngine {
 
 
   async pushLocalToRemote(path: string): Promise<void> {
+    this.assertFileRenameSettled(path);
     return this.resolution.pushLocalToRemote(await this.connection(), path);
   }
 
   async pullRemoteToLocal(path: string): Promise<void> {
+    this.assertFileRenameSettled(path);
     const { client } = await this.ensureClient();
     return this.resolution.pullRemoteToLocal(client, path);
+  }
+
+  private assertFileRenameSettled(path: string): void {
+    if (this.pendingFileRenames.holds(path)) throw new Error('Resolve the pending rename in Sync status before changing this path.');
   }
 
   private textEligible(path: string): boolean {
@@ -777,6 +858,9 @@ export class SyncEngine {
   // A missing vault folder proves nothing about individual files, so local wins and nothing is deleted locally (docs/spec.md §8).
   // The MKCOL is the proof: 201 = truly absent (reset and re-upload); 405 = the 404 listing was wrong, so change nothing.
   private async reseedFromLocal(summary: SyncSessionSummary): Promise<void> {
+    if (this.pendingFileRenames.list().length) {
+      throw new Error('The remote vault is unavailable. Pending file renames and the local files were kept.');
+    }
     const outcome = await this.client!.createVaultRoot();
     if (outcome === 'exists') {
       void this.opts.logger?.log(
@@ -853,6 +937,7 @@ export class SyncEngine {
           const rt = this.getOrCreateRenameTracker();
           const remoteRenames = rt.detectRemoteRenames(remoteFiles);
           for (const [oldPath, newPath] of remoteRenames) {
+            if (this.pendingFileRenames.holds(oldPath) || this.pendingFileRenames.holds(newPath)) continue;
             await rt.applyRemoteRename(oldPath, newPath);
           }
 
@@ -889,6 +974,15 @@ export class SyncEngine {
       return;
     }
 
+    if (isFullScan) {
+      const inferred = await this.inferUnobservedFileRenames(remoteFiles);
+      if (inferred.size && await this.pendingFileRenames.retry(client, rename => inferred.has(rename.source))) {
+        // Successful MOVEs invalidate the listing captured before we inferred these renames.
+        remoteFiles = await client.getFiles('');
+        fullScanCachedDirs = null;
+      }
+    }
+
     summary.retriedFiles = this.retryQueue.splice(0);
 
     await this.preparePluginSession(client, remoteFiles);
@@ -922,7 +1016,50 @@ export class SyncEngine {
     }
   }
 
+  /** Recover an unobserved rename only from an unambiguous match to a tracked Nextcloud file. */
+  private async inferUnobservedFileRenames(remoteFiles: readonly RemoteFileInfo[]): Promise<Set<string>> {
+    const inferred = new Set<string>();
+    if (!this.features?.isNextcloud || !remoteFiles.length) return inferred;
+    const local = this.opts.localAdapter.listVaultFiles?.() ?? [];
+    const localPaths = new Set(local.map(file => file.path));
+    const remotePaths = new Set(remoteFiles.map(file => file.path));
+    const eligible = (path: string): boolean => !this.pendingFileRenames.holds(path)
+      && !this.isSystemExcluded(path) && !this.plugins.isPluginPath(path);
+    const missing = new Map<number, FileState[]>();
+    for (const file of remoteFiles) {
+      if (!file.fileId || localPaths.has(file.path) || !eligible(file.path)) continue;
+      const base = this.opts.stateDB.getFile(file.path);
+      if (base?.remoteFileId !== file.fileId || base.size > MAX_HASH_SIZE) continue;
+      const sameSize = missing.get(base.size) ?? [];
+      sameSize.push(base);
+      missing.set(base.size, sameSize);
+    }
+    if (!missing.size) return inferred;
+
+    const matches = new Map<string, string[]>();
+    for (const file of local) {
+      const sameSize = missing.get(file.size);
+      if (!sameSize || remotePaths.has(file.path) || this.opts.stateDB.getFile(file.path) || !eligible(file.path)) continue;
+      const bytes = await this.opts.localAdapter.readBinary(file.path).catch(() => null);
+      if (!bytes || bytes.byteLength !== file.size) continue;
+      const hash = await sha256(bytes);
+      const originals = sameSize.filter(base => base.localHash === hash);
+      if (originals.length !== 1) continue;
+      const source = originals[0].path;
+      const destinations = matches.get(source) ?? [];
+      destinations.push(file.path);
+      matches.set(source, destinations);
+    }
+    for (const [source, destinations] of matches) {
+      if (destinations.length === 1 && !(await this.opts.localAdapter.stat(source))
+        && this.pendingFileRenames.capture(source, destinations[0])) inferred.add(source);
+    }
+    if (inferred.size) await this.opts.stateDB.save();
+    return inferred;
+  }
+
   private async processFileWithRetry(remote: RemoteFileInfo, summary: SyncSessionSummary): Promise<void> {
+    if (this.pendingFileRenames.holds(remote.path)) return;
     try {
       await this.processRemoteFile(remote, summary);
     } catch (err) {
@@ -1020,6 +1157,7 @@ export class SyncEngine {
       localChanged = false;
     }
 
+    if (this.pendingFileRenames.holds(remote.path)) return;
     const plugin = { localPresent: localStat !== null, localHash, localChanged, remoteId, idType };
     if (await this.applyPluginFileAction(remote, base, plugin, summary)) return;
 
@@ -1155,6 +1293,7 @@ export class SyncEngine {
   }
 
   async restoreVersion(path: string, version: FileVersion): Promise<void> {
+    this.assertFileRenameSettled(path);
     const { client, features } = await this.ensureClient();
     return this.versions.restoreVersion(client, features, path, version);
   }
@@ -1231,7 +1370,7 @@ export class SyncEngine {
 
     // Cheap synchronous pre-filter, then bounded-parallel upload; the content-hash check stays in the worker because it needs a read.
     const uploadCandidates = [...localStats.entries()].filter(([path, st]) => {
-      if (remotePathSet.has(path) || this.pluginSkips(path, 'local-only')) return false;
+      if (this.pendingFileRenames.holds(path) || remotePathSet.has(path) || this.pluginSkips(path, 'local-only')) return false;
       const base = this.opts.stateDB.getFile(path);
       // Skip files whose post-write stat signature is unchanged (no read, no hash); an mtime filter is always false on mobile.
       return !(base && this.isLocallyUnchanged(base, st));
@@ -1270,7 +1409,7 @@ export class SyncEngine {
     // New (unsynced) local files, for hash-based rename detection.
     const newLocalFiles = new Map<string, { hash: string; size: number }>();
     for (const [path, st] of localStats) {
-      if (!this.opts.stateDB.getFile(path)) {
+      if (!this.pendingFileRenames.holds(path) && !this.opts.stateDB.getFile(path)) {
         const data = await this.opts.localAdapter.readBinary(path);
         const hash = await sha256(data);
         newLocalFiles.set(path, { hash, size: st.size });
@@ -1279,7 +1418,7 @@ export class SyncEngine {
 
     const missingPaths = this.opts.stateDB.getAllFiles()
       .map(f => f.path)
-      .filter(p => !this.isSystemExcluded(p) && !localStats.has(p) && !remotePathSet.has(p));
+      .filter(p => !this.pendingFileRenames.holds(p) && !this.isSystemExcluded(p) && !localStats.has(p) && !remotePathSet.has(p));
 
     const localRenames = rt.detectLocalRenamesByHash(missingPaths, newLocalFiles);
 
@@ -1320,7 +1459,7 @@ export class SyncEngine {
       const candidates: string[] = [];
       for (const fileState of this.opts.stateDB.getAllFiles()) {
         const path = fileState.path;
-        if (this.isSystemExcluded(path) || remotePathSet.has(path)) continue;
+        if (this.pendingFileRenames.holds(path) || this.isSystemExcluded(path) || remotePathSet.has(path)) continue;
         if (!localStats.has(path)) continue;
         const data = await this.opts.localAdapter.readBinary(path);
         if (await sha256(data) !== fileState.localHash) continue;
