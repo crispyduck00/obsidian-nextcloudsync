@@ -57,7 +57,7 @@ describeLive('Layer B — guarded delete propagation (feature 086 / issue #46)',
     deleteFile.mockRestore();
   });
 
-  it('[SPEC:GDP-31]: a folder the user deletes locally is still propagated to the server', async () => {
+  it('[SPEC:GDP-31]: a local folder deletion removes proven child files and retains the server collection', async () => {
     const env = getEnv();
     const a = makeDevice(env, ws.remoteBase, 'deviceA-gdp31');
     a.vault.seedLocal('gdp31-keep.md', 'survivor');
@@ -69,7 +69,8 @@ describeLive('Layer B — guarded delete propagation (feature 086 / issue #46)',
     await a.sync();
 
     expect((await baseClient.getFiles('')).map((f) => f.path)).not.toContain('GDP31/a.md');
-    expect(await baseClient.remoteExists('GDP31')).toBe(false);
+    expect(await baseClient.remoteExists('GDP31')).toBe(true);
+    expect(a.stateDB.getDir('GDP31')).toBeDefined();
     expect(a.stateDB.getFile('GDP31/a.md')).toBeUndefined();
   });
 

@@ -23,7 +23,7 @@ const PASSWORD_ERROR = 'App password not found in credentials';
 const LABEL = Symbol('label');
 const stubClient = (label: string): object => new Proxy({}, {
   get: (_t, prop) => {
-    if (prop === 'then' || prop === 'requireExistingVaultRoot') return undefined;
+    if (prop === 'then' || prop === 'requireExistingVaultRoot' || prop === 'trackKnownDirectories' || prop === 'inspectDirectory') return undefined;
     return prop === LABEL ? label : async () => { throw new Error('stub client'); };
   },
 });

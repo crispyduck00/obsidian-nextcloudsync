@@ -8,7 +8,6 @@
 // from "the user deleted most of their folders", and acting on that difference is unrecoverable.
 import { DirectoryReconciler, DirectoryDeps } from '../../../../src/sync/directory/DirectoryReconciler';
 import { SyncJournal } from '../../../../src/sync/session/SyncJournal';
-import { TransferService } from '../../../../src/sync/transfer/TransferService';
 import { SyncSessionSummary, RemoteDirInfo, DirState } from '../../../../src/types';
 import { IWebDAVClient } from '../../../../src/network/IWebDAVClient';
 import { TFolder } from '../../support/obsidian';
@@ -45,7 +44,6 @@ function build(world: Partial<World> = {}, over: Partial<DirectoryDeps> = {}) {
     trash: [] as string[],
     setDir: [] as string[],
     deleteDir: [] as string[],
-    lock: [] as string[],
     deleteFile: [] as string[],
     dropMergeBase: [] as string[],
     dropCleanSnapshot: [] as string[],
@@ -54,7 +52,6 @@ function build(world: Partial<World> = {}, over: Partial<DirectoryDeps> = {}) {
     order: [] as string[],
     logs: [] as string[],
   };
-  let dirsEmpty = true;
   let listingFails = false;
 
   const client = {
@@ -64,7 +61,6 @@ function build(world: Partial<World> = {}, over: Partial<DirectoryDeps> = {}) {
     },
     createDirectory: async (p: string) => { calls.createDirectory.push(p); },
     deleteCollection: async (p: string) => { calls.deleteCollection.push(p); },
-    isRemoteDirEmpty: async () => dirsEmpty,
     // The L !R T branch asks the server before trashing. This harness models a listing that is RIGHT about
     // absence, so the probe agrees; verifyBeforeTrash.test.ts covers the case where it does not.
     remoteExists: async () => false,
@@ -110,10 +106,6 @@ function build(world: Partial<World> = {}, over: Partial<DirectoryDeps> = {}) {
       },
     } as unknown as DirectoryDeps['stateDB'],
     journal,
-    transfer: {
-      acquireLock: async (_c: IWebDAVClient, p: string) => { calls.lock.push(p); return null; },
-      releaseLock: async () => { /* noop */ },
-    } as unknown as TransferService,
     mergeBase: { drop: (p: string) => { calls.dropMergeBase.push(p); } },
     dropCleanSnapshot: (p: string) => { calls.dropCleanSnapshot.push(p); },
     markOwnEvent: (p: string) => {
@@ -131,7 +123,6 @@ function build(world: Partial<World> = {}, over: Partial<DirectoryDeps> = {}) {
     reconciler: new DirectoryReconciler(deps),
     client,
     calls,
-    setDirsEmpty: (v: boolean) => { dirsEmpty = v; },
     failListing: () => { listingFails = true; },
   };
 }
@@ -151,15 +142,15 @@ describe('DirectoryReconciler.reconcileDirectories — the three-way classificat
     expect(calls.setDir).toContain('FromOther');
   });
 
-  it('deletes on the remote a tracked folder that is gone locally (!L R T)', async () => {
+  it('retains a remote folder that is gone locally (!L R T)', async () => {
     const { reconciler, client, calls } = build({
       remote: [dir('Gone')], tracked: [{ path: 'Gone', remoteFileId: null }],
     });
     const s = summary();
     await reconciler.reconcileDirectories(client, s);
-    expect(calls.deleteCollection).toEqual(['Gone']);
-    expect(calls.deleteDir).toContain('Gone');
-    expect(s.deletedCount).toBe(1);
+    expect(calls.deleteCollection).toEqual([]);
+    expect(calls.deleteDir).toEqual([]);
+    expect(s.deletedCount).toBe(0);
   });
 
   it('trashes locally a tracked folder that is gone remotely (L !R T)', async () => {
@@ -201,28 +192,28 @@ describe('DirectoryReconciler.reconcileDirectories — the three-way classificat
 });
 
 describe('DirectoryReconciler.reconcileDirectories — the mass-delete breaker', () => {
-  // `tracked` folders, all present remotely but gone locally ⇒ all are deleteRemote candidates.
-  function allGoneLocally(n: number) {
+  // Tracked folders absent remotely are local cleanup candidates.
+  function allGoneRemotely(n: number) {
     const paths = Array.from({ length: n }, (_, i) => `d${i}`);
     return {
-      remote: paths.map((p) => dir(p)),
+      remote: [],
       tracked: paths.map((p) => ({ path: p, remoteFileId: null })),
-      local: [],
+      local: paths,
     };
   }
 
   it('deletes normally when the destructive set is within the limit', async () => {
     // Automatic limit is max(20, tracked*0.2) = 20 for a small set, so 20 deletions do NOT trip it.
-    const { reconciler, client, calls } = build(allGoneLocally(20));
+    const { reconciler, client, calls } = build(allGoneRemotely(20));
     const s = summary();
     await reconciler.reconcileDirectories(client, s);
-    expect(calls.deleteCollection).toHaveLength(20);
+    expect(calls.trash).toHaveLength(20);
     expect(s.errorCount).toBe(0);
   });
 
   it('refuses the WHOLE destructive set once the limit is exceeded', async () => {
     // 21 > max(20, 21*0.2=4) ⇒ breaker fires. Nothing is deleted — not "all but one".
-    const { reconciler, client, calls } = build(allGoneLocally(21));
+    const { reconciler, client, calls } = build(allGoneRemotely(21));
     const s = summary();
     await reconciler.reconcileDirectories(client, s);
     expect(calls.deleteCollection).toEqual([]);
@@ -231,33 +222,33 @@ describe('DirectoryReconciler.reconcileDirectories — the mass-delete breaker',
   });
 
   it('records the refused paths so the user can settle them later', async () => {
-    const { reconciler, client } = build(allGoneLocally(21));
+    const { reconciler, client } = build(allGoneRemotely(21));
     const s = summary();
     await reconciler.reconcileDirectories(client, s);
     const entry = s.errors.find((e) => e.path === '(dir mass-delete breaker)');
-    expect(entry?.dirBreakerSkipped?.deleteRemote).toHaveLength(21);
-    expect(entry?.dirBreakerSkipped?.trashLocal).toEqual([]);
+    expect(entry?.dirBreakerSkipped?.deleteRemote).toEqual([]);
+    expect(entry?.dirBreakerSkipped?.trashLocal).toHaveLength(21);
   });
 
   it('still applies the non-destructive half while the breaker holds the rest', async () => {
     // Creations are never part of the destructive set, so they must not be collateral damage.
-    const w = allGoneLocally(21);
-    const { reconciler, client, calls } = build({ ...w, local: ['Fresh'] });
+    const w = allGoneRemotely(21);
+    const { reconciler, client, calls } = build({ ...w, local: [...w.local, 'Fresh'] });
     await reconciler.reconcileDirectories(client, summary());
     expect(calls.createDirectory).toEqual(['Fresh']);
     expect(calls.deleteCollection).toEqual([]);
   });
 
   it('honours an explicit limit of 0 as "breaker off"', async () => {
-    const { reconciler, client, calls } = build(allGoneLocally(50), { massDeleteLimit: () => 0 });
+    const { reconciler, client, calls } = build(allGoneRemotely(50), { massDeleteLimit: () => 0 });
     await reconciler.reconcileDirectories(client, summary());
-    expect(calls.deleteCollection).toHaveLength(50);
+    expect(calls.trash).toHaveLength(50);
   });
 
   it('honours a fixed positive limit', async () => {
-    const { reconciler, client, calls } = build(allGoneLocally(5), { massDeleteLimit: () => 4 });
+    const { reconciler, client, calls } = build(allGoneRemotely(5), { massDeleteLimit: () => 4 });
     await reconciler.reconcileDirectories(client, summary());
-    expect(calls.deleteCollection).toEqual([]); // 5 > 4 ⇒ refused
+    expect(calls.trash).toEqual([]); // 5 > 4 ⇒ refused
   });
 });
 
@@ -271,28 +262,19 @@ describe('DirectoryReconciler.reconcileDirectories — ordering and safety', () 
   it('deletes children before parents', async () => {
     const paths = ['a', 'a/b', 'a/b/c'];
     const { reconciler, client, calls } = build({
-      remote: paths.map((p) => dir(p)), tracked: paths.map((p) => ({ path: p, remoteFileId: null })),
+      local: paths, tracked: paths.map((p) => ({ path: p, remoteFileId: null })),
     });
     await reconciler.reconcileDirectories(client, summary());
-    expect(calls.deleteCollection).toEqual(['a/b/c', 'a/b', 'a']);
+    expect(calls.trash).toEqual(['a/b/c', 'a/b', 'a']);
   });
 
-  it('keeps a remote folder that still has children rather than deleting it', async () => {
-    const { reconciler, client, calls, setDirsEmpty } = build({
+  it('keeps a remote folder even if the caller considers its contents settled', async () => {
+    const { reconciler, client, calls } = build({
       remote: [dir('Busy')], tracked: [{ path: 'Busy', remoteFileId: null }],
     });
-    setDirsEmpty(false);
     await reconciler.reconcileDirectories(client, summary());
     expect(calls.deleteCollection).toEqual([]);
-    expect(calls.deleteDir).not.toContain('Busy'); // still tracked → retried next sync
-  });
-
-  it('takes a lock around each remote collection delete', async () => {
-    const { reconciler, client, calls } = build({
-      remote: [dir('X')], tracked: [{ path: 'X', remoteFileId: null }],
-    });
-    await reconciler.reconcileDirectories(client, summary());
-    expect(calls.lock).toEqual(['X']);
+    expect(calls.deleteDir).not.toContain('Busy');
   });
 
   it('stops pulling new work once cancelled', async () => {
@@ -346,11 +328,11 @@ describe('DirectoryReconciler.resolveSkippedDir — settling what the breaker re
     expect(calls.setDir).toEqual(['D']);
   });
 
-  it('deleteRemote + local: lets the remote deletion proceed', async () => {
+  it('deleteRemote + local: requires an explicit deletion on Nextcloud', async () => {
     const { reconciler, client, calls } = build();
-    await reconciler.resolveSkippedDir(client, 'D', 'deleteRemote', 'local');
-    expect(calls.deleteCollection).toEqual(['D']);
-    expect(calls.deleteDir).toEqual(['D']);
+    await expect(reconciler.resolveSkippedDir(client, 'D', 'deleteRemote', 'local')).rejects.toThrow('Remove the folder in Nextcloud');
+    expect(calls.deleteCollection).toEqual([]);
+    expect(calls.deleteDir).toEqual([]);
   });
 
   it('trashLocal + remote: lets the local deletion proceed', async () => {
@@ -386,18 +368,16 @@ describe('DirectoryReconciler.resolveAllSkippedDirs', () => {
 
   it('applies the choice to every refused path and removes the entry when all succeed', async () => {
     const { reconciler, client, calls } = build();
-    const s = breakerSummary(['a', 'b'], ['c']);
-    expect(await reconciler.resolveAllSkippedDirs(client, s, 'local')).toEqual({ resolved: 3, failed: 0 });
-    expect(calls.deleteCollection).toEqual(['a', 'b']);
-    expect(calls.createDirectory).toEqual(['c']);
+    const s = breakerSummary([], ['c', 'd']);
+    expect(await reconciler.resolveAllSkippedDirs(client, s, 'local')).toEqual({ resolved: 2, failed: 0 });
+    expect(calls.deleteCollection).toEqual([]);
+    expect(calls.createDirectory).toEqual(['c', 'd']);
     expect(s.errors).toEqual([]); // the breaker entry is gone
   });
 
   it('narrows the entry to the still-failed paths on a partial failure', async () => {
     const { reconciler, client } = build();
-    (client as unknown as { deleteCollection: (p: string) => Promise<void> }).deleteCollection =
-      async (p: string) => { if (p === 'b') throw new Error('boom'); };
-    const s = breakerSummary(['a', 'b'], []);
+    const s = breakerSummary(['b'], ['a']);
     expect(await reconciler.resolveAllSkippedDirs(client, s, 'local')).toEqual({ resolved: 1, failed: 1 });
     expect(s.errors[0].dirBreakerSkipped).toEqual({ deleteRemote: ['b'], trashLocal: [] });
   });

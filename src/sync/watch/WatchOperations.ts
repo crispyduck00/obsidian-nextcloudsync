@@ -41,7 +41,8 @@ export interface Connection {
 
 export interface WatchDeps {
   localAdapter: Pick<LocalAdapter, 'stat' | 'readBinary'>;
-  stateDB: Pick<StateDB, 'getFile' | 'deleteFile' | 'getDir' | 'setDir' | 'deleteDir' | 'requestSave' | 'getLastSyncTime'>;
+  stateDB: Pick<StateDB, 'getFile' | 'deleteFile' | 'getDir' | 'setDir' | 'deleteDir' | 'requestSave' | 'getLastSyncTime'>
+    & Partial<Pick<StateDB, 'getRemoteRootFileId'>>;
   historyStore?: Pick<SyncHistoryStore, 'save'>;
   statusBar: IStatusBar;
   journal: SyncJournal;
@@ -51,6 +52,7 @@ export interface WatchDeps {
   remoteFolders?: RemoteFolderGuard;
   resolution: Pick<ResolutionService, 'dropCleanSnapshot'>;
   isSystemExcluded(path: string): boolean;
+  containsExcludedFolder?(path: string): boolean;
   // Plugin files sync only in full runs; watch mode never handles them.
   isPluginPath(path: string): boolean;
   connect(): Promise<Connection>;
@@ -157,13 +159,14 @@ export class WatchOperations {
     const conflictsBefore = this.deps.conflictEncounters();
     this.begin();
     try {
+      if (conn.client.inspectDirectory) await assertTrackedParentReadable(conn.client, this.deps.stateDB, path);
       const remote = await conn.client.statFile(path);
       if (remote) {
         void this.deps.logger?.log(`watch: remote state fetched → classifying ${path}`);
         await this.deps.processFile(remote, summary);
       } else {
         if (base) throw new Error('The remote file is missing or inaccessible. Local changes were kept.');
-        await assertTrackedParentReadable(conn.client, this.deps.stateDB, path);
+        if (!conn.client.inspectDirectory) await assertTrackedParentReadable(conn.client, this.deps.stateDB, path);
         // Not on the server at all: a plain create. If-Match against a non-existent resource always fails,
         // so keep the synthetic null etag.
         void this.deps.logger?.log(`watch: not on remote → upload as new ${path}`);
@@ -213,6 +216,7 @@ export class WatchOperations {
     const conflictsBefore = this.deps.conflictEncounters();
     this.begin();
     try {
+      if (conn.client.inspectDirectory) await assertTrackedParentReadable(conn.client, this.deps.stateDB, path);
       // The same decision the full scan makes for a path missing from its listing (ask the server, forget on 404,
       // else demand a checksum match). It owns the StateDB cleanup, keeping the entry when the DELETE fails so
       // the delete is retried instead of coming back as a re-download.
@@ -231,7 +235,7 @@ export class WatchOperations {
 
   async renameSingleFile(oldPath: string, newPath: string): Promise<void> {
     if (this.deps.isPluginPath(oldPath) || this.deps.isPluginPath(newPath)) return;
-    if (this.deps.isSystemExcluded(oldPath) && this.deps.isSystemExcluded(newPath)) return;
+    if (this.deps.isSystemExcluded(oldPath) || this.deps.isSystemExcluded(newPath)) return;
     if (this.skippedOnCellular('rename', `${oldPath} → ${newPath}`)) return;
     // Both ends are locked: a rename moves state between two paths, so one lock leaves the other open to a
     // concurrent cycle acting on a half-applied move.
@@ -271,57 +275,30 @@ export class WatchOperations {
     }
   }
 
-  // Only a TRACKED folder is propagated; an untracked one was never on the server. The remote delete routes
-  // through the Nextcloud trashbin (recoverable) and a 404 is the desired end state.
+  // File events reconcile the children. A WebDAV collection DELETE would also remove newly added children.
   async deleteSingleFolder(path: string): Promise<void> {
     if (this.deps.isSystemExcluded(path) || this.deps.isPluginPath(path)) return;
     if (this.skippedOnCellular('folder-delete', path)) return;
-    if (!this.deps.stateDB.getDir(path)) return;
-    // Same rule as deleteSingleFile, and this is the loudest sink (a recursive collection DELETE): a running scan
-    // trashes folders itself and those trashes fire delete events, which must not become unproven DELETEs.
-    if (this.deps.isSyncRunning()) {
-      void this.deps.logger?.log(`watch: full sync in progress → folder deletion of ${path} left to the running scan`);
-      return;
+    if (this.deps.stateDB.getDir(path)) {
+      await this.deps.logger?.log(`watch: folder removed locally; remote folder retained → ${path}`);
     }
-    const conn = await this.deps.connect();
-    this.begin();
-    let succeeded = false;
-    let token: string | null = null;
-    try {
-      await this.deps.remoteFolders?.assertRemovalAllowed(conn.client, path, true);
-      // A collection DELETE is recursive. Match full-sync safety: lock when available and prove the
-      // live remote directory is empty before deleting it. If another device added anything since
-      // our baseline, keep tracking and let the next full reconciliation decide instead.
-      token = await this.deps.transfer.acquireLock(conn.client, path);
-      if (!(await conn.client.isRemoteDirEmpty(path))) {
-        void this.deps.logger?.log(`watch: remote folder not empty → keeping for full reconciliation ${path}`);
-        return;
-      }
-      await conn.client.deleteCollection(path); // trashbin; 404 handled inside as success
-      void this.deps.logger?.log(`watch: folder deleted → remote collection removed ${path}`);
-      succeeded = true;
-    } catch (err) {
-      console.warn(`[SyncEngine] Single-folder delete failed for ${path}:`, err);
-    } finally {
-      await this.deps.transfer.releaseLock(conn.client, path, token);
-      this.end();
-    }
-    // Drop the tracked directory only when the remote delete succeeded; otherwise the next sync re-creates it locally.
-    if (!succeeded) return;
-    this.deps.stateDB.deleteDir(path);
-    this.deps.stateDB.requestSave();
   }
 
   // The server moves the whole subtree. Child-file rename events fired alongside are handled best-effort by
   // renameSingleFile; their 404s are harmless because the parent MOVE already relocated them.
   async renameSingleFolder(oldPath: string, newPath: string): Promise<void> {
     if (this.deps.isPluginPath(oldPath) || this.deps.isPluginPath(newPath)) return;
-    if (this.deps.isSystemExcluded(oldPath) && this.deps.isSystemExcluded(newPath)) return;
+    if (this.deps.isSystemExcluded(oldPath) || this.deps.isSystemExcluded(newPath)
+        || this.deps.containsExcludedFolder?.(oldPath) || this.deps.containsExcludedFolder?.(newPath)) return;
     if (this.skippedOnCellular('folder-rename', `${oldPath} → ${newPath}`)) return;
     const conn = await this.deps.connect();
     this.begin();
     try {
-      await this.deps.remoteFolders?.assertRemovalAllowed(conn.client, oldPath, true);
+      if (conn.client.inspectDirectory) await assertTrackedParentReadable(conn.client, this.deps.stateDB, oldPath, true);
+      await this.deps.remoteFolders?.assertRemovalAllowed(conn.client, oldPath, true, undefined, path =>
+        this.deps.isSystemExcluded(path)
+        || (path.startsWith(`${oldPath}/`) && this.deps.isSystemExcluded(newPath + path.slice(oldPath.length))),
+      );
       await assertTrackedParentReadable(conn.client, this.deps.stateDB, newPath);
       await conn.client.moveFile(oldPath, newPath); // MOVE works for collections too
       this.deps.stateDB.deleteDir(oldPath);

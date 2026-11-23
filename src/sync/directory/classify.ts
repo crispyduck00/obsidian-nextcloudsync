@@ -38,7 +38,7 @@ export function classifyDirectories(
 
   for (const p of all) {
     const L = localDirs.has(p), R = remoteDirs.has(p), T = tracked.has(p);
-    if (L && R) plan.ensureTracked.push({ path: p, remoteFileId: remoteDirs.get(p)!.fileId });
+    if (L && R) plan.ensureTracked.push({ path: p, remoteFileId: remoteDirs.get(p)!.fileId ?? tracked.get(p)?.remoteFileId ?? null });
     else if (L && !R) (T ? plan.trashLocal : plan.mkcolRemote).push(p);
     else if (!L && R) (T ? plan.deleteRemote : plan.mkdirLocal).push(p);
     else if (T) plan.dropTracked.push(p);

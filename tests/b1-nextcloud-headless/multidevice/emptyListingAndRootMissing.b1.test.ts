@@ -9,7 +9,7 @@ import { describeLive } from '../support/env';
 import { setupWorkspace } from '../support/workspace';
 import { cleanupWorkspace, IsolatedWorkspace } from '../support/isolation';
 import { NextcloudClient } from '../../../src/network/NextcloudClient';
-import { makeDevice, Device } from '../support/engineDevice';
+import { makeDevice, restartDevice, Device } from '../support/engineDevice';
 import { DavSyncSettings, RemoteRootMissingError } from '../../../src/types';
 
 describeLive('Layer B — empty listing and a missing vault folder', (getEnv) => {
@@ -53,6 +53,39 @@ describeLive('Layer B — empty listing and a missing vault folder', (getEnv) =>
     await d.sync();
     expect(await remoteExists('new-vault/first.md')).toBe(true);
     expect(d.engine.getLastSessionSummary()?.errorCount).toBe(0);
+  });
+
+  it('holds local data and writes after a synced vault root is replaced at the same path', async () => {
+    const env = getEnv();
+    const path = `${ws.remoteBase}/root-identity`;
+    const d = makeDevice(env, path, 'root-identity');
+    d.vault.seedLocal('keep.md', 'original');
+    await d.sync();
+    const rootId = d.stateDB.getRemoteRootFileId();
+    expect(rootId).toBeTruthy();
+    expect(await remoteExists('root-identity/keep.md')).toBe(true);
+
+    const restarted = await restartDevice(env, path, d);
+    expect(restarted.stateDB.getRemoteRootFileId()).toBe(rootId);
+    restarted.vault.seedLocal('new.md', 'unsynced draft');
+    const plan = await restarted.engine.planRemoteMirror();
+    expect(plan.ok).toBe(true);
+    expect(plan.deleteFiles).toContain('new.md');
+    await baseClient.moveFile('root-identity', 'old-root-identity');
+    await baseClient.createDirectory('root-identity');
+    expect((await restarted.engine.planRemoteMirror()).ok).toBe(false);
+    expect(await restarted.engine.applyRemoteMirror(plan)).toMatchObject({
+      deleted: 0, downloaded: 0, errors: [expect.objectContaining({ message: expect.stringContaining('stopped') })],
+    });
+    await restarted.engine.syncSingleFile('new.md');
+    await restarted.sync();
+
+    expect(restarted.vault.readLocal('keep.md')).toBe('original');
+    expect(restarted.vault.readLocal('new.md')).toBe('unsynced draft');
+    expect(restarted.stateDB.getRemoteRootFileId()).toBe(rootId);
+    expect(restarted.engine.getLastSessionSummary()).toMatchObject({ uploadedCount: 0, deletedCount: 0, errorCount: 1 });
+    expect(await remoteExists('old-root-identity/keep.md')).toBe(true);
+    expect(await remoteExists('root-identity/new.md')).toBe(false);
   });
 
   it('INV-14 [SPEC:VRR-B1-1] a disappeared Nextcloud vault root stops sync with its local files and baseline intact', async () => {

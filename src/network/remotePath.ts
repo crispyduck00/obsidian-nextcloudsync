@@ -81,6 +81,8 @@ interface DirectoryRequestContext {
   timeoutMs?: number;
   /** An established Nextcloud vault must already exist. Only create collections inside it. */
   existingRoot?: string;
+  /** Tracked collections are required to exist independently of write recovery. */
+  mayCreateDirectory?: (path: string) => boolean;
 }
 
 // Creates the parent collections of a remote file path via MKCOL (PUT does not create parents). Each level goes through the cache:
@@ -93,6 +95,7 @@ export async function ensureRemoteDir(
 ): Promise<void> {
   for (const dir of ancestorsOf(remoteFilePath)) {
     if (ctx.existingRoot && !dir.startsWith(`${ctx.existingRoot}/`)) continue;
+    if (ctx.mayCreateDirectory && !ctx.mayCreateDirectory(dir)) continue;
     await createdCache.ensure(dir, async (path) => {
       const res = await requestUrlWithTimeout({
         url: encodeRemoteUrl(ctx.baseUrl, path),

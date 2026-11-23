@@ -132,12 +132,12 @@ describe('[SPEC:MWM-2] watch mode honours "Wi-Fi only" on cellular', () => {
     expect(deps.notify).not.toHaveBeenCalled();
   });
 
-  it.each(OPS)('[SPEC:MWM-2] not blocked: %s proceeds to the server', async (_name, run) => {
+  it.each(OPS)('[SPEC:MWM-2] not blocked: %s follows its ordinary path', async (name, run) => {
     const { watch, mocks, logs } = build({ blocked: false });
 
     await run(watch);
 
-    expect(mocks.connect).toHaveBeenCalledTimes(1);
+    expect(mocks.connect).toHaveBeenCalledTimes(name === 'folder-delete' ? 0 : 1);
     expect(logs.filter(l => l.startsWith('watch: skipped'))).toEqual([]);
   });
 

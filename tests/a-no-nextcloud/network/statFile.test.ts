@@ -8,7 +8,7 @@
 import { requestUrl } from 'obsidian';
 import { NextcloudClient } from '../../../src/network/NextcloudClient';
 import { StandardWebDAVClient } from '../../../src/network/StandardWebDAVClient';
-import { DEFAULT_SETTINGS, DavSyncSettings, NetworkError, PreconditionFailedError, RemoteRootMissingError } from '../../../src/types';
+import { DEFAULT_SETTINGS, DavSyncSettings, NetworkError, PreconditionFailedError, RemoteRootChangedError, RemoteRootMissingError } from '../../../src/types';
 
 const mockRequestUrl = requestUrl as unknown as jest.Mock;
 
@@ -171,6 +171,48 @@ describe('IWebDAVClient.statFile (C-0)', () => {
       const mkcols = mockRequestUrl.mock.calls.map(([call]) => call).filter(call => call.method === 'MKCOL');
       expect(mkcols).toHaveLength(1);
       expect(mkcols[0].url).toBe('https://nc/remote.php/dav/files/alice/Shared/Vault/New%20folder');
+    });
+
+    it.each(['upload', 'move'] as const)('never creates a known missing parent during %s recovery', async (op) => {
+      const client = makeClient();
+      client.requireExistingVaultRoot(true);
+      client.trackKnownDirectories({
+        getDir: path => path === 'Shared' ? { path, remoteFileId: '42' } : undefined,
+        getRemoteRootFileId: () => null,
+        setRemoteRootFileId: jest.fn(),
+      });
+      mockRequestUrl.mockImplementation((call: { method: string }) => res(call.method === 'MKCOL' ? 409 : 404));
+      const path = 'Shared/New/note.md';
+      const write = op === 'upload'
+        ? client.uploadFile(path, new ArrayBuffer(1), undefined, { onlyIfAbsent: true })
+        : client.moveFile('old.md', path);
+      await expect(write).rejects.toBeInstanceOf(NetworkError);
+      const mkcols = mockRequestUrl.mock.calls.map(([call]) => call).filter(call => call.method === 'MKCOL');
+      expect(mkcols.length).toBeGreaterThan(0);
+      expect(mkcols.every(call => call.url.endsWith('/Shared/New'))).toBe(true);
+    });
+
+    it('refuses a replacement vault root even if its ETag matches the previous folder', async () => {
+      const client = makeClient();
+      let id: string | null = null;
+      client.trackKnownDirectories({
+        getDir: () => undefined,
+        getRemoteRootFileId: () => id,
+        setRemoteRootFileId: fileId => { id = fileId; },
+      });
+      const root = `<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/</d:href><d:propstat><d:prop>
+        <d:resourcetype><d:collection/></d:resourcetype><d:getetag>"same"</d:getetag><oc:fileid>123</oc:fileid>
+        </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>`;
+      mockRequestUrl.mockReturnValueOnce(res(207, { text: root }));
+      expect(await client.getFiles('')).toEqual([]);
+      expect(id).toBe('123');
+
+      mockRequestUrl.mockImplementation(() => res(207, { text: root.replace('123', '456') }));
+      expect(await client.getRootEtag()).toBeNull();
+      await expect(client.getFiles('')).rejects.toBeInstanceOf(RemoteRootChangedError);
+      await expect(client.getDirectories('')).rejects.toBeInstanceOf(RemoteRootChangedError);
+      expect(id).toBe('123');
     });
   });
 

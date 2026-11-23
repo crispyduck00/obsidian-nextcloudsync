@@ -1,8 +1,14 @@
-import { NextcloudFeatures, RemoteFileInfo, RemoteDirInfo, SyncChanges, FileVersion, VaultRootOutcome } from '../types';
+import { DirState, NextcloudFeatures, RemoteFileInfo, RemoteDirInfo, SyncChanges, FileVersion, VaultRootOutcome } from '../types';
 
 export interface RemoteDirectoryInspection {
   protected: boolean;
   fileId: string | null;
+}
+
+export interface TrackedDirectories {
+  getDir(path: string): DirState | undefined;
+  getRemoteRootFileId(): string | null;
+  setRemoteRootFileId(fileId: string): void;
 }
 
 export interface IWebDAVClient {
@@ -30,7 +36,7 @@ export interface IWebDAVClient {
   /** Lists the directories (collections) beneath `path`, recursively; the base folder itself is excluded. Same unreadable-body contract as {@link getFiles}. */
   getDirectories(path: string): Promise<RemoteDirInfo[]>;
   /** Account DAV can inspect a collection, including mount and app protection. */
-  inspectDirectory?(path: string, includeDescendants?: boolean): Promise<RemoteDirectoryInspection | null>;
+  inspectDirectory?(path: string, includeDescendants?: boolean, isExcluded?: (path: string) => boolean): Promise<RemoteDirectoryInspection | null>;
   /**
    * True iff the collection at `path` has no children (one Depth:1 probe). Data-loss guard before
    * {@link deleteCollection}. An unreadable body resolves to false.
@@ -40,6 +46,8 @@ export interface IWebDAVClient {
   createDirectory(path: string): Promise<void>;
   /** Restrict automatic MKCOLs to children of an established vault root. */
   requireExistingVaultRoot?(required: boolean): void;
+  /** Filesystem writes must never provision the path of a previously tracked collection. */
+  trackKnownDirectories?(state: TrackedDirectories): void;
   /**
    * Creates the vault folder (sync root) and reports whether it had to be created. Missing ancestors
    * are created best-effort; only the vault folder itself is judged (docs/spec.md §5.2).

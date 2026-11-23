@@ -20,6 +20,7 @@ import { RemoteListingSource } from '../scan/RemoteListingSource';
 import { withLocalSignature } from '../../data/localSignature';
 import { FileLogger } from '../../util/FileLogger';
 import { sha256 } from '../../util/hash';
+import { assertTrackedParentReadable, replacedRemoteFolders } from '../directory/RemoteFolderGuard';
 import { partitionPluginManifestsLast } from '../plugins/pluginPaths';
 
 // A port because the counters are shared with an ordinary sync; the status bar must show one notion of progress.
@@ -33,7 +34,8 @@ export interface MirrorDeps {
   localAdapter: Pick<LocalAdapter, 'stat' | 'readBinary'>;
   stateDB: Pick<StateDB,
     'getFile' | 'setFile' | 'getAllFiles' | 'deleteFile' | 'deleteDir'
-    | 'getAllDirs' | 'getDir' | 'setDir' | 'setRemoteRootEtag' | 'setSyncToken'>;
+    | 'getAllDirs' | 'getDir' | 'setDir' | 'setRemoteRootEtag' | 'setSyncToken'>
+    & Partial<Pick<StateDB, 'getRemoteRootFileId'>>;
   statusBar: IStatusBar;
   journal: SyncJournal;
   mergeBase: MergeBaseRecorder;
@@ -83,6 +85,10 @@ export class MirrorService {
     this.deps.plugins.begin('manual');
     try {
       await this.deps.plugins.prepare(client, remoteFiles);
+      const replaced = replacedRemoteFolders(remoteDirs, this.deps.stateDB, path => this.deps.isSystemExcluded(path));
+      if (replaced.size > 0) {
+        return buildMirrorPlan([], [], [], () => false, false, `A different Nextcloud folder is now at ${[...replaced][0]}. Check the remote path and permissions.`);
+      }
       return await this.planFromListing(client, remoteFiles, remoteDirs, onPhase);
     } finally {
       this.deps.plugins.discard();
@@ -137,6 +143,14 @@ export class MirrorService {
   ): Promise<MirrorResult> {
     const result: MirrorResult = { downloaded: 0, deleted: 0, skipped: plan.skipCount, createdDirs: 0, errors: [], pluginsNeedingRestart: [] };
     if (!plan.ok) return result;
+    if (client.inspectDirectory) {
+      try {
+        await assertTrackedParentReadable(client, this.deps.stateDB, '');
+      } catch (err) {
+        result.errors.push({ path: '', message: `The mirror was stopped before any changes: ${(err as Error).message}` });
+        return result;
+      }
+    }
 
     const summary = this.deps.journal.newSummary();
 
