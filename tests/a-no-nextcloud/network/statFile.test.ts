@@ -8,7 +8,7 @@
 import { requestUrl } from 'obsidian';
 import { NextcloudClient } from '../../../src/network/NextcloudClient';
 import { StandardWebDAVClient } from '../../../src/network/StandardWebDAVClient';
-import { DEFAULT_SETTINGS, DavSyncSettings, NetworkError, PreconditionFailedError } from '../../../src/types';
+import { DEFAULT_SETTINGS, DavSyncSettings, NetworkError, PreconditionFailedError, RemoteRootMissingError } from '../../../src/types';
 
 const mockRequestUrl = requestUrl as unknown as jest.Mock;
 
@@ -158,6 +158,19 @@ describe('IWebDAVClient.statFile (C-0)', () => {
         ifMatchEtag: 'expected',
       })).rejects.toMatchObject({ status: 404 });
       expect(mockRequestUrl.mock.calls.map(([call]) => call.method)).toEqual(['PUT']);
+    });
+
+    it('creates only descendants of an established root, even during PUT recovery', async () => {
+      const client = new NextcloudClient(settings, () => 'app-pw', 'Shared/Vault');
+      client.requireExistingVaultRoot(true);
+      mockRequestUrl.mockImplementation((call: { method: string }) => res(call.method === 'MKCOL' ? 409 : 404));
+      await expect(client.uploadFile('New folder/note.md', new ArrayBuffer(1), undefined, {
+        onlyIfAbsent: true,
+      })).rejects.toBeInstanceOf(NetworkError);
+      await expect(client.createVaultRoot()).rejects.toBeInstanceOf(RemoteRootMissingError);
+      const mkcols = mockRequestUrl.mock.calls.map(([call]) => call).filter(call => call.method === 'MKCOL');
+      expect(mkcols).toHaveLength(1);
+      expect(mkcols[0].url).toBe('https://nc/remote.php/dav/files/alice/Shared/Vault/New%20folder');
     });
   });
 

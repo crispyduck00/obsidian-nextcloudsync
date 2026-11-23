@@ -38,6 +38,8 @@ export interface IWebDAVClient {
   isRemoteDirEmpty(path: string): Promise<boolean>;
   /** Creates a directory and any missing ancestors via MKCOL; an existing collection is fine. */
   createDirectory(path: string): Promise<void>;
+  /** Restrict automatic MKCOLs to children of an established vault root. */
+  requireExistingVaultRoot?(required: boolean): void;
   /**
    * Creates the vault folder (sync root) and reports whether it had to be created. Missing ancestors
    * are created best-effort; only the vault folder itself is judged (docs/spec.md §5.2).

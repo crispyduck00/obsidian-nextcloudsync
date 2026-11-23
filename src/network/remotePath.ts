@@ -75,15 +75,24 @@ export function encodeServerUrl(url: string): string {
   return encodeURI(url);
 }
 
+interface DirectoryRequestContext {
+  baseUrl: string;
+  authHeader: string;
+  timeoutMs?: number;
+  /** An established Nextcloud vault must already exist. Only create collections inside it. */
+  existingRoot?: string;
+}
+
 // Creates the parent collections of a remote file path via MKCOL (PUT does not create parents). Each level goes through the cache:
 // one MKCOL per collection in flight, and only 201/405 count as created. Throws RemoteDirCreateError at the FIRST level that
 // cannot be created, without trying its children; callers that can progress anyway (a PUT into an existing folder that refuses MKCOL) catch it.
 export async function ensureRemoteDir(
-  ctx: { baseUrl: string; authHeader: string; timeoutMs?: number },
+  ctx: DirectoryRequestContext,
   remoteFilePath: string,
   createdCache: RemoteDirCache,
 ): Promise<void> {
   for (const dir of ancestorsOf(remoteFilePath)) {
+    if (ctx.existingRoot && !dir.startsWith(`${ctx.existingRoot}/`)) continue;
     await createdCache.ensure(dir, async (path) => {
       const res = await requestUrlWithTimeout({
         url: encodeRemoteUrl(ctx.baseUrl, path),
@@ -104,7 +113,7 @@ export function isTransportFailure(dirError: RemoteDirCreateError | null): dirEr
 }
 
 export async function prepareMissingParentRetry(
-  ctx: { baseUrl: string; authHeader: string; timeoutMs?: number },
+  ctx: DirectoryRequestContext,
   remoteFilePath: string,
   createdCache: RemoteDirCache,
 ): Promise<RemoteDirCreateError | null> {

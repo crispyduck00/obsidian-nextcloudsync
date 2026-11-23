@@ -92,6 +92,7 @@ function readJsonObject(res: RequestUrlResponse): Record<string, unknown> | null
 export class NextcloudClient implements IWebDAVClient {
   private features: NextcloudFeatures | null = null;
   private readonly createdDirs = new RemoteDirCache();
+  private existingRootRequired = false;
 
   constructor(
     private readonly settings: DavSyncSettings,
@@ -354,23 +355,35 @@ export class NextcloudClient implements IWebDAVClient {
     }
   }
 
+  requireExistingVaultRoot(required: boolean): void {
+    this.existingRootRequired = required;
+  }
+
+  private get directoryContext() {
+    return {
+      baseUrl: this.baseUrl, authHeader: this.authHeader, timeoutMs: this.timeoutMs,
+      existingRoot: this.existingRootRequired ? this.remoteBase : undefined,
+    };
+  }
+
   // Fails if any level could not be created: watch mode tracks the folder right after this returns, and a tracked folder
   // the server lacks drives delete propagation (issue #46).
   async createDirectory(path: string): Promise<void> {
     // ensureRemoteDir MKCOLs every segment of the path it is given EXCEPT the last (it assumes a
     // trailing file name), so append a dummy segment to have `path` itself (and its ancestors) created.
     await ensureRemoteDir(
-      { baseUrl: this.baseUrl, authHeader: this.authHeader, timeoutMs: this.timeoutMs },
+      this.directoryContext,
       toRemotePath(this.remoteBase, `${path}/_`),
       this.createdDirs,
     );
   }
 
   async createVaultRoot(): Promise<VaultRootOutcome> {
+    if (this.existingRootRequired) throw new RemoteRootMissingError();
     // A client whose remote base IS the files root has no vault folder to create; answering 'exists'
     // keeps the caller on its no-destructive-action path rather than inventing a re-seed.
     if (!this.remoteBase) return 'exists';
-    const ctx = { baseUrl: this.baseUrl, authHeader: this.authHeader, timeoutMs: this.timeoutMs };
+    const ctx = this.directoryContext;
     // Ancestors are best-effort (as in the first upload); only the vault folder is judged strictly, since its 201-vs-405 decides
     // whether the caller may reset tracking and re-seed. The swallow is explicit: a transient 423 on an ancestor must not stop mkcolStrict.
     await ensureRemoteDir(ctx, this.remoteBase, this.createdDirs).catch(() => undefined);
@@ -464,7 +477,7 @@ export class NextcloudClient implements IWebDAVClient {
     // Missing parent: create the ancestors, then retry the PUT once. Standard WebDAV answers 409, Nextcloud 404; handle both.
     let dirError: RemoteDirCreateError | null = null;
     if (!opts?.ifMatchEtag && (res.status === 409 || res.status === 404)) {
-      dirError = await prepareMissingParentRetry({ baseUrl: this.baseUrl, authHeader: this.authHeader, timeoutMs: this.timeoutMs }, toRemotePath(this.remoteBase, remotePath), this.createdDirs);
+      dirError = await prepareMissingParentRetry(this.directoryContext, toRemotePath(this.remoteBase, remotePath), this.createdDirs);
       if (isTransportFailure(dirError)) throw dirError;
       res = await this.req({ url: this.remoteUrl(remotePath), method: 'PUT', headers, body: data, throw: false });
     }
@@ -496,7 +509,7 @@ export class NextcloudClient implements IWebDAVClient {
   async moveFile(oldPath: string, newPath: string): Promise<void> {
     // Ensure the destination parent exists before MOVE. This deliberately does NOT drop stale cache entries: if the folder went away
     // after we created it, the MKCOL is skipped, the MOVE 404s, and the recovery below puts it back.
-    const ctx = { baseUrl: this.baseUrl, authHeader: this.authHeader, timeoutMs: this.timeoutMs };
+    const ctx = this.directoryContext;
     const target = toRemotePath(this.remoteBase, newPath);
     // A failure here is DISCARDED on purpose. This call is speculative — it runs before the MOVE has
     // said anything — so it cannot explain a MOVE that fails for some entirely unrelated reason. Only
@@ -679,7 +692,7 @@ export class NextcloudClient implements IWebDAVClient {
 
       // Ensure the final file's parent exists, then assemble by MOVE-ing .file. Drop stale "already created" entries first so a folder
       // another device deleted is re-created. The failure is kept but not acted on yet: the MOVE fails for many reasons unrelated to the parent.
-      const dirError = await prepareMissingParentRetry({ baseUrl: this.baseUrl, authHeader: this.authHeader, timeoutMs: this.timeoutMs }, toRemotePath(this.remoteBase, remotePath), this.createdDirs);
+      const dirError = await prepareMissingParentRetry(this.directoryContext, toRemotePath(this.remoteBase, remotePath), this.createdDirs);
       const moveHeaders: Record<string, string> = {
         Authorization: this.authHeader,
         Destination: finalUrl,

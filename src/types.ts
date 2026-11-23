@@ -191,6 +191,8 @@ export interface SyncState {
   lastSyncTime: number;
   syncToken: string | null;
   files: Record<string, FileState>;
+  /** The configured Nextcloud root has been listed successfully, even if it was empty. */
+  remoteRootObserved?: boolean;
   /** Absent in older state files; treated as {}. */
   directories?: Record<string, DirState>;
   /**

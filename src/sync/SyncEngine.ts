@@ -409,6 +409,10 @@ export class SyncEngine {
         : new SimpleUploadStrategy(uploadConfig);
       this.opts.onFeatures?.(features);
     }
+    if (this.client.requireExistingVaultRoot) {
+      if (this.opts.stateDB.hasObservedRemoteRoot()) this.rememberRemoteRoot(this.client);
+      else this.client.requireExistingVaultRoot(false);
+    }
     return { client: this.client, features: this.features };
   }
 
@@ -419,7 +423,7 @@ export class SyncEngine {
     return isCellularBlocked(this.opts.settings.syncOnWifiOnly, Platform.isIosApp, conn?.type);
   }
 
-  async syncManual(opts: { manual?: boolean } = {}): Promise<void> {
+  async syncManual(opts: { manual?: boolean; refreshRemote?: boolean } = {}): Promise<void> {
     // Mobile has no status bar; NoticeStatusBar surfaces state there. The early returns below need explicit
     // notices because they exit before any toast exists.
     void this.opts.logger?.log(`sync: start (manual=${opts.manual === true})`);
@@ -436,7 +440,7 @@ export class SyncEngine {
     // Set the balking flag synchronously (before any await) so a concurrent call still balks.
     this.running = true;
     this.cancelled = false;
-    const run = this.runSyncSession(opts.manual === true);
+    const run = this.runSyncSession(opts.manual === true, opts.refreshRemote === true);
     this.currentRun = run;
     try {
       await run;
@@ -451,7 +455,7 @@ export class SyncEngine {
     }
   }
 
-  private async runSyncSession(manual: boolean): Promise<void> {
+  private async runSyncSession(manual: boolean, refreshRemote: boolean): Promise<void> {
     // Created before the try so catch/finally can reference them even if the first step fails.
     const summary = this.initSummary();
     this.journal.beginRun(summary.startedAt);
@@ -464,16 +468,19 @@ export class SyncEngine {
       await this.ensureClient();
       this.plugins.begin(manual ? 'manual' : 'automatic');
       this.invalidateRootEtagOnScopeChange();
+      // A permissions-only change on Nextcloud can leave the vault root ETag untouched.
+      if (refreshRemote) this.opts.stateDB.setRemoteRootEtag(null);
       this.syncProgress = { processed: 0, total: 0 };
       this.opts.statusBar.setStatus('syncing', { automatic: !manual });
 
       const isFirstSync = !this.opts.stateDB.getSyncToken()
-        && this.opts.stateDB.getAllFiles().length === 0 && this.opts.stateDB.getAllDirs().length === 0;
+        && this.opts.stateDB.getAllFiles().length === 0 && this.opts.stateDB.getAllDirs().length === 0
+        && !(this.client?.requireExistingVaultRoot && this.opts.stateDB.hasObservedRemoteRoot());
 
       if (isFirstSync) {
         await this.initialSync(summary);
       } else {
-        await this.incrementalSync(summary);
+        await this.incrementalSync(summary, refreshRemote);
       }
     } catch (err) {
       console.error('[SyncEngine] Sync failed:', err);
@@ -788,9 +795,12 @@ export class SyncEngine {
     this.journal.recordHistory(path, op, message, detail);
   }
 
-  // A missing vault folder proves nothing about individual files, so local wins and nothing is deleted locally (docs/spec.md §8).
-  // The MKCOL is the proof: 201 = truly absent (reset and re-upload); 405 = the 404 listing was wrong, so change nothing.
+  // For established Nextcloud roots, 404 can mean lost access to a mount. MKCOL could create a private
+  // folder at the same path and replay the vault into it. Plain WebDAV keeps its existing recovery.
   private async reseedFromLocal(summary: SyncSessionSummary): Promise<void> {
+    if (this.client!.requireExistingVaultRoot && this.opts.stateDB.hasObservedRemoteRoot()) {
+      throw new Error('The synced Nextcloud vault folder is missing or inaccessible. Local files were kept. Check the remote path and permissions.');
+    }
     const outcome = await this.client!.createVaultRoot();
     if (outcome === 'exists') {
       void this.opts.logger?.log(
@@ -814,6 +824,7 @@ export class SyncEngine {
     let remoteFiles: RemoteFileInfo[];
     try {
       remoteFiles = await client.getFiles('');
+      this.rememberRemoteRoot(client);
     } catch (err) {
       if (!(err instanceof RemoteRootMissingError)) throw err;
       void this.opts.logger?.log('sync: INITIAL — no vault folder on the server yet; the first upload will create it');
@@ -844,7 +855,13 @@ export class SyncEngine {
     this.opts.stateDB.setSyncToken(token);
   }
 
-  private async incrementalSync(summary: SyncSessionSummary): Promise<void> {
+  private rememberRemoteRoot(client: IWebDAVClient): void {
+    if (!client.requireExistingVaultRoot) return;
+    this.opts.stateDB.markRemoteRootObserved();
+    client.requireExistingVaultRoot(true);
+  }
+
+  private async incrementalSync(summary: SyncSessionSummary, refreshRemote: boolean): Promise<void> {
     const client = this.client!;
     let remoteFiles: RemoteFileInfo[];
     // True when remoteFiles is the COMPLETE listing (absence implies remote deletion); false on the token path's partial diff.
@@ -852,7 +869,7 @@ export class SyncEngine {
     // Non-null when the root-ETag short-circuit rebuilt the directory list from State; reuse it to skip getDirectories('') (docs/spec.md §8a.5).
     let fullScanCachedDirs: RemoteDirInfo[] | null = null;
 
-    const existingToken = this.opts.stateDB.getSyncToken();
+    const existingToken = refreshRemote ? null : this.opts.stateDB.getSyncToken();
     // A missing vault folder can surface from any listing call below, including the token-expired fallback, hence one guard
     // around both. Nextcloud answers the token REPORT with 415 (docs/spec.md §18), so that branch is unreachable there.
     try {
@@ -902,6 +919,7 @@ export class SyncEngine {
       await this.reseedFromLocal(summary);
       return;
     }
+    if (isFullScan) this.rememberRemoteRoot(client);
 
     summary.retriedFiles = this.retryQueue.splice(0);
 

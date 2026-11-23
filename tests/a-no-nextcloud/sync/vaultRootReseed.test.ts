@@ -129,13 +129,17 @@ interface HarnessOptions {
   rootMissing: boolean;
   // What `createVaultRoot()` answers, or an error it rejects with.
   vaultRoot: VaultRootOutcome | Error;
+  requireExistingVaultRoot?: (required: boolean) => void;
 }
 
 async function buildHarness(o: HarnessOptions) {
   const stateDB = new StateDB(makeStateAdapter(), PLUGIN_DIR, 'dev1');
   await stateDB.load();
   const local = makeLocalAdapter({ ...o.localFiles });
-  const client = makeClient({ rootMissing: o.rootMissing, vaultRoot: o.vaultRoot });
+  const client = {
+    ...makeClient({ rootMissing: o.rootMissing, vaultRoot: o.vaultRoot }),
+    requireExistingVaultRoot: o.requireExistingVaultRoot,
+  };
 
   if (o.tracked) {
     // A vault this device has synced before: every file and folder is recorded, and each file's post-write stat
@@ -205,6 +209,39 @@ beforeEach(() => {
   // testEnvironment is 'node'; isBlockedByWifiOnly reads navigator.connection. syncOnWifiOnly=false
   // short-circuits before it, but guard the global so environments without `navigator` don't throw.
   (globalThis as { navigator?: unknown }).navigator ??= {};
+});
+
+describe('Established Nextcloud vault root', () => {
+  it('stops after a root 404 and preserves a baseline written by an older plugin', async () => {
+    const requireExistingVaultRoot = jest.fn();
+    const h = await buildHarness({ ...TRACKED_VAULT, rootMissing: true, vaultRoot: 'created', requireExistingVaultRoot });
+    const before = h.stateDB.getAllFiles();
+    await h.engine.syncManual({ manual: true, refreshRemote: true });
+    expect(requireExistingVaultRoot).toHaveBeenCalledWith(true);
+    expect(h.client.createVaultRoot).not.toHaveBeenCalled();
+    expect(h.client.uploadFile).not.toHaveBeenCalled();
+    expect(h.trashed).toEqual([]);
+    expect(h.stateDB.getAllFiles()).toEqual(before);
+    expect(h.engine.getLastSessionSummary()?.errors).toContainEqual(expect.objectContaining({
+      message: expect.stringContaining('vault folder is missing or inaccessible'),
+    }));
+  });
+
+  it('remembers a previously observed empty root across a state reload', async () => {
+    const requireExistingVaultRoot = jest.fn();
+    const h = await buildHarness({
+      tracked: false, localFolders: [], localFiles: { 'draft.md': 'unsynced' },
+      rootMissing: true, vaultRoot: 'created', requireExistingVaultRoot,
+    });
+    h.stateDB.markRemoteRootObserved();
+    await h.stateDB.save();
+    await h.stateDB.load();
+    await h.engine.syncManual({ manual: true, refreshRemote: true });
+    expect(requireExistingVaultRoot).toHaveBeenCalledWith(true);
+    expect(h.client.createVaultRoot).not.toHaveBeenCalled();
+    expect(h.client.uploadFile).not.toHaveBeenCalled();
+    expect(h.local.files['draft.md']).toBe('unsynced');
+  });
 });
 
 describe('[SPEC:VRR-1] a tracked vault whose folder vanished is re-created and re-seeded from local', () => {
