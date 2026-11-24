@@ -1,3 +1,4 @@
+import { localListing } from './localListing';
 // A Map-backed vault and a fake server wired into a real SyncEngine, for the size-limit skip notice tests
 // (docs/spec.md §9.4a). Every file body is a string; local and remote entries share one mtime so only the
 // size limit decides what is skipped.
@@ -104,7 +105,7 @@ export async function buildOversizeWorld(input: OversizeWorldInput) {
   const localAdapter = {
     listVaultFiles: jest.fn(() => [...vault.keys()].filter(p => !p.startsWith('.') && !hiddenFromScan.has(p))
       .map(p => ({ path: p, size: sizeOf(p), mtime: vault.get(p)!.mtime }))),
-    list: jest.fn(async () => ({ files: [], folders: [] })),
+    list: jest.fn(async (parent: string) => localListing(parent, vault.keys())),
     stat: jest.fn(async (p: string) => (vault.has(p) ? { size: sizeOf(p), mtime: vault.get(p)!.mtime } : null)),
     exists: jest.fn(async (p: string) => vault.has(p)),
     read: jest.fn(async (p: string) => vault.get(p)?.body ?? ''),

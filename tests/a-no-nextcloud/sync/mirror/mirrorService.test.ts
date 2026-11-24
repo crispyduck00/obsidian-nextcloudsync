@@ -52,6 +52,8 @@ function build(over: Partial<MirrorDeps> = {}, tracked: FileState[] = []) {
   };
   let processed = 0;
   let total = 0;
+  // The default stat fixture reports every probed file as present.
+  const present = new Set<string>();
 
   const client = {
     getFiles: async () => [] as RemoteFileInfo[],
@@ -64,7 +66,15 @@ function build(over: Partial<MirrorDeps> = {}, tracked: FileState[] = []) {
       vault: { getAllFolders: () => [], adapter: { mkdir: async () => undefined, exists: async () => false } },
     } as unknown as MirrorDeps['app'],
     localAdapter: {
-      stat: async () => ({ size: 10, mtime: 1000 }),
+      stat: async (path: string) => { present.add(path); return { size: 10, mtime: 1000 }; },
+      list: async (parent: string) => {
+        const prefix = parent ? `${parent}/` : '';
+        const children = [...present].filter(path => path.startsWith(prefix)).map(path => path.slice(prefix.length));
+        return {
+          files: children.filter(path => !path.includes('/')).map(path => prefix + path),
+          folders: [...new Set(children.filter(path => path.includes('/')).map(path => prefix + path.split('/')[0]))],
+        };
+      },
       readBinary: async () => new ArrayBuffer(10),
     } as unknown as MirrorDeps['localAdapter'],
     stateDB: {
@@ -139,7 +149,11 @@ describe('MirrorService.applyRemoteMirror — the refusal gate', () => {
 
 describe('MirrorService.applyRemoteMirror — applying the plan', () => {
   it('downloads, deletes files, then deletes folders', async () => {
-    const { mirror, client, calls } = build();
+    const { mirror, client, calls } = build({ localAdapter: {
+      stat: async () => ({ size: 10, mtime: 1000 }),
+      list: async () => ({ files: ['a.md', 'old.md'], folders: ['OldDir'] }),
+      readBinary: async () => new ArrayBuffer(10),
+    } });
     const result = await mirror.applyRemoteMirror(client, plan({
       downloads: [remote('a.md')], deleteFiles: ['old.md'], deleteDirs: ['OldDir'],
       remoteFiles: [remote('a.md')],
@@ -200,7 +214,11 @@ describe('MirrorService.applyRemoteMirror — progress reporting', () => {
 
   it('reports the same counts to the callback as to the status bar', async () => {
     const seen: Array<[number, number]> = [];
-    const { mirror, client } = build();
+    const { mirror, client } = build({ localAdapter: {
+      stat: async () => ({ size: 10, mtime: 1000 }),
+      list: async () => ({ files: ['a.md', 'b.md'], folders: [] }),
+      readBinary: async () => new ArrayBuffer(10),
+    } });
     await mirror.applyRemoteMirror(
       client, plan({ deleteFiles: ['a.md', 'b.md'] }), (d, t) => seen.push([d, t]),
     );
@@ -277,6 +295,104 @@ describe('MirrorService.applyRemoteMirror — converging the state DB', () => {
 });
 
 describe('MirrorService.planRemoteMirror — a plan that cannot be trusted deletes nothing', () => {
+  it('refuses a remote case alias of an empty local folder', async () => {
+    const { mirror, calls } = build({
+      app: { vault: { getAllFolders: () => [{ path: 'Projects' }] } } as unknown as MirrorDeps['app'],
+      localAdapter: {
+        stat: async () => ({ size: 0, mtime: 1000 }),
+        list: async () => ({ files: [], folders: ['Projects'] }),
+        readBinary: async () => new ArrayBuffer(0),
+      },
+      connect: async () => ({
+        getFiles: async () => [],
+        getDirectories: async () => [{ path: 'projects', fileId: 'folder-id', etag: null, lastModified: 1000 }],
+      }) as unknown as IWebDAVClient,
+    });
+    const p = await mirror.planRemoteMirror();
+    expect(p.ok).toBe(false);
+    expect(p.createDirs).toEqual([]);
+    expect(p.deleteDirs).toEqual([]);
+    expect(calls.deleted).toEqual([]);
+  });
+
+  it('rechecks a planned empty-folder deletion after a local case rename', async () => {
+    const { mirror, client, calls } = build({
+      app: { vault: { getAllFolders: () => [{ path: 'projects' }] } } as unknown as MirrorDeps['app'],
+      localAdapter: {
+        stat: async () => ({ size: 0, mtime: 1000 }),
+        list: async () => ({ files: [], folders: ['projects'] }),
+        readBinary: async () => new ArrayBuffer(0),
+      },
+    });
+    const result = await mirror.applyRemoteMirror(client, plan({ deleteDirs: ['Projects'] }));
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0].message).toContain('stopped before any changes');
+    expect(calls.deleted).toEqual([]);
+    expect(calls.setFile).toEqual([]);
+  });
+
+  it('refuses an aliased remote filename even without tracked IDs', async () => {
+    const { mirror, calls } = build({
+      localAdapter: {
+        stat: async () => ({ size: 10, mtime: 1000 }),
+        list: async () => ({ files: ['note.md'], folders: [] }),
+        readBinary: async () => new ArrayBuffer(10),
+      },
+      localScanner: { collectLocalStats: async stats => { stats.set('note.md', { size: 10, mtime: 1000 }); } },
+      connect: async () => ({ getFiles: async () => [remote('Note.md')], getDirectories: async () => [] }) as unknown as IWebDAVClient,
+    });
+    const p = await mirror.planRemoteMirror();
+    expect(p.ok).toBe(false);
+    expect(p.reason).toContain('Sync stopped before changing files');
+    expect(p.deleteFiles).toEqual([]);
+    expect(p.downloads).toEqual([]);
+    expect(calls.downloaded).toEqual([]);
+    expect(calls.deleted).toEqual([]);
+  });
+
+  it('rechecks planned deletion names when casing changes after the preview', async () => {
+    const { mirror, client, calls } = build({
+      localAdapter: {
+        stat: async () => ({ size: 10, mtime: 1000 }),
+        list: async () => ({ files: ['Note.md'], folders: [] }),
+        readBinary: async () => new ArrayBuffer(10),
+      },
+      localScanner: { collectLocalStats: async stats => { stats.set('Note.md', { size: 10, mtime: 1000 }); } },
+    });
+    const result = await mirror.applyRemoteMirror(client, plan({ remoteFiles: [remote('Note.md')], deleteFiles: ['note.md'] }));
+    expect(result.errors).toEqual([{ path: '', message: expect.stringContaining('stopped before any changes') }]);
+    expect(calls.downloaded).toEqual([]);
+    expect(calls.deleted).toEqual([]);
+    expect(calls.setFile).toEqual([]);
+    expect(calls.complete).toEqual([[0, 0, 0, 1]]);
+  });
+
+  it('checks paths that plugin preparation brings into scope before applying', async () => {
+    let prepared = false;
+    const old = '.obsidian/plugins/p/main.js';
+    const next = '.obsidian/plugins/P/main.js';
+    const plugins = { ...noopPluginSession, prepare: async () => { prepared = true; } };
+    const { mirror, client, calls } = build({
+      plugins, isSystemExcluded: () => !prepared,
+      enumerateIncludedConfigPaths: async () => [old],
+      localAdapter: {
+        stat: async () => ({ size: 10, mtime: 1000 }),
+        list: async parent => {
+          if (parent === '') return { files: [], folders: ['.obsidian'] };
+          if (parent === '.obsidian') return { files: [], folders: ['.obsidian/plugins'] };
+          if (parent === '.obsidian/plugins') return { files: [], folders: ['.obsidian/plugins/p'] };
+          return { files: [old], folders: [] };
+        },
+        readBinary: async () => new ArrayBuffer(10),
+      },
+    });
+    const result = await mirror.applyRemoteMirror(client, plan({ downloads: [remote(next)], remoteFiles: [remote(next)] }));
+    expect(prepared).toBe(true);
+    expect(result.errors).toHaveLength(1);
+    expect(calls.downloaded).toEqual([]);
+    expect(calls.deleted).toEqual([]);
+  });
+
   it('returns an unusable plan when the connection fails', async () => {
     const { mirror } = build({ connect: async () => { throw new Error('offline'); } });
     const p = await mirror.planRemoteMirror();

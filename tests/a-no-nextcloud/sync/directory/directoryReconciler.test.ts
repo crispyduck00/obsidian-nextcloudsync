@@ -12,6 +12,7 @@ import { TransferService } from '../../../../src/sync/transfer/TransferService';
 import { SyncSessionSummary, RemoteDirInfo, DirState } from '../../../../src/types';
 import { IWebDAVClient } from '../../../../src/network/IWebDAVClient';
 import { TFolder } from '../../support/obsidian';
+import { localListing } from '../../support/localListing';
 
 function summary(): SyncSessionSummary {
   return {
@@ -75,7 +76,11 @@ function build(world: Partial<World> = {}, over: Partial<DirectoryDeps> = {}) {
   const deps: DirectoryDeps = {
     app: {
       vault: {
-        adapter: { mkdir: async (p: string) => { calls.mkdir.push(p); } },
+        adapter: {
+          mkdir: async (p: string) => { calls.mkdir.push(p); },
+          stat: async (p: string) => w.local.includes(p) ? { size: 0, mtime: 1 } : null,
+          list: async (p: string) => localListing(p, [], w.local),
+        },
         getAllFolders: () => w.local.map((p) => new TFolder(p)),
         getAbstractFileByPath: (p: string) => (w.local.includes(p) ? new TFolder(p) : null),
       },
@@ -442,7 +447,11 @@ describe('[SPEC:DTV-3] DirectoryReconciler.reconcileDirectories — a plugin tra
     }, {
       app: {
         vault: {
-          adapter: { mkdir: async () => undefined },
+          adapter: {
+            mkdir: async () => undefined,
+            stat: async (p: string) => p === 'F' ? { size: 0, mtime: 1 } : null,
+            list: async (p: string) => localListing(p, [], ['F']),
+          },
           getAllFolders: () => [new TFolder('F')],
           getAbstractFileByPath: () => new TFolder('F'),
         },

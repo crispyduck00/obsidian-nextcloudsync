@@ -14,6 +14,7 @@ import {
 } from './classify';
 import { collectSubtreePaths, dropSubtreeTracking } from '../deletion/subtreeTracking';
 import { FileLogger } from '../../util/FileLogger';
+import { assertUnambiguousLocalPaths } from '../scan/localPathIdentity';
 
 export interface DirectoryDeps {
   app: App;
@@ -62,6 +63,9 @@ export class DirectoryReconciler {
       (vault.getAllFolders?.() ?? []).map(f => f.path).filter(p => p && p !== '/'),
     );
     const tracked = new Map(this.deps.stateDB.getAllDirs().map(d => [d.path, d]));
+
+    const included = (paths: Iterable<string>): string[] => [...paths].filter(path => !this.deps.isSystemExcluded(path));
+    await assertUnambiguousLocalPaths(this.deps.app.vault.adapter, included(localDirs), included(remoteDirs.keys()), 'folder');
 
     const plan = classifyDirectories(remoteDirs, localDirs, tracked, (p) => this.deps.isSystemExcluded(p));
     const { mkcolRemote, mkdirLocal, deleteRemote, trashLocal, ensureTracked, dropTracked } = plan;
