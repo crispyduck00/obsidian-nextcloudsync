@@ -6,6 +6,8 @@ Serialize full sync and Restore against lightweight operations.
 
 Retain writer-preferred shared/exclusive coordination and upstream per-path locks, plugin exclusions and cellular guards. Restore takes the same exclusive gate. Maintenance waits for an in-flight Restore before resetting tracking. The gate is process-local; another device is handled through normal remote identity/precondition checks.
 
+The remote-mirror dialog also reserves the vault while its preview awaits confirmation and while applying. Normal full and Watch operations wait until the dialog closes. Closing the dialog resumes the active engine and its queued work. Unloading the plugin or replacing the engine leaves the old engine stopped.
+
 ## Upstream base and independence
 
 - Base: upstream `1.0.18`, commit `21f89023fdaee58068276df3cff876fcc74a1e95`.

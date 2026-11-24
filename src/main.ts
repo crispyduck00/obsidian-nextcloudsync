@@ -278,7 +278,7 @@ export default class ObsidianNextcloudsync extends Plugin {
 
       const watchQueue = new WatchFileQueue(
         () => this.settings.watchDebounceSeconds * 1000,
-        () => watchOn() && (!mobileWatch || !document.hidden),
+        () => !this.mirrorInProgress && watchOn() && (!mobileWatch || !document.hidden),
         (paths) => {
           if (mobileWatch) {
             for (const path of paths) mobileWatch.queueFile(path);
@@ -345,7 +345,7 @@ export default class ObsidianNextcloudsync extends Plugin {
       };
       const newFolderQueue = new WatchFileQueue(
         () => 0,
-        () => watchOn() && (!mobileWatch || !document.hidden),
+        () => !this.mirrorInProgress && watchOn() && (!mobileWatch || !document.hidden),
         (paths) => { for (const path of paths) createFolder(path, true); },
         (path) => this.localCreations.readyAt(path),
       );
@@ -704,6 +704,12 @@ export default class ObsidianNextcloudsync extends Plugin {
       new Notice(`❌ Mirror from remote failed: ${(err as Error).message}`, 8000);
     } finally {
       this.mirrorInProgress = false;
+      if (this.syncEngine === engine) await engine.resumeAfterRemoteMirror();
+      if (this.syncEngine) {
+        this.watchQueue?.refresh();
+        this.newFolderQueue?.refresh();
+        this.mobileWatch?.onVisible();
+      }
     }
   }
 
@@ -829,6 +835,7 @@ export default class ObsidianNextcloudsync extends Plugin {
     this.mobileSyncStatusItem = undefined;
     this.statusBarEl?.remove();
     this.statusBarEl = undefined;
+    this.syncEngine = undefined;
   }
 
   async loadSettings(): Promise<void> {
@@ -1011,6 +1018,7 @@ export default class ObsidianNextcloudsync extends Plugin {
         loggingEnabled: this.settings.loggingEnabled,
       }),
       logger: this.logger,
+      isRemoteMirrorOpen: () => this.mirrorInProgress,
       onTeamMountDiscovered: () => this.pushSyncScheduler?.teamMountDiscovered(),
       onFeatures: (features) => {
         // Lets the settings screen recommend an upgrade; persisted only on change.
