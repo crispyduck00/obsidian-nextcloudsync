@@ -559,12 +559,17 @@ export class SyncEngine {
     await this.syncManualWithResult(opts);
   }
 
-  /** Client Push fallback needs to know whether an authoritative full-sync attempt really completed. */
+  /** A manual safety repair stays visible, but consumes this Push hint without a retry loop. */
   async syncForClientPush(): Promise<boolean> {
-    return this.syncManualWithResult();
+    let held = false;
+    const completed = await this.syncManualWithResult({}, () => { held = true; });
+    return completed || (held && !this.cancelled);
   }
 
-  private async syncManualWithResult(opts: { manual?: boolean } = {}): Promise<boolean> {
+  private async syncManualWithResult(
+    opts: { manual?: boolean } = {},
+    onManualResolution?: () => void,
+  ): Promise<boolean> {
     // Mobile has no status bar; sync state (progress + result) is surfaced via NoticeStatusBar,
     // which implements IStatusBar and is driven uniformly for every run. The two early-return
     // guidance notices below still need an explicit mobile notice because those paths return
@@ -584,16 +589,21 @@ export class SyncEngine {
     // Set the balking flag synchronously (before any await) so a concurrent call still balks.
     this.running = true;
     this.cancelled = false;
-    const run = this.runSyncSession(opts.manual === true);
+    let manuallyHeld = false;
+    const run = this.runSyncSession(opts.manual === true, () => {
+      manuallyHeld = true;
+      onManualResolution?.();
+    });
     this.currentRun = run;
     let completed = false;
     try {
       completed = await run;
     } finally {
       this.currentRun = null;
-      // The run is over, so deferred watch edits can be evaluated. Best-effort: a failure must not propagate out of "Sync now".
+      // A manual safety hold keeps deferred edits behind the failed reconciliation.
+      // Otherwise re-evaluate them now; failures must not escape "Sync now".
       try {
-        await this.drainWatchPending();
+        if (!manuallyHeld) await this.drainWatchPending();
       } catch (err) {
         console.warn('[SyncEngine] Deferred watch-mode sync failed:', err);
       }
@@ -601,7 +611,7 @@ export class SyncEngine {
     return completed;
   }
 
-  private async runSyncSession(manual: boolean): Promise<boolean> {
+  private async runSyncSession(manual: boolean, onManualResolution?: () => void): Promise<boolean> {
     // Created before the try so catch/finally can reference them even if the first step fails.
     const summary = this.initSummary();
     this.journal.beginRun(summary.startedAt);
@@ -626,6 +636,10 @@ export class SyncEngine {
       }
       completed = !this.cancelled;
     } catch (err) {
+      if (err instanceof Error && 'requiresManualResolution' in err && err.requiresManualResolution === true) {
+        this.opts.stateDB.setRemoteRootEtag(null);
+        onManualResolution?.();
+      }
       console.error('[SyncEngine] Sync failed:', err);
       void this.opts.logger?.log(`sync: FAILED — ${(err as Error).message}`, 'error');
       new Notice(`❌ Sync failed: ${(err as Error).message}`, 6000);

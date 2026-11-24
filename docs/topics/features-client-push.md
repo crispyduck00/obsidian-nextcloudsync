@@ -12,6 +12,8 @@ Push batches retain a two-second maximum initial wait and failed authoritative r
 
 The general `fixes/oversize-root-etag` topic supplies the root-listing generation. `fixes/guarded-folder-reconciliation` supplies the root identity API, and `fixes/version-restore-state-convergence` supplies confirmed remote revisions. Before the required proof capabilities are composed, this standalone topic uses the ordinary full fallback for an ambiguous root. Persistent rename intent is owned by its separate fix topic. Integration routes pushed IDs for held renames through the same authoritative fallback and retains their original conditional MOVE.
 
+A reconciliation error can explicitly report `requiresManualResolution: true`. Push consumes that hint while the ordinary session still records and displays the error, invalidates the root checkpoint and keeps deferred Watch edits queued. Its shared run result remains incomplete for other callers. A later genuine hint or configured/manual sync remains eligible; transport errors retain the existing bounded retry. This optional error contract adds no dependency on a particular general fix and no persistent state.
+
 ### Newly discovered Team Folders
 
 Nextcloud `notify_push` 1.4.2 caches a storage's recipient list for four to five minutes. A new Team Folder can initially have an empty or incomplete list. File edits made during that window can miss the other account's socket, and cache expiry alone does not replay them. For established mounts, file notifications use the usual Push path. [Recipient cache in notify_push 1.4.2](https://github.com/nextcloud/notify_push/blob/e393d172087e872fa88dc87baa39e6eb1bbde496/src/storage_mapping.rs#L32-L44)
