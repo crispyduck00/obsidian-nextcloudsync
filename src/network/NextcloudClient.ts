@@ -23,7 +23,7 @@ import {
   AppPasswordReader,
   CredentialsNotFoundError,
 } from '../types';
-import { IWebDAVClient, type DirectoryCreationObserver, type RemoteRootInfo, type TrackedDirectories } from './IWebDAVClient';
+import { IWebDAVClient, type DirectoryCreationObserver, type RemoteRootInfo, type TrackedDirectories, type UploadOptions } from './IWebDAVClient';
 import { DavSyncSettings } from '../types';
 import { toRemotePath, fromRemotePath, hrefToRelative, encodeRemoteUrl, encodeServerUrl, ensureRemoteDir, mkcolStrict, prepareMissingParentRetry, isTransportFailure } from './remotePath';
 import { RemoteDirCache } from './RemoteDirCache';
@@ -79,6 +79,18 @@ const REPORT_BODY = (syncToken: string) => `<?xml version="1.0" encoding="utf-8"
 
 // OCS answered nothing: the capability set used when OCS is not asked at all or does not answer.
 const NO_CAPABILITIES = { ocsAnswered: false, version: '', hasChecksums: false, hasFilesLocking: false, hasBulkUpload: false };
+
+function readCreatedFileId(headers?: Record<string, string>): string | null {
+  // Nextcloud's OC-FileId contains the padded numeric oc:fileid and its instance suffix.
+  const header = Object.entries(headers ?? {}).find(([name]) => name.toLowerCase() === 'oc-fileid')?.[1];
+  return /^0*([1-9]\d*)(?:oc[a-z0-9]+)?$/i.exec(header?.trim() ?? '')?.[1] ?? null;
+}
+
+function reportFileCreation(response: RequestUrlResponse, opts?: UploadOptions): void {
+  if (response.status !== 201 || !opts?.onlyIfAbsent || !opts.onCreatedFileId) return;
+  const fileId = readCreatedFileId(response.headers);
+  if (fileId) opts.onCreatedFileId(fileId);
+}
 
 // Reads a probe body as a JSON object; anything else is "no evidence", never an exception (docs/spec.md §3).
 function readJsonObject(res: RequestUrlResponse): Record<string, unknown> | null {
@@ -377,14 +389,11 @@ export class NextcloudClient implements IWebDAVClient {
     this.existingRootRequired = required;
   }
 
-  trackKnownDirectories(state: TrackedDirectories): void {
-    this.knownDirectories = state;
-  }
-
   private directoryCreationObserver?: DirectoryCreationObserver;
 
-  observeDirectoryCreations(observer: DirectoryCreationObserver): void {
-    this.directoryCreationObserver = observer;
+  trackKnownDirectories(state: TrackedDirectories, observeCreation?: DirectoryCreationObserver): void {
+    this.knownDirectories = state;
+    this.directoryCreationObserver = observeCreation;
   }
 
   private get directoryContext() {
@@ -398,13 +407,7 @@ export class NextcloudClient implements IWebDAVClient {
       beginMkdir: (path: string) => {
         const relative = fromRemotePath(this.remoteBase, path);
         const finish = relative ? this.directoryCreationObserver?.(relative) : undefined;
-        if (!finish) return undefined;
-        return (headers?: Record<string, string>): void => {
-          // Nextcloud's OC-FileId contains the padded numeric oc:fileid and its instance suffix.
-          const header = Object.entries(headers ?? {}).find(([name]) => name.toLowerCase() === 'oc-fileid')?.[1];
-          const id = /^0*([1-9]\d*)(?:oc[a-z0-9]+)?$/i.exec(header?.trim() ?? '')?.[1];
-          finish(id ?? null);
-        };
+        return finish ? (headers?: Record<string, string>) => finish(readCreatedFileId(headers)) : undefined;
       },
     };
   }
@@ -503,7 +506,7 @@ export class NextcloudClient implements IWebDAVClient {
 
   async uploadFile(
     remotePath: string, data: ArrayBuffer, mtime?: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; expectedRemoteChecksum?: string; onlyIfAbsent?: boolean; ctime?: number },
+    opts?: UploadOptions,
   ): Promise<void> {
     // PUT first and MKCOL the parents only on a missing parent, then retry once: drops the per-upload directory probe on the common path.
     const checksum = `SHA256:${opts?.precomputedSha256 ?? await sha256(data)}`;
@@ -540,6 +543,7 @@ export class NextcloudClient implements IWebDAVClient {
     }
     // A parent we could not create explains the failure better than the PUT's own status, so it wins, but only after the retry had its chance.
     if (res.status < 200 || res.status >= 300) throw dirError ?? new NetworkError(res.status, res.text, 'PUT');
+    reportFileCreation(res, opts);
   }
 
   async recalcChecksum(remotePath: string): Promise<string | null> {
@@ -763,7 +767,7 @@ export class NextcloudClient implements IWebDAVClient {
 
   async uploadChunked(
     remotePath: string, data: ArrayBuffer, chunkSizeBytes: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; expectedRemoteChecksum?: string; onlyIfAbsent?: boolean; mtime?: number; ctime?: number },
+    opts?: UploadOptions & { mtime?: number },
   ): Promise<void> {
     const uploadId = `obsidian-${this.settings.deviceId.slice(-8)}-${Date.now()}`;
     const sessionUrl = `${this.davBase('uploads')}/${uploadId}`;
@@ -830,6 +834,7 @@ export class NextcloudClient implements IWebDAVClient {
 
       // Verify the checksum after assembly (FR-012), passing the precomputed hash to avoid hashing the buffer twice.
       await this.verifyRemoteChecksum(remotePath, data, sum);
+      reportFileCreation(move, opts);
     } catch (err) {
       // On abort, discard the session so no incomplete file is left at the final path (FR-011).
       await this.req({ url: sessionUrl, method: 'DELETE', headers: { Authorization: this.authHeader, ...NO_CACHE_HEADERS }, throw: false }).catch(() => undefined);

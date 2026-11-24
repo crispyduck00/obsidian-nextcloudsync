@@ -12,7 +12,7 @@ function signal() {
 }
 
 describeLive('Renames during first uploads', getEnv => {
-  it.each(['watch', 'automatic full', 'manual full', 'initial full'])('follows a local rename while the first PUT response is still pending (%s)', async entry => {
+  it.each(['watch', 'chunked watch', 'automatic full', 'manual full', 'initial full'])('follows a local rename while the first upload response is still pending (%s)', async entry => {
     const env = getEnv();
     const { client: writer, ws } = await setupWorkspace(env);
     const d = makeDevice(env, ws.remoteBase, 'initial-put-rename');
@@ -30,14 +30,18 @@ describeLive('Renames during first uploads', getEnv => {
       const send = d.client.uploadFile.bind(d.client);
       jest.spyOn(d.client, 'uploadFile').mockImplementationOnce(async (...args) => {
         try {
-          await send(...args);
+          if (entry === 'chunked watch') {
+            const [path, data, mtime, options] = args;
+            await d.client.uploadChunked(path, data, 1024 * 1024, { ...options, mtime });
+          } else await send(...args);
         } finally {
           uploaded.release();
           await releaseResponse.wait;
         }
       });
 
-      sync = entry === 'watch' ? d.engine.syncSingleFile(oldPath)
+      const watch = entry === 'watch' || entry === 'chunked watch';
+      sync = watch ? d.engine.syncSingleFile(oldPath)
         : entry === 'manual full' ? d.sync() : d.engine.syncManual();
       await uploaded.wait;
       const originalId = (await writer.statFile(oldPath))?.fileId;
@@ -47,7 +51,7 @@ describeLive('Renames during first uploads', getEnv => {
       d.vault.seedLocal(newPath, '# Project\nbody\n');
       d.engine.rememberFileRename(oldPath, newPath);
       const renamed = d.engine.syncRememberedFileRename(oldPath, newPath);
-      if (entry !== 'watch') await d.engine.syncSingleFile(newPath);
+      if (!watch) await d.engine.syncSingleFile(newPath);
       releaseResponse.release();
       await sync;
       expect(d.engine.getLastSessionSummary()?.errorCount ?? 0).toBe(0);
@@ -116,4 +120,51 @@ describeLive('Renames during first uploads', getEnv => {
     }
   });
 
+  it('does not move a peer replacement with identical bytes after an acknowledged first upload', async () => {
+    const env = getEnv();
+    const { client: writer, ws } = await setupWorkspace(env);
+    const d = makeDevice(env, ws.remoteBase, 'replaced-first-file');
+    const uploaded = signal();
+    const releaseResponse = signal();
+    let upload: Promise<void> | undefined;
+    try {
+      const body = '# Draft\nbody\n';
+      await writer.uploadFile('Anchor.md', textBuf('anchor'));
+      await d.sync();
+      d.vault.seedLocal('Draft.md', body);
+      const send = d.client.uploadFile.bind(d.client);
+      jest.spyOn(d.client, 'uploadFile').mockImplementationOnce(async (...args) => {
+        try {
+          await send(...args);
+        } finally {
+          uploaded.release();
+          await releaseResponse.wait;
+        }
+      });
+      upload = d.engine.syncSingleFile('Draft.md');
+      await uploaded.wait;
+      const original = await writer.statFile('Draft.md');
+      expect(original?.fileId).toBeTruthy();
+      await writer.moveFile('Draft.md', 'Peer moved original.md');
+      await writer.uploadFile('Draft.md', textBuf(body));
+      const replacement = await writer.statFile('Draft.md');
+      expect(replacement?.fileId).not.toBe(original?.fileId);
+
+      await d.vault.adapter.rename('Draft.md', 'Renamed.md');
+      d.engine.rememberFileRename('Draft.md', 'Renamed.md');
+      releaseResponse.release();
+      await upload;
+      await d.sync();
+      expect(d.engine.getStatusReport().pendingFileRenames).toEqual([
+        expect.objectContaining({ source: 'Draft.md', destination: 'Renamed.md', fileId: original?.fileId, issue: 'conflict' }),
+      ]);
+      expect(await writer.statFile('Renamed.md')).toBeNull();
+      expect((await writer.statFile('Draft.md'))?.fileId).toBe(replacement?.fileId);
+      expect((await writer.statFile('Peer moved original.md'))?.fileId).toBe(original?.fileId);
+    } finally {
+      releaseResponse.release();
+      await upload?.catch(() => undefined);
+      await cleanupWorkspace(writer, ws);
+    }
+  });
 });

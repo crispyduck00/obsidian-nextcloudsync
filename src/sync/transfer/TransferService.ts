@@ -6,7 +6,7 @@ import { FileLockedError, FeatureUnsupportedError, NetworkError } from '../../ty
 import { LocalAdapter } from '../../data/LocalAdapter';
 import { StateDB } from '../../data/StateDB';
 import { IWebDAVClient } from '../../network/IWebDAVClient';
-import { IUploadStrategy } from '../upload/IUploadStrategy';
+import { IUploadStrategy, type UploadOutcome } from '../upload/IUploadStrategy';
 import { SyncJournal } from '../session/SyncJournal';
 import { MergeBaseRecorder } from '../session/MergeBaseRecorder';
 import { withLocalSignature } from '../../data/localSignature';
@@ -34,7 +34,7 @@ export interface TransferDeps {
   maxFileSizeMB(): number;
   hasFilesLocking(): boolean;
   isRenameHeld?(path: string): boolean;
-  beginFirstUpload?(path: string): (outcome?: 'uploaded' | 'skipped') => void;
+  beginFirstUpload?(path: string): (outcome?: UploadOutcome, createdFileId?: string) => void;
   // Asks which client is running, not what the server said: `StandardWebDAVClient` hardcodes `checksum: null`,
   // so recording a SHA-256 against plain WebDAV would mismatch what the next sync reads back (docs/spec.md §4.1).
   // Deliberately NOT the server's `hasChecksums` capability, which is false on the official Docker image even
@@ -75,8 +75,9 @@ export class TransferService {
       throw err;
     }
 
-    let finish: ((outcome?: 'uploaded' | 'skipped') => void) | undefined;
-    let recorded: 'uploaded' | 'skipped' | undefined;
+    let finish: ReturnType<NonNullable<TransferDeps['beginFirstUpload']>> | undefined;
+    let recorded: UploadOutcome | undefined;
+    let createdFileId: string | undefined;
     try {
       let outcome: 'uploaded' | 'skipped';
       try {
@@ -87,7 +88,7 @@ export class TransferService {
         outcome = await uploadStrategy.upload(client, path, data, stat.mtime, {
           ifMatchEtag: remote.etag,
           ...(remote.checksum ? { expectedRemoteChecksum: remote.checksum } : {}),
-          ...(onlyIfAbsent ? { onlyIfAbsent } : {}),
+          ...(onlyIfAbsent ? { onlyIfAbsent, onCreatedFileId: (id: string) => { createdFileId = id; } } : {}),
           ctime: uploadCreationTimeMs(stat.ctime, remote.creationTime),
         });
       } finally {
@@ -109,7 +110,7 @@ export class TransferService {
       // plain WebDAV the next PROPFIND yields an ETag, so ask the server and record that instead.
       let uploadedRemoteId = localHash;
       let uploadedIdType: FileState['idType'] = 'sha256';
-      let uploadedFileId = remote.fileId;
+      let uploadedFileId = createdFileId ?? remote.fileId;
       let uploadedRemoteMtime = remote.lastModified;
       const reportsChecksums = this.deps.clientReportsChecksums();
       if (!reportsChecksums || (onlyIfAbsent && !uploadedFileId)) {
@@ -142,7 +143,7 @@ export class TransferService {
       this.deps.mergeBase.recordBytes(path, data);
       recorded = outcome;
     } finally {
-      finish?.(recorded);
+      finish?.(recorded, createdFileId);
     }
   }
 

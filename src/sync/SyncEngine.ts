@@ -535,12 +535,14 @@ export class SyncEngine {
     return !(folder ? this.opts.stateDB.getDir(source) : this.opts.stateDB.getFile(source));
   }
 
-  private beginFirstUpload(path: string): (outcome?: 'uploaded' | 'skipped') => void {
+  private beginFirstUpload(path: string): (outcome?: 'uploaded' | 'skipped', createdFileId?: string) => void {
     const scope = this.fileRenameScope();
     this.firstUploads.add(path);
-    return outcome => {
+    return (outcome, createdFileId) => {
       this.firstUploads.delete(path);
       if (!outcome || scope !== this.fileRenameScope()) return;
+      // A later stat can identify a same-content replacement. Only the write response proves which Nextcloud ID we created.
+      if (outcome === 'uploaded' && this.features?.isNextcloud && !createdFileId) return;
       const file = outcome === 'uploaded' ? this.opts.stateDB.getFile(path) : null;
       if (file !== undefined && this.pendingFileRenames.finishFirstUpload(path, file)) this.persistRenameIntent();
     };
@@ -624,9 +626,8 @@ export class SyncEngine {
     const rebuild = !!read && !!this.client && password !== this.connectedPassword;
     if (!this.client || !this.features || rebuild) {
       const { client, features } = await this.opts.webdavFactory.createClient();
-      client.trackKnownDirectories?.(this.opts.stateDB);
       this.client = client;
-      client.observeDirectoryCreations?.(path => this.beginDirectoryCreation(client, path));
+      client.trackKnownDirectories?.(this.opts.stateDB, path => this.beginDirectoryCreation(client, path));
       this.renameTracker = null;
       this.features = features;
       this.connectedPassword = password;
@@ -2241,6 +2242,7 @@ export class SyncEngine {
       async (path) => {
         let finish: ReturnType<SyncEngine['beginFirstUpload']> | undefined;
         let recorded: 'uploaded' | 'skipped' | undefined;
+        let createdFileId: string | undefined;
         try {
           const lf = localFiles.get(path);
           if (!lf || this.isPathHeld(path)) return;
@@ -2252,7 +2254,10 @@ export class SyncEngine {
           const ctime = uploadCreationTimeMs(before?.ctime, remoteMap.get(path)?.creationTime ?? 0);
           if (!before || this.isPathHeld(path)) return;
           finish = this.beginFirstUpload(path);
-          const outcome = await this.uploadStrategy!.upload(this.client!, path, data, lf.mtime, { precomputedSha256: localHash, ctime, onlyIfAbsent: true });
+          const outcome = await this.uploadStrategy!.upload(this.client!, path, data, lf.mtime, {
+            precomputedSha256: localHash, ctime, onlyIfAbsent: true,
+            onCreatedFileId: id => { createdFileId = id; },
+          });
           if (outcome === 'skipped') {
             recorded = outcome;
             // Over the size limit: counted for the end-of-sync notice (docs/spec.md §9.4a). This batch bypasses uploadFile.
@@ -2265,12 +2270,15 @@ export class SyncEngine {
           summary.uploadedCount++;
           this.recordHistory(path, 'uploaded');
           const stat = await this.opts.localAdapter.stat(path);
-          this.opts.stateDB.setFile(await this.withLocalSignature({ path, localHash, remoteId: localHash, idType: 'sha256', size: lf.size, mtime: stat?.mtime ?? 0, remoteFileId: null, isConflicted: false }));
+          this.opts.stateDB.setFile(await this.withLocalSignature({
+            path, localHash, remoteId: localHash, idType: 'sha256', size: lf.size, mtime: stat?.mtime ?? 0,
+            remoteFileId: createdFileId ?? null, isConflicted: false,
+          }));
           // This batch bypasses uploadFile, so it seeds its own merge base; without it a later concurrent edit duplicates shared blocks.
           this.recordMergeBase(path, data);
           recorded = outcome;
         } catch (err) { this.recordError(summary, path, err); this.retryQueue.push(path); }
-        finally { finish?.(recorded); }
+        finally { finish?.(recorded, createdFileId); }
         this.tickProgress();
       },
       true,
