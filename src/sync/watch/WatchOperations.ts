@@ -262,8 +262,10 @@ export class WatchOperations {
     try {
       if (this.deps.isRenameHeld?.(path)) return;
       await conn.client.createDirectory(path);
-      const current = await conn.client.statFolderMovePath?.(path);
-      this.deps.stateDB.setDir({ path, remoteFileId: current?.directoryId ?? null });
+      if (!this.deps.stateDB.getDir(path)?.remoteFileId) {
+        const current = await conn.client.statFolderMovePath?.(path);
+        if (!this.deps.isRenameHeld?.(path)) this.deps.stateDB.setDir({ path, remoteFileId: current?.directoryId ?? null });
+      }
       this.deps.stateDB.requestSave();
       void this.deps.logger?.log(`watch: folder created → MKCOL ${path}`);
     } catch (err) {
