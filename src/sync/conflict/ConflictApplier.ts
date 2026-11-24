@@ -15,7 +15,7 @@ import { SyncJournal } from '../session/SyncJournal';
 import { MergeBaseRecorder } from '../session/MergeBaseRecorder';
 import { TransferService } from '../transfer/TransferService';
 import { ResolutionService } from '../resolution/ResolutionService';
-import { withLocalSignature } from '../../data/localSignature';
+import { localReadSignature, withLocalSignature } from '../../data/localSignature';
 import { isMarkdown } from '../../util/mergeableExtensions';
 import { isAnomalousRemoteContent } from '../../util/limits';
 import { FileLogger } from '../../util/FileLogger';
@@ -198,9 +198,7 @@ export class ConflictApplier {
       identical = bytesEqual(localData, remoteData);
     }
     if (!identical) return { converged: false, remoteData };
-    this.deps.stateDB.setFile(await withLocalSignature(
-      this.deps.localAdapter, convergedState(remote, localHash, localStat), remote.lastModified,
-    ));
+    this.deps.stateDB.setFile(convergedState(remote, localHash, localStat));
     this.deps.mergeBase.recordBytes(path, localData);
     await this.deps.creationTime?.align(conn.client, remote, localStat);
     void this.deps.logger?.log(`conflict: content identical to the remote → state converged, no transfer → ${path}`);
@@ -221,14 +219,16 @@ export class ConflictApplier {
     );
 
     // Without this push the merge stays local-only and every later sync re-detects the same conflict.
+    const stat = await this.deps.localAdapter.stat(path);
     const mergedData = await this.deps.localAdapter.readBinary(path);
+    const signature = stat && localReadSignature(stat, mergeMtime, mergedData.byteLength);
     const mergedHash = await sha256(mergedData);
     let uploaded = false;
     try {
       const lockToken = await this.deps.transfer.acquireLock(conn.client, path);
       try {
         const outcome = await conn.uploadStrategy.upload(conn.client, path, mergedData, mergeMtime, {
-          ctime: uploadCreationTimeMs(before?.ctime, remote.creationTime),
+          precomputedSha256: mergedHash, ctime: uploadCreationTimeMs(before?.ctime, remote.creationTime),
         });
         if (outcome !== 'skipped') {
           summary.uploadedCount++; uploaded = true; this.deps.journal.recordHistory(path, 'uploaded');
@@ -248,7 +248,6 @@ export class ConflictApplier {
       }
     }
 
-    const stat = await this.deps.localAdapter.stat(path);
     const prior = this.deps.stateDB.getFile(path);
     const nextState: FileState = {
       path,
@@ -256,7 +255,7 @@ export class ConflictApplier {
       localHash: uploaded ? mergedHash : (prior?.localHash ?? ''),
       remoteId: uploaded ? mergedHash : remoteId,
       idType: uploaded ? 'sha256' : idType,
-      size: stat?.size ?? 0, mtime: mergeMtime,
+      size: mergedData.byteLength, mtime: mergeMtime,
       remoteFileId: remote.fileId,
       // Stays true after a failed upload even for a clean merge, or the next sync reads the state as converged.
       isConflicted: !clean || !uploaded,
@@ -264,13 +263,13 @@ export class ConflictApplier {
     // After a failed push localHash deliberately differs from the file; a signature would let the
     // local-unchanged fast path skip the re-hash that drives the retry.
     this.deps.stateDB.setFile(
-      uploaded ? await withLocalSignature(this.deps.localAdapter, nextState, remote.lastModified) : nextState,
+      uploaded ? { ...nextState, ...signature, remoteMtime: remote.lastModified } : nextState,
     );
     const mergeDetail: SyncHistoryDetail = {
       localHash: mergedHash,
       remoteId: uploaded ? mergedHash : remoteId,
       remoteIdType: uploaded ? 'sha256' : idType,
-      localSize: stat?.size ?? 0,
+      localSize: mergedData.byteLength,
       remoteSize: remote.size,
     };
     if (clean) {
@@ -290,13 +289,15 @@ export class ConflictApplier {
   ): Promise<void> {
     const stat = await this.deps.localAdapter.stat(path);
     const mtime = stat?.mtime ?? Date.now();
+    const observedAt = Date.now();
     const localData = await this.deps.localAdapter.readBinary(path);
+    const signature = stat && localReadSignature(stat, observedAt, localData.byteLength);
     const localHash = await sha256(localData);
     try {
       const lockToken = await this.deps.transfer.acquireLock(conn.client, path);
       try {
         const outcome = await conn.uploadStrategy.upload(conn.client, path, localData, mtime, {
-          ctime: uploadCreationTimeMs(stat?.ctime, remote.creationTime),
+          precomputedSha256: localHash, ctime: uploadCreationTimeMs(stat?.ctime, remote.creationTime),
         });
         if (outcome === 'skipped') {
           // Skipped (e.g. size limit): leave the conflict unresolved.
@@ -321,13 +322,14 @@ export class ConflictApplier {
     summary.uploadedCount++;
     this.deps.journal.recordHistory(path, 'local-wins', undefined, {
       localHash, remoteId: localHash, remoteIdType: 'sha256',
-      localSize: stat?.size ?? localData.byteLength, remoteSize: remote.size,
+      localSize: localData.byteLength, remoteSize: remote.size,
     });
-    this.deps.stateDB.setFile(await withLocalSignature(this.deps.localAdapter, {
+    this.deps.stateDB.setFile({
       path, localHash, remoteId: localHash, idType: 'sha256',
-      size: stat?.size ?? localData.byteLength, mtime,
+      size: localData.byteLength, mtime, ...signature,
       remoteFileId: remote.fileId, isConflicted: false,
-    }, remote.lastModified));
+      remoteMtime: remote.lastModified,
+    });
     this.deps.mergeBase.recordBytes(path, localData);
     void this.deps.logger?.log(`conflict: resolved by prefer-local (remote overwritten) → ${path}`);
   }

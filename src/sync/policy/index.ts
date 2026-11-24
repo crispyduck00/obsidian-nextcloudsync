@@ -1,7 +1,8 @@
 // Pure predicates (no network, disk or engine state): every input arrives as an argument, including
 // ambient values such as the clock, so the safety-window boundaries are directly testable.
 import { FileState } from '../../types';
-import { SIGNATURE_SAFETY_WINDOW_MS } from '../../util/limits';
+import { withinSafetyWindow } from '../../data/localSignature';
+export { withinSafetyWindow } from '../../data/localSignature';
 import { isUnderExcludedFolder, HARD_EXCLUDED_FOLDERS } from '../../util/excludedFolders';
 import { isSyncTmpPath } from '../../data/LocalAdapter';
 import { DIR_BREAKER_REPORT_FILENAME, FILE_BREAKER_REPORT_FILENAME } from '../../ui/breakerReport';
@@ -14,12 +15,6 @@ export function parentDir(path: string): string {
 export function isDotName(path: string): boolean {
   const i = path.lastIndexOf('/');
   return (i < 0 ? path : path.slice(i + 1)).startsWith('.');
-}
-
-// Mtime granularity is coarse (1-2 s on some mobile storage), so a same-size in-place edit inside it is
-// indistinguishable from no edit by stat alone and must not be treated as unchanged.
-export function withinSafetyWindow(mtime: number, ref: number): boolean {
-  return Math.abs(ref - mtime) < SIGNATURE_SAFETY_WINDOW_MS;
 }
 
 // Compares against the stat signature captured right after the plugin's own write. A downloaded mtime is

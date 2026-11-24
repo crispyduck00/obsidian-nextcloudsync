@@ -70,10 +70,10 @@ export class CreationTimeAligner implements CreationTimePort {
       return;
     }
     await this.log(`local set to ${seconds}`, path);
-    const fresh = await localAdapter.stat(path);
+    // Changing ctime proves nothing about content edited while the adapter was busy.
     this.patchState(path, (s) => {
       const { ctimeLocalAttempt: _dropped, ...rest } = s;
-      return fresh ? { ...rest, localMtime: fresh.mtime, localSize: fresh.size } : rest;
+      return rest;
     });
   }
 

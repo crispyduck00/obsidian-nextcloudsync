@@ -110,7 +110,7 @@ function build(o: Opts = {}, over: Partial<WatchDeps> = {}) {
       drop: (p: string) => { calls.droppedBase.push(p); },
     } as unknown as MergeBaseRecorder,
     transfer: {
-      uploadFile: async (_c: unknown, _u: unknown, p: string) => { calls.uploaded.push(p); },
+      uploadFile: async (_c: unknown, _u: unknown, r: RemoteFileInfo) => { calls.uploaded.push(r.path); },
     } as unknown as TransferService,
     deletion: {
       // Watch and the full scan share one guarded deletion. What it does with the path (probe, prove, forget) is
@@ -214,7 +214,7 @@ describe('WatchOperations.syncSingleFile — deciding whether a round-trip is wo
   it('[SPEC:CT-4] hands the upload a synthetic remote with creationTime 0 when the file is not on the server', async () => {
     const remotes: RemoteFileInfo[] = [];
     const transfer = {
-      uploadFile: async (_c: unknown, _u: unknown, _p: string, _h: string, _r: string, _t: string, r: RemoteFileInfo) => { remotes.push(r); },
+      uploadFile: async (_c: unknown, _u: unknown, r: RemoteFileInfo) => { remotes.push(r); },
     } as unknown as TransferService;
     const { watch } = build({ localContent: 'brand new', onServer: null }, { transfer });
     await watch.syncSingleFile('note.md');

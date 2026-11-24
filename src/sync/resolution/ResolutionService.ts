@@ -15,7 +15,7 @@ import { IUploadStrategy } from '../upload/IUploadStrategy';
 import { SyncJournal } from '../session/SyncJournal';
 import { MergeBaseRecorder } from '../session/MergeBaseRecorder';
 import { TransferService } from '../transfer/TransferService';
-import { withLocalSignature } from '../../data/localSignature';
+import { localReadSignature, withLocalSignature } from '../../data/localSignature';
 import { isTextEligible } from '../policy';
 import { FileLogger } from '../../util/FileLogger';
 import { sha256 } from '../../util/hash';
@@ -138,7 +138,9 @@ export class ResolutionService {
   async pushLocalToRemote(conn: Connection, path: string): Promise<void> {
     const stat = await this.deps.localAdapter.stat(path);
     if (!stat) throw new Error(`Local file not found: ${path}`);
+    const observedAt = Date.now();
     const localData = await this.deps.localAdapter.readBinary(path);
+    const signature = localReadSignature(stat, observedAt, localData.byteLength);
     const localHash = await sha256(localData);
     const remote = await this.fetchRemoteInfo(conn.client, path); // null when creating the remote from local
 
@@ -146,7 +148,7 @@ export class ResolutionService {
     try {
       const outcome = await conn.uploadStrategy.upload(
         conn.client, path, localData, stat.mtime,
-        { ctime: uploadCreationTimeMs(stat.ctime, remote ? remote.creationTime : 0) },
+        { precomputedSha256: localHash, ctime: uploadCreationTimeMs(stat.ctime, remote ? remote.creationTime : 0) },
       );
       if (outcome === 'skipped') throw new Error(`Upload skipped (over the size limit): ${path}`);
     } finally {
@@ -155,13 +157,14 @@ export class ResolutionService {
 
     this.deps.journal.recordHistory(path, 'uploaded', undefined, {
       localHash, remoteId: localHash, remoteIdType: 'sha256',
-      localSize: stat.size, remoteSize: remote?.size,
+      localSize: localData.byteLength, remoteSize: remote?.size,
     });
-    this.deps.stateDB.setFile(await withLocalSignature(this.deps.localAdapter, {
+    this.deps.stateDB.setFile({
       path, localHash, remoteId: localHash, idType: 'sha256',
-      size: stat.size, mtime: stat.mtime,
+      size: localData.byteLength, mtime: stat.mtime, ...signature,
       remoteFileId: remote?.fileId ?? null, isConflicted: false,
-    }, remote?.lastModified));
+      remoteMtime: remote?.lastModified,
+    });
     await this.deps.stateDB.save();
     await this.deps.historyStore?.save();
   }

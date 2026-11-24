@@ -613,7 +613,7 @@ export class NextcloudClient implements IWebDAVClient {
 
     // Compute the SHA-256 once here; reuse it for both the OC-Checksum header and
     // post-assembly verification so the full buffer is never hashed more than once.
-    const sum = await sha256(data);
+    const sum = opts?.precomputedSha256 ?? await sha256(data);
 
     try {
       const mk = await this.req({ url: sessionUrl, method: 'MKCOL', headers: { Authorization: this.authHeader, ...NO_CACHE_HEADERS }, throw: false });
