@@ -27,7 +27,7 @@ export interface DirectoryDeps {
   dropCleanSnapshot(path: string): void;
   // Registers a path so the vault event this plugin causes is not fed back to the watcher. Required: an
   // unwired no-op here turns a plugin trash back into a server DELETE.
-  markOwnEvent(path: string): void;
+  markOwnEvent(path: string, deletion?: boolean): void;
   isSystemExcluded(path: string): boolean;
   massDeleteLimit(): number;
   // Checked between directory operations so a cancel takes effect promptly.
@@ -165,7 +165,7 @@ export class DirectoryReconciler {
     const stale = collectSubtreePaths(this.deps.stateDB, folder.path);
     // The set keeps the folder from registering twice when it is also in `stale.dirs`.
     for (const path of new Set([folder.path, ...stale.files, ...stale.dirs])) {
-      this.deps.markOwnEvent(path);
+      this.deps.markOwnEvent(path, true);
     }
     await this.deps.app.fileManager.trashFile(folder);
   }

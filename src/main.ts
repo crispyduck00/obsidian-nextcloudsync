@@ -206,18 +206,39 @@ export default class ObsidianNextcloudsync extends Plugin {
         pendingUploads.add(file.path);
         debouncedUpload();
       }));
-      this.registerEvent(this.app.vault.on('delete', (file: TAbstractFile) => {
+      const handleDeletion = (path: string, folder: boolean): void => {
         if (!watchOn()) return;
-        pendingUploads.delete(file.path);
-        if (isOwnSyncEvent(file.path)) return; // e.g. atomic write replacing the old copy
-        if (file instanceof TFolder) { void this.syncEngine?.deleteSingleFolder(file.path); return; }
-        void this.syncEngine?.deleteSingleFile(file.path);
+        pendingUploads.delete(path);
+        if (isSyncTmpPath(path)) return;
+        if (this.localAdapter?.shouldIgnore(path)) {
+          const engine = this.syncEngine;
+          const { serverUrl, username } = this.settings;
+          const isCurrent = (): boolean => watchOn() && this.syncEngine === engine
+            && this.settings.serverUrl === serverUrl && this.settings.username === username;
+          this.localAdapter.afterIgnore(path, async (isPending) => {
+            if (!engine || !isCurrent() || !isPending()) return;
+            try {
+              if (await engine.isLocalDeletionPending(path, folder) && isCurrent() && isPending()) {
+                handleDeletion(path, folder);
+              }
+            } catch (err: unknown) {
+              void this.logger.log(`watch: could not recheck deletion of ${path}: ${String(err)}`, 'error');
+            }
+          });
+          return;
+        }
+        if (folder) { void this.syncEngine?.deleteSingleFolder(path); return; }
+        void this.syncEngine?.deleteSingleFile(path);
+      };
+      this.registerEvent(this.app.vault.on('delete', (file: TAbstractFile) => {
+        handleDeletion(file.path, file instanceof TFolder);
       }));
       this.registerEvent(this.app.vault.on('rename', (file: TAbstractFile, oldPath: string) => {
         if (!watchOn()) return;
         pendingUploads.delete(oldPath);
         // A sync write renames its temporary file. A rename between ordinary paths is new intent.
         if (isSyncTmpPath(oldPath) || isSyncTmpPath(file.path)) return;
+        this.localAdapter?.cancelAfterIgnore(oldPath, file instanceof TFolder);
         const recheckContent = this.localAdapter?.shouldIgnore(oldPath) === true;
         if (file instanceof TFolder) { void this.syncEngine?.renameSingleFolder(oldPath, file.path); return; }
         const newPath = file.path;

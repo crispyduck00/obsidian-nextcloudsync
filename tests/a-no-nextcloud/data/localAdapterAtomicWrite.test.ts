@@ -1,7 +1,7 @@
 // atomicWrite/atomicWriteBinary must not delete the tmp file when `rename` fails AFTER the pre-existing target was
 // removed: tmpPath is then the ONLY surviving copy (mobile kill / Windows AV lock / storage blip mid-rename), so
 // deleting it in the catch block would lose the data outright.
-import { LocalAdapter } from '../../../src/data/LocalAdapter';
+import { LocalAdapter, tmpPathFor } from '../../../src/data/LocalAdapter';
 import { DataAdapter } from 'obsidian';
 
 // Fake adapter where `remove(target)` succeeds but the subsequent `rename` always throws: the crash window under test.
@@ -163,4 +163,36 @@ describe('[SPEC:MT-1] atomicWrite/atomicWriteBinary pass the requested mtime to 
     expect(writtenPath).toMatch(/\.ncs\.tmp$/);
     expect(files.get('Notes/hello.md')).toBe('new');
   });
+});
+
+
+describe('a rejected target removal during replacement', () => {
+  it.each([['text', false], ['text', true], ['binary', false], ['binary', true]] as const)(
+    'preserves the remaining bytes and original error: %s, unlinked=%s', async (kind, unlinked) => {
+      const target = 'note.md';
+      const files = new Map<string, string | ArrayBuffer>([[target, 'original']]);
+      const replacement = kind === 'text' ? 'replacement' : new Uint8Array([1, 2, 3]).buffer;
+      const raw = {
+        exists: async (path: string) => files.has(path), mkdir: async () => undefined,
+        write: async (path: string, body: string) => { files.set(path, body); },
+        writeBinary: async (path: string, body: ArrayBuffer) => { files.set(path, body); },
+        remove: async (path: string) => {
+          if (path === target) {
+            if (unlinked) files.delete(path);
+            throw new Error('target removal rejected');
+          }
+          files.delete(path);
+        },
+        rename: jest.fn(async () => undefined),
+      };
+      const local = new LocalAdapter(raw as unknown as DataAdapter);
+      const write = kind === 'text' ? local.atomicWrite(target, replacement as string)
+        : local.atomicWriteBinary(target, replacement as ArrayBuffer);
+      await expect(write).rejects.toThrow('target removal rejected');
+      expect(raw.rename).not.toHaveBeenCalled();
+      expect([...files.keys()]).toEqual(unlinked ? [tmpPathFor(target)] : [target]);
+      expect(files.get(unlinked ? tmpPathFor(target) : target)).toEqual(unlinked ? replacement : 'original');
+      local.dispose();
+    },
+  );
 });

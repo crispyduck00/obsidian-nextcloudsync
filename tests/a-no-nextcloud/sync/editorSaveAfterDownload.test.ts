@@ -27,7 +27,7 @@ function host(enabled = true) {
     app: { vault: { on: (name: string, fn: (...args: any[]) => void) => events.set(name, fn) },
       workspace: { on: (name: string, fn: (...args: any[]) => void) => editor.set(name, fn) } },
     registerEvent: () => undefined, syncEngine: engine,
-    localAdapter: { shouldIgnore: () => true } };
+    localAdapter: { cancelAfterIgnore: () => undefined, shouldIgnore: () => true } };
   new Function('TFile', 'TFolder', 'debounce', 'isSyncTmpPath', 'EDIT_WINDOW_MS', body)
     .call(self, TFile, TFolder, debounce, isSyncTmpPath, 2000);
   return { events, editor, engine, edits: self.lastLocalEdit };

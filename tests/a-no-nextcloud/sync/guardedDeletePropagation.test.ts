@@ -360,10 +360,10 @@ describe('[SPEC:GDP-13] the trash is announced as the plugin\'s own before it ha
 
     // Obsidian fires a vault `delete` event for the folder and for every file inside it. Watch mode
     // reads those as user deletions, so without the ignore they would reach the server by another route.
-    expect(h.localAdapter.ignore).toHaveBeenCalledWith('F');
-    expect(h.localAdapter.ignore).toHaveBeenCalledWith('F/a.md');
-    expect(h.localAdapter.ignore).toHaveBeenCalledWith('F/sub');
-    expect(h.localAdapter.ignore).toHaveBeenCalledWith('F/sub/b.md');
+    expect(h.localAdapter.ignore).toHaveBeenCalledWith('F', true);
+    expect(h.localAdapter.ignore).toHaveBeenCalledWith('F/a.md', true);
+    expect(h.localAdapter.ignore).toHaveBeenCalledWith('F/sub', true);
+    expect(h.localAdapter.ignore).toHaveBeenCalledWith('F/sub/b.md', true);
 
     // Order is the property, not the call. The events can arrive at any point once the trash starts,
     // so an ignore registered afterwards would be racing something it was supposed to prevent. Each

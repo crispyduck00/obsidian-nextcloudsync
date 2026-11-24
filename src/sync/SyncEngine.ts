@@ -235,7 +235,7 @@ export class SyncEngine {
       transfer: this.transfer,
       isSystemExcluded: (p) => this.isSystemExcluded(p),
       dropCleanSnapshot: (p) => this.resolution.dropCleanSnapshot(p),
-      markOwnEvent: (p) => this.opts.localAdapter.ignore(p),
+      markOwnEvent: (p, deletion) => this.opts.localAdapter.ignore(p, deletion),
       logger: opts.logger,
     });
     this.resolution = new ResolutionService({
@@ -285,7 +285,7 @@ export class SyncEngine {
       transfer: this.transfer,
       mergeBase: this.mergeBase,
       dropCleanSnapshot: (p) => this.resolution.dropCleanSnapshot(p),
-      markOwnEvent: (p) => this.opts.localAdapter.ignore(p),
+      markOwnEvent: (p, deletion) => this.opts.localAdapter.ignore(p, deletion),
       isSystemExcluded: (p) => this.isSystemExcluded(p),
       massDeleteLimit: () => this.opts.settings.massDeleteLimit,
       isCancelled: () => this.cancelled,
@@ -564,6 +564,12 @@ export class SyncEngine {
 
   deleteSingleFile(path: string): Promise<void> {
     return this.watch.deleteSingleFile(path);
+  }
+
+  /** Own trash clears tracking; atomic replacement restores the path. Neither is user deletion. */
+  async isLocalDeletionPending(path: string, folder: boolean): Promise<boolean> {
+    return !!(folder ? this.opts.stateDB.getDir(path) : this.opts.stateDB.getFile(path))
+      && await this.opts.localAdapter.stat(path) === null;
   }
 
   renameSingleFile(oldPath: string, newPath: string): Promise<void> {
