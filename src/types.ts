@@ -228,6 +228,8 @@ export interface PendingFolderMove {
   scope: string;
   fileId: string | null;
   inferred?: true;
+  /** The first MKCOL has yet to prove the identity of the original collection. */
+  unconfirmedCreate?: true;
   /** A local delete event invalidated the destination, even if the same path now exists again. */
   destinationRemoved?: true;
   attemptedDestination?: string;

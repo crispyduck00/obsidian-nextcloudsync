@@ -154,6 +154,7 @@ export class SyncEngine {
   private readonly creationTime: CreationTimeAligner;
   private readonly transfer: TransferService;
   private readonly firstUploads = new Set<string>();
+  private readonly firstDirectories = new Map<string, symbol>();
 
   private readonly versions: VersionService;
 
@@ -530,7 +531,7 @@ export class SyncEngine {
 
   retargetLocalCreation(source: string, destination: string, folder: boolean): boolean {
     if (!this.localCreations.rename(source, destination, folder) || this.isRenameHeld(source)
-      || this.firstUploads.has(source)) return false;
+      || (folder ? this.isFirstDirectoryInFlight(source) : this.firstUploads.has(source))) return false;
     return !(folder ? this.opts.stateDB.getDir(source) : this.opts.stateDB.getFile(source));
   }
 
@@ -542,6 +543,25 @@ export class SyncEngine {
       if (!outcome || scope !== this.fileRenameScope()) return;
       const file = outcome === 'uploaded' ? this.opts.stateDB.getFile(path) : null;
       if (file !== undefined && this.pendingFileRenames.finishFirstUpload(path, file)) this.persistRenameIntent();
+    };
+  }
+
+  private isFirstDirectoryInFlight(path: string): boolean {
+    // A first PUT may still need to create its parents after an initial "missing parent" response.
+    return this.firstDirectories.has(path) || [...this.firstUploads].some(file => file.startsWith(path + '/'));
+  }
+
+  private beginDirectoryCreation(client: IWebDAVClient, path: string): ((fileId: string | null) => void) | undefined {
+    if (client !== this.client || this.opts.stateDB.getDir(path) || this.isSystemExcluded(path)) return undefined;
+    const ticket = Symbol();
+    const scope = this.fileRenameScope();
+    this.firstDirectories.set(path, ticket);
+    return fileId => {
+      if (this.firstDirectories.get(path) !== ticket) return;
+      this.firstDirectories.delete(path);
+      if (!fileId || client !== this.client || scope !== this.fileRenameScope() || this.opts.stateDB.getDir(path)) return;
+      this.opts.stateDB.setDir({ path, remoteFileId: fileId });
+      if (this.pendingFolderMoves.confirmCreation(path, fileId)) this.persistRenameIntent();
     };
   }
 
@@ -606,6 +626,7 @@ export class SyncEngine {
       const { client, features } = await this.opts.webdavFactory.createClient();
       client.trackKnownDirectories?.(this.opts.stateDB);
       this.client = client;
+      client.observeDirectoryCreations?.(path => this.beginDirectoryCreation(client, path));
       this.renameTracker = null;
       this.features = features;
       this.connectedPassword = password;
@@ -821,7 +842,8 @@ export class SyncEngine {
       this.syncProgress = { processed: 0, total: 0 };
       this.opts.statusBar.setStatus('syncing', { automatic: !manual });
 
-      const canMoveFolder = (move: PendingFolderMove): boolean => !this.isCreationDeferred(move.destination);
+      const canMoveFolder = (move: PendingFolderMove): boolean => !this.isCreationDeferred(move.destination)
+        && (!move.unconfirmedCreate || move.source === move.destination);
       if (this.pendingFolderMoves.list().some(canMoveFolder)) {
         await assertTrackedParentReadable(this.client!, this.opts.stateDB, '');
         await this.pendingFolderMoves.retry(this.client!, canMoveFolder);
@@ -1038,7 +1060,7 @@ export class SyncEngine {
 
   rememberFolderRename(oldPath: string, newPath: string): void {
     this.forgetFolderDeletion(newPath);
-    const folder = this.pendingFolderMoves.capture(oldPath, newPath);
+    const folder = this.pendingFolderMoves.capture(oldPath, newPath, false, this.isFirstDirectoryInFlight(oldPath));
     const files = this.pendingFileRenames.captureFolder(oldPath, newPath);
     if (folder || files) this.persistRenameIntent();
   }

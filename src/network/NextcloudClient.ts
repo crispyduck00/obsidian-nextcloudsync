@@ -23,7 +23,7 @@ import {
   AppPasswordReader,
   CredentialsNotFoundError,
 } from '../types';
-import { IWebDAVClient, type RemoteRootInfo, type TrackedDirectories } from './IWebDAVClient';
+import { IWebDAVClient, type DirectoryCreationObserver, type RemoteRootInfo, type TrackedDirectories } from './IWebDAVClient';
 import { DavSyncSettings } from '../types';
 import { toRemotePath, fromRemotePath, hrefToRelative, encodeRemoteUrl, encodeServerUrl, ensureRemoteDir, mkcolStrict, prepareMissingParentRetry, isTransportFailure } from './remotePath';
 import { RemoteDirCache } from './RemoteDirCache';
@@ -381,6 +381,12 @@ export class NextcloudClient implements IWebDAVClient {
     this.knownDirectories = state;
   }
 
+  private directoryCreationObserver?: DirectoryCreationObserver;
+
+  observeDirectoryCreations(observer: DirectoryCreationObserver): void {
+    this.directoryCreationObserver = observer;
+  }
+
   private get directoryContext() {
     return {
       baseUrl: this.baseUrl, authHeader: this.authHeader, timeoutMs: this.timeoutMs,
@@ -388,6 +394,17 @@ export class NextcloudClient implements IWebDAVClient {
       mayCreateDirectory: (path: string) => {
         const relative = fromRemotePath(this.remoteBase, path);
         return !relative || !this.knownDirectories?.getDir(relative);
+      },
+      beginMkdir: (path: string) => {
+        const relative = fromRemotePath(this.remoteBase, path);
+        const finish = relative ? this.directoryCreationObserver?.(relative) : undefined;
+        if (!finish) return undefined;
+        return (headers?: Record<string, string>): void => {
+          // Nextcloud's OC-FileId contains the padded numeric oc:fileid and its instance suffix.
+          const header = Object.entries(headers ?? {}).find(([name]) => name.toLowerCase() === 'oc-fileid')?.[1];
+          const id = /^0*([1-9]\d*)(?:oc[a-z0-9]+)?$/i.exec(header?.trim() ?? '')?.[1];
+          finish(id ?? null);
+        };
       },
     };
   }

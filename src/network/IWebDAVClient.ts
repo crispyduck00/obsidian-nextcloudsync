@@ -18,6 +18,9 @@ export interface TrackedDirectories {
   setRemoteRootFileId(fileId: string): void;
 }
 
+/** Brackets an actual MKCOL attempt. An ID is supplied only by an acknowledged creation. */
+export type DirectoryCreationObserver = (path: string) => ((fileId: string | null) => void) | undefined;
+
 export interface IWebDAVClient {
   connect(): Promise<NextcloudFeatures>;
   /**
@@ -68,6 +71,7 @@ export interface IWebDAVClient {
   requireExistingVaultRoot?(required: boolean): void;
   /** Filesystem writes must never provision the path of a previously tracked collection. */
   trackKnownDirectories?(state: TrackedDirectories): void;
+  observeDirectoryCreations?(observer: DirectoryCreationObserver): void;
   /**
    * Creates the vault folder (sync root) and reports whether it had to be created. Missing ancestors
    * are created best-effort; only the vault folder itself is judged (docs/spec.md §5.2).
