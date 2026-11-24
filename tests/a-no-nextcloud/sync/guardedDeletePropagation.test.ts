@@ -620,6 +620,27 @@ describe('[SPEC:GDP-23] a path the server has EDITED is not a deletion at all', 
     expect(h.stateDB.getFile('x.md')).toBeDefined();
     expect(summary.downloadedCount).toBe(1);
   });
+
+  it('keeps a newly recreated local draft when the remote restore is already downloading', async () => {
+    const path = 'note.md';
+    const remote = await listed(path, 'edit made on another device');
+    const h = await buildEngine({}, [], world({ listing: [remote] }));
+    const base = await track(h.stateDB, path, 'common base');
+    h.client.downloadFile.mockImplementationOnce(async () => {
+      h.vault[path] = 'new local draft';
+      return toBuf('edit made on another device');
+    });
+
+    const summary = await h.sync();
+
+    expect(h.client.downloadFile).toHaveBeenCalledWith(path);
+    expect(h.client.deleteFile).not.toHaveBeenCalled();
+    expect(h.client.uploadFile).not.toHaveBeenCalled();
+    expect(h.vault[path]).toBe('new local draft');
+    expect(h.stateDB.getFile(path)).toEqual(base);
+    expect(summary.downloadedCount).toBe(0);
+    expect(h.engine.getStatusReport().retryFiles).toEqual([path]);
+  });
 });
 
 describe('[SPEC:GDP-24] a path the server cannot vouch for is left alone', () => {

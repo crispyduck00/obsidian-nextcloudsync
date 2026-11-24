@@ -177,9 +177,12 @@ export class TransferService {
     }
     // A fetched body equal to the local file is not written (docs/spec.md §5.3a): the mtime stays and no vault event fires.
     const localStat = await this.deps.localAdapter.stat(remote.path);
-    // The note may reappear while a folder-move recovery GET is in flight. The next sync can
-    // compare both copies with the tracked baseline, including any edits made in the meantime.
-    if (restoreMissing && localStat) return;
+    // A missing note may reappear while a restore GET is in flight. Keep the original
+    // baseline and make the next sync compare both copies with a fresh listing.
+    if (restoreMissing && localStat) {
+      this.deps.queueRetry(remote.path);
+      return;
+    }
     if (localStat && localStat.size === data.byteLength
         && bytesEqual(await this.deps.localAdapter.readBinary(remote.path), data)) {
       const sameHash = await sha256(data);

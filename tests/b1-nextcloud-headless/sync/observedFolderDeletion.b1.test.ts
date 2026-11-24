@@ -51,6 +51,7 @@ function emitFolderCreates(device: Device): () => void {
 describeLive('Observed local directory deletion with concurrent Nextcloud changes', getEnv => {
   it.each([
     'existing edit only', 'plus new peer child', 'observed nested delete', 'remote read interrupted', 'ancestor created by a deeper download',
+    'new local draft during restore',
   ])('reconciles the observed tree deletion with %s', async mode => {
     const env = getEnv();
     const { client, ws } = await setupWorkspace(env);
@@ -86,7 +87,11 @@ describeLive('Observed local directory deletion with concurrent Nextcloud change
           interrupt = false;
           throw new NetworkError(503, '', 'GET');
         }
-        return sendDownload(path);
+        const data = await sendDownload(path);
+        if (mode === 'new local draft during restore' && path === edited) {
+          device.vault.seedLocal(edited, 'new local draft');
+        }
+        return data;
       });
       const deleteCollection = jest.spyOn(device.client, 'deleteCollection');
       try {
@@ -104,6 +109,15 @@ describeLive('Observed local directory deletion with concurrent Nextcloud change
           expect.objectContaining({ path: edited }),
         ]));
         await device.sync();
+      }
+
+      if (mode === 'new local draft during restore') {
+        expect(device.vault.readLocal(edited)).toBe('new local draft');
+        expect(decodeBuf(await client.downloadFile(edited))).toBe('peer edit');
+        expect(device.engine.getStatusReport().retryFiles).toEqual([edited]);
+        expect(await client.statFile(stable)).toBeNull();
+        expect(deleteCollection).not.toHaveBeenCalled();
+        return;
       }
 
       // The edited child must already be present after reconciliation, without needing a new file

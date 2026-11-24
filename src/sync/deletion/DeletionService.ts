@@ -102,7 +102,7 @@ export class DeletionService {
       void this.deps.logger?.log(`conflict(local-delete vs remote-edit): restoring remote → ${remote.path}`);
       if (await this.deps.localAdapter.stat(remote.path)) return 'kept';
       await this.deps.transfer.downloadFile(client, remote, remote.checksum ?? remote.etag ?? remoteId,
-        remote.checksum ? 'sha256' : remote.etag ? 'etag' : idType, summary);
+        remote.checksum ? 'sha256' : remote.etag ? 'etag' : idType, summary, true);
       return 'restored';
     }
     // Without a reliable checksum (plain WebDAV, or recalc failed) do NOT delete: etag/size do not prove
