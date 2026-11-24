@@ -1,6 +1,6 @@
 // Pure filter logic for the Sync Status dialog, kept apart from the view so it is testable without a DOM.
 
-import { PendingFileRename, SyncErrorDetail, SyncFileOp, SyncHistoryEntry, SyncSessionSummary } from '../types';
+import { PendingFileRename, PendingFolderMove, SyncErrorDetail, SyncFileOp, SyncHistoryEntry, SyncSessionSummary } from '../types';
 
 export interface SyncStatusReport {
   summary: SyncSessionSummary | null;
@@ -8,6 +8,7 @@ export interface SyncStatusReport {
   retryFiles: string[];
   history: SyncHistoryEntry[];
   pendingFileRenames?: readonly PendingFileRename[];
+  pendingFolderMoves?: readonly PendingFolderMove[];
 }
 
 export const ALL_FILTER_OPS: SyncFileOp[] = [

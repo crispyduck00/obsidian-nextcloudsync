@@ -288,11 +288,11 @@ describe('Missing shared folders and concurrent directory changes', () => {
     if (operation === 'watch move') {
       await h.engine.renameSingleFile(note.path, 'Moved/a.md');
       await h.engine.renameSingleFolder('Shared', 'Moved');
-      expect(h.engine.getStatusReport().pendingFileRenames).toEqual([expect.objectContaining({
-        source: note.path, destination: 'Moved/a.md',
+      expect(h.engine.getStatusReport().pendingFolderMoves).toEqual([expect.objectContaining({
+        source: 'Shared', destination: 'Moved', fileId: 'dir-Shared',
       })]);
     }
-    expect(inspectDirectory).toHaveBeenCalledWith('Shared');
+    if (operation !== 'watch move') expect(inspectDirectory).toHaveBeenCalledWith('Shared');
     expect(h.client.deleteFile).not.toHaveBeenCalled();
     expect(h.client.deleteCollection).not.toHaveBeenCalled();
     expect(moveFile).not.toHaveBeenCalled();

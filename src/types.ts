@@ -210,6 +210,18 @@ export interface PendingFileRename {
   issue?: FileRenameIssue;
 }
 
+export type FolderMoveIssue = 'locked' | 'protected' | 'conflict' | 'local-missing' | 'scope' | 'unsupported' | 'unobserved' | 'retry';
+
+export interface PendingFolderMove {
+  source: string;
+  destination: string;
+  scope: string;
+  fileId: string | null;
+  inferred?: true;
+  attemptedDestination?: string;
+  issue?: FolderMoveIssue;
+}
+
 export interface SyncState {
   deviceId: string;
   lastSyncTime: number;
@@ -222,6 +234,7 @@ export interface SyncState {
   /** Absent in older state files; treated as {}. */
   directories?: Record<string, DirState>;
   pendingFileRenames?: PendingFileRename[];
+  pendingFolderMoves?: PendingFolderMove[];
   /** Legacy root ETag, discarded on load because older clients could omit size-skipped files. */
   remoteRootEtag?: string | null;
   /** Last usable root listing and the server entries that a size skip left outside the common base. */
@@ -503,6 +516,13 @@ export class ConflictError extends Error {
  * message reads "HTTP 404 (GET)" (issue #25); the message keeps `HTTP <status>` as its prefix. The
  * response body is deliberately not in the message: it is server text that ends up in public logs.
  */
+export class FolderMoveBlockedError extends Error {
+  constructor(readonly issue: FolderMoveIssue) {
+    super(`Folder move blocked (${issue})`);
+    this.name = 'FolderMoveBlockedError';
+  }
+}
+
 export class NetworkError extends Error {
   constructor(
     public readonly status: number,

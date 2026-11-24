@@ -10,6 +10,7 @@ import {
   NetworkError,
   SyncTokenExpiredError,
   ConflictError,
+  FolderMoveBlockedError,
   FeatureUnsupportedError,
   FileLockedError,
   MaintenanceModeError,
@@ -36,6 +37,7 @@ import {
 } from './dav/propfind';
 import { isValidCreationMs, creationSeconds } from '../util/creationTime';
 import { withRetry } from '../util/retry';
+import { FolderMoveDav } from './dav/folderMove';
 
 const PROPFIND_BODY = `<?xml version="1.0" encoding="utf-8" ?>
 <d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns">
@@ -567,6 +569,29 @@ export class NextcloudClient implements IWebDAVClient {
     }
     if (res.status === 412) throw new ConflictError(newPath);
     if (res.status < 200 || res.status >= 300) throw dirError ?? new NetworkError(res.status, res.text, 'MOVE');
+  }
+
+  private readonly folderMoves = new FolderMoveDav({
+    send: (path, method, headers, body) => {
+      const request = { url: this.remoteUrl(path), method, headers: { Authorization: this.authHeader, ...headers }, body, throw: false };
+      return method === 'PROPFIND' ? this.reqReadonly(request) : this.req(request);
+    },
+    relativePath: href => hrefToRelative(this.baseUrl, this.remoteBase, href),
+    url: path => this.remoteUrl(path),
+  });
+
+  statFolderMovePath(path: string): Promise<{ directoryId: string | null } | null> {
+    return this.folderMoves.stat(path);
+  }
+
+  async moveTrackedFolder(source: string, destination: string, fileId: string, canSend: () => Promise<boolean>,
+    isExcluded: (path: string) => boolean): Promise<void> {
+    if (!this.features?.hasAccountDav || !this.features.hasFilesLocking) throw new FolderMoveBlockedError('unsupported');
+    try {
+      await this.folderMoves.move(source, destination, fileId, canSend, isExcluded);
+    } finally {
+      this.createdDirs.clear();
+    }
   }
 
   private async matchesFileRevision(path: string, etag: string, checksum: string): Promise<boolean> {

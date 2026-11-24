@@ -54,7 +54,7 @@ export interface WatchDeps {
   remoteFolders?: RemoteFolderGuard;
   resolution: Pick<ResolutionService, 'dropCleanSnapshot'>;
   isSystemExcluded(path: string): boolean;
-  containsExcludedFolder?(path: string): boolean;
+  reconcileFolderMove?(): Promise<void>;
   // Plugin files sync only in full runs; watch mode never handles them.
   isPluginPath(path: string): boolean;
   connect(): Promise<Connection>;
@@ -374,7 +374,10 @@ export class WatchOperations {
         await assertTrackedParentReadable(conn.client, this.deps.stateDB, path, true);
         if (this.deps.isRenameHeld?.(path)) return;
         await conn.client.createDirectory(path); // idempotent: existing folder → harmless
-        if (!this.deps.stateDB.getDir(path)) this.deps.stateDB.setDir({ path, remoteFileId: null });
+        if (!this.deps.stateDB.getDir(path)?.remoteFileId) {
+          const current = await conn.client.statFolderMovePath?.(path);
+          if (!this.deps.isRenameHeld?.(path)) this.deps.stateDB.setDir({ path, remoteFileId: current?.directoryId ?? null });
+        }
         this.deps.stateDB.requestSave(); // coalesced watch-mode save
         void this.deps.logger?.log(`watch: folder created → MKCOL ${path}`);
       } catch (err) {
@@ -395,35 +398,11 @@ export class WatchOperations {
     }
   }
 
-  // The server moves the whole subtree. Child-file rename events fired alongside are handled best-effort by
-  // renameSingleFile; their 404s are harmless because the parent MOVE already relocated them.
   async renameSingleFolder(oldPath: string, newPath: string): Promise<void> {
-    if (this.deps.hasRenameInFolder?.(oldPath) || this.deps.hasRenameInFolder?.(newPath)) return;
     if (this.deps.isPluginPath(oldPath) || this.deps.isPluginPath(newPath)) return;
-    if (this.deps.isSystemExcluded(oldPath) || this.deps.isSystemExcluded(newPath)
-        || this.deps.containsExcludedFolder?.(oldPath) || this.deps.containsExcludedFolder?.(newPath)) return;
-    if (this.skippedOnCellular('folder-rename', `${oldPath} → ${newPath}`)) return;
-    return this.deps.runNonFullSyncOperation(async () => {
-      const conn = await this.deps.connect();
-      this.begin();
-      try {
-        if (conn.client.inspectDirectory) await assertTrackedParentReadable(conn.client, this.deps.stateDB, oldPath, true);
-        await this.deps.remoteFolders?.assertRemovalAllowed(conn.client, oldPath, true, undefined, path =>
-          this.deps.isSystemExcluded(path)
-          || (path.startsWith(`${oldPath}/`) && this.deps.isSystemExcluded(newPath + path.slice(oldPath.length))),
-        );
-        await assertTrackedParentReadable(conn.client, this.deps.stateDB, newPath);
-        await conn.client.moveFile(oldPath, newPath); // MOVE works for collections too
-        this.deps.stateDB.deleteDir(oldPath);
-        this.deps.stateDB.setDir({ path: newPath, remoteFileId: null });
-        this.deps.stateDB.requestSave();
-        void this.deps.logger?.log(`watch: folder renamed → MOVE ${oldPath} → ${newPath}`);
-      } catch (err) {
-        console.warn(`[SyncEngine] Single-folder rename failed ${oldPath} → ${newPath}:`, err);
-      } finally {
-        this.end();
-      }
-    });
+    if (this.deps.isSystemExcluded(oldPath) || this.deps.isSystemExcluded(newPath)) return;
+    if (this.skippedOnCellular('folder-rename', `${oldPath} → ${newPath}`) || this.deps.isSyncRunning()) return;
+    await this.deps.reconcileFolderMove?.();
   }
 
   // Called once the run has finished. The set is drained into a local copy first so re-entry cannot loop.

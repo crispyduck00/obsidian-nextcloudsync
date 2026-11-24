@@ -97,6 +97,9 @@ export interface IWebDAVClient {
   ): Promise<void>;
   /** MOVE with Overwrite:F, optionally conditioned on the source revision. */
   moveFile(oldPath: string, newPath: string, ifMatchEtag?: string): Promise<void>;
+  statFolderMovePath?(path: string): Promise<{ directoryId: string | null } | null>;
+  moveTrackedFolder?(source: string, destination: string, fileId: string, canSend: () => Promise<boolean>,
+    isExcluded: (path: string) => boolean): Promise<void>;
   deleteFile(path: string, expectedRemoteId: string, ifMatchEtag?: string): Promise<void>;
   getSyncToken(): Promise<string | null>;
   /**

@@ -10,6 +10,7 @@ function makeHarness() {
   const stateDB = {
     getPendingFileRenames: () => renames,
     setPendingFileRenames: (value: PendingFileRename[]) => { renames = value; },
+    setPendingFolderMoves: jest.fn(),
     save: async () => undefined,
     getFile: (path: string) => files.get(path),
     getDir: (path: string) => dirs.has(path) ? { path } : undefined,

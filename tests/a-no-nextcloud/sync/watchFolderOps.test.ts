@@ -2,7 +2,7 @@
 // rename (MOVE). Exclusions honored; status bar shows activity. Mirrors the file-side
 // syncSingleFile/deleteSingleFile/renameSingleFile behavior.
 import { SyncEngine } from '../../../src/sync/SyncEngine';
-import { DavSyncSettings, DirState } from '../../../src/types';
+import { DavSyncSettings, DirState, PendingFolderMove } from '../../../src/types';
 
 const CONFIG_DIR = '.obsidian';
 const PLUGIN_DIR = `${CONFIG_DIR}/plugins/nextcloud-sync`;
@@ -27,12 +27,17 @@ function makeEngine(opts: { tracked?: DirState[]; settings?: DavSyncSettings } =
   };
   const features = { isNextcloud: true, version: '30', hasChecksums: true, hasFilesLocking: false, hasBulkUpload: false, hasAccountDav: true, syncToken: null };
   const statusBar = { setStatus: jest.fn(), setProgress: jest.fn(), setSyncComplete: jest.fn(), setErrorCount: jest.fn() };
+  let moves: PendingFolderMove[] = [];
   const stateDB = {
     getDir: (p: string) => dirs.get(p),
     setDir: (d: DirState) => { dirs.set(d.path, d); },
     deleteDir: (p: string) => { dirs.delete(p); },
     getAllDirs: () => [...dirs.values()],
     requestSave: jest.fn(),
+    getAllFiles: () => [],
+    getPendingFolderMoves: () => moves,
+    setPendingFolderMoves: (replacement: PendingFolderMove[]) => { moves = replacement; },
+    save: jest.fn(async () => undefined),
   };
   const engine = new SyncEngine({
     app: { vault: { adapter: {} }, fileManager: {} }, settings: opts.settings ?? settings(),
@@ -40,7 +45,9 @@ function makeEngine(opts: { tracked?: DirState[]; settings?: DavSyncSettings } =
     webdavFactory: { createClient: jest.fn(async () => ({ client, features })) },
     onFeatures: jest.fn(), pluginDir: PLUGIN_DIR, configDir: CONFIG_DIR,
   } as never);
-  return { engine, client, statusBar, dirs };
+  const full = jest.spyOn(engine as unknown as { syncManualWithResult(): Promise<boolean> }, 'syncManualWithResult')
+    .mockResolvedValue(true);
+  return { engine, client, statusBar, dirs, stateDB, full };
 }
 
 const dirState = (path: string): DirState => ({ path, remoteFileId: null });
@@ -103,12 +110,13 @@ describe('[SPEC:WF-2] SyncEngine.deleteSingleFolder', () => {
 });
 
 describe('[SPEC:WF-3] SyncEngine.renameSingleFolder', () => {
-  it('MOVEs the folder on the remote and retargets tracking', async () => {
-    const { engine, client, dirs } = makeEngine({ tracked: [dirState('A')] });
+  it('records the original folder ID and delegates MOVE to a full sync', async () => {
+    const { engine, client, dirs, stateDB, full } = makeEngine({ tracked: [{ path: 'A', remoteFileId: 'original' }] });
     await engine.renameSingleFolder('A', 'B');
-    expect(client.moveFile).toHaveBeenCalledWith('A', 'B');
-    expect(dirs.has('A')).toBe(false);
-    expect(dirs.has('B')).toBe(true);
+    expect(stateDB.getPendingFolderMoves()).toEqual([expect.objectContaining({ source: 'A', destination: 'B', fileId: 'original' })]);
+    expect(full).toHaveBeenCalledTimes(1);
+    expect(client.moveFile).not.toHaveBeenCalled();
+    expect(dirs.has('A')).toBe(true);
   });
 
   it.each([['.obsidian/a', 'B'], ['A', '.obsidian/b'], ['.obsidian/a', '.obsidian/b']])('keeps %s → %s local across excluded roots', async (source, destination) => {

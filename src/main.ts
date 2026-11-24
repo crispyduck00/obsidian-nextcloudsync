@@ -326,7 +326,9 @@ export default class ObsidianNextcloudsync extends Plugin {
       }));
 
       this.registerEvent(this.app.vault.on('create', (file: TAbstractFile) => {
-        if (!watchOn() || isPluginEvent(file.path) || isOwnSyncEvent(file.path)) return;
+        if (isPluginEvent(file.path) || isOwnSyncEvent(file.path)) return;
+        if (file instanceof TFolder) this.syncEngine?.forgetFolderDeletion(file.path);
+        if (!watchOn()) return;
         if (file instanceof TFolder) {
           runStructural(
             `create folder ${file.path}`,
@@ -339,9 +341,11 @@ export default class ObsidianNextcloudsync extends Plugin {
       }));
 
       this.registerEvent(this.app.vault.on('delete', (file: TAbstractFile) => {
-        if (!watchOn() || isPluginEvent(file.path)) return;
+        if (isPluginEvent(file.path)) return;
         takePendingUpload(file.path);
         if (isOwnSyncEvent(file.path)) return;
+        if (file instanceof TFolder) this.syncEngine?.rememberFolderDeletion(file.path);
+        if (!watchOn()) return;
         if (file instanceof TFolder) {
           runStructural(
             `delete folder ${file.path}`,

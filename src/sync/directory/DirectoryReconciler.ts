@@ -92,7 +92,9 @@ export class DirectoryReconciler {
       if (ancestorMatching(p, parent => tracked.has(parent) && !remoteDirs.has(parent))) continue;
       try {
         await client.createDirectory(p);
-        this.deps.stateDB.setDir({ path: p, remoteFileId: remoteDirs.get(p)?.fileId ?? null });
+        const current = await client.statFolderMovePath?.(p);
+        if (this.deps.isRenameHeld?.(p)) continue;
+        this.deps.stateDB.setDir({ path: p, remoteFileId: current?.directoryId ?? remoteDirs.get(p)?.fileId ?? null });
         this.deps.journal.recordHistory(p, 'uploaded');
       } catch (err) {
         summary.errorCount++;
@@ -177,7 +179,7 @@ export class DirectoryReconciler {
     category: 'deleteRemote' | 'trashLocal',
     choice: 'remote' | 'local',
   ): Promise<void> {
-    if (this.deps.hasRenameInFolder?.(path)) throw new Error('This folder contains a pending file rename.');
+    if (this.deps.hasRenameInFolder?.(path)) throw new Error('This folder contains a pending rename.');
     if (category === 'deleteRemote') {
       if (choice === 'remote') {
         // Remote is correct: undo the apparent local deletion by recreating the folder locally.

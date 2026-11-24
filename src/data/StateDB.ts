@@ -1,5 +1,5 @@
 import { DataAdapter } from 'obsidian';
-import { DirState, FileState, PendingFileRename, RemoteFileInfo, SyncState } from '../types';
+import { DirState, FileState, PendingFileRename, PendingFolderMove, RemoteFileInfo, SyncState } from '../types';
 import { AsyncMutex } from '../util/AsyncMutex';
 
 const STATEDB_TMP_SUFFIX = '.tmp';
@@ -160,6 +160,15 @@ export class StateDB {
 
   getAllDirs(): DirState[] {
     return this.state.directories ? Object.values(this.state.directories) : [];
+  }
+
+  getPendingFolderMoves(): readonly PendingFolderMove[] {
+    return this.state.pendingFolderMoves ?? [];
+  }
+
+  setPendingFolderMoves(moves: PendingFolderMove[]): void {
+    if (moves.length) this.state.pendingFolderMoves = moves;
+    else delete this.state.pendingFolderMoves;
   }
 
   getSyncToken(): string | null {

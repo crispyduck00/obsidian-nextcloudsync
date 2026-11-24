@@ -24,6 +24,7 @@ export type RemoteDeletionOutcome =
   | { status: 'failed'; message: string };
 
 export interface DeletionDeps {
+  canDeleteMissingChild?(path: string, summary: SyncSessionSummary): Promise<boolean>;
   assertLocalVaultAvailable?(): Promise<void>;
   app: App;
   localAdapter: Pick<LocalAdapter, 'readBinary' | 'stat'>;
@@ -52,6 +53,8 @@ export class DeletionService {
     remote: RemoteFileInfo, base: FileState, remoteId: string, idType: FileState['idType'],
     summary: SyncSessionSummary,
   ): Promise<'deleted' | 'restored' | 'kept'> {
+    if (this.deps.isRenameHeld?.(remote.path)) return 'kept';
+    if (client.statFolderMovePath && this.deps.canDeleteMissingChild && !await this.deps.canDeleteMissingChild(remote.path, summary)) return 'kept';
     if (!remote.etag && client.inspectDirectory) {
       // A root-ETag cache entry may have the old checksum but no per-file ETag for a conditional DELETE.
       const live = await client.statFile(remote.path);
@@ -70,6 +73,7 @@ export class DeletionService {
       await this.deps.remoteFolders?.assertRemovalAllowed(client, remote.path, false, summary);
       if (await this.deps.localAdapter.stat(remote.path) || this.deps.isRenameHeld?.(remote.path)) return 'kept';
       await this.deps.assertLocalVaultAvailable?.();
+      if (client.statFolderMovePath && this.deps.canDeleteMissingChild && !await this.deps.canDeleteMissingChild(remote.path, summary)) return 'kept';
       if (this.deps.isRenameHeld?.(remote.path)) return 'kept';
       void this.deps.logger?.log(`delete-remote: local deletion (server checksum matches base) → ${remote.path}`);
       try {

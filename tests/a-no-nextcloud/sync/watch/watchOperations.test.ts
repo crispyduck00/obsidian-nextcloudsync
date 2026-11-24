@@ -304,12 +304,14 @@ describe('WatchOperations — folder operations (feature 046)', () => {
     expect(calls.deleteDir).toEqual([]);
   });
 
-  it('moves a folder and re-tracks it under the new path', async () => {
-    const { watch, calls } = build();
+  it('delegates a folder rename to the authoritative sync', async () => {
+    const reconcileFolderMove = jest.fn(async () => undefined);
+    const { watch, calls } = build({}, { reconcileFolderMove });
     await watch.renameSingleFolder('Old', 'New');
-    expect(calls.move).toEqual([['Old', 'New']]);
-    expect(calls.deleteDir).toEqual(['Old']);
-    expect(calls.setDir).toEqual(['New']);
+    expect(reconcileFolderMove).toHaveBeenCalledTimes(1);
+    expect(calls.move).toEqual([]);
+    expect(calls.deleteDir).toEqual([]);
+    expect(calls.setDir).toEqual([]);
   });
 
   it('renames a file through the rename tracker', async () => {

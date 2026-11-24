@@ -159,7 +159,8 @@ describeLive('Layer B — watch mode under "Wi-Fi only" (feature 091)', (getEnv)
 
     setNetwork('wifi');
     await d.sync();
-    expect(await remoteDir(dir)).toBe(false);
+    expect(await remoteDir(dir)).toBe(true);
+    expect(await remoteText(`${dir}/in.md`)).toBeNull();
   }, 120_000);
 
   it('[SPEC:MWM-3] folder-rename', async () => {
