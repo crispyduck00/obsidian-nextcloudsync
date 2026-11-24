@@ -1,4 +1,4 @@
-import { NetworkError } from '../../../src/types';
+import { NetworkError, type RemoteFileInfo, type SyncSessionSummary } from '../../../src/types';
 import { describeLive } from '../support/env';
 import { makeDevice, restartDevice, type Device } from '../support/engineDevice';
 import { decodeBuf, textBuf } from '../support/helpers';
@@ -14,10 +14,13 @@ const replaced = 'Tree/Replaced.md';
 
 // Model the per-directory queues restoring a sibling before the files in the missing child are processed.
 function waitForParentRestore(device: Device, restorePath = replaced, afterRestore?: () => void): () => void {
-  const stat = device.vault.adapter.stat.bind(device.vault.adapter);
+  const processor = device.engine as unknown as {
+    processRemoteFile(info: RemoteFileInfo, summary: SyncSessionSummary): Promise<void>;
+  };
+  const processFile = processor.processRemoteFile.bind(processor);
   let notified = false;
-  const mock = jest.spyOn(device.vault.adapter, 'stat').mockImplementation(async path => {
-    if ([edited, stable, added].includes(path)) {
+  const mock = jest.spyOn(processor, 'processRemoteFile').mockImplementation(async (info, summary) => {
+    if ([edited, stable, added].includes(info.path)) {
       const deadline = Date.now() + 7000;
       while (device.vault.readLocal(restorePath) === null && Date.now() < deadline) {
         await new Promise(resolve => setTimeout(resolve, 15));
@@ -28,7 +31,7 @@ function waitForParentRestore(device: Device, restorePath = replaced, afterResto
         afterRestore?.();
       }
     }
-    return stat(path);
+    return processFile(info, summary);
   });
   return () => mock.mockRestore();
 }
