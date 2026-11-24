@@ -984,6 +984,7 @@ export class SyncEngine {
   }
 
   rememberFolderDeletion(path: string): void {
+    if (this.pendingFolderMoves.markDestinationRemoved(path)) this.persistRenameIntent();
     const base = this.opts.stateDB.getDir(path);
     if (base && !this.hasRenameInFolder(path)) {
       this.observedFolderDeletes.set(path, { scope: this.fileRenameScope(), fileId: base.remoteFileId });
@@ -1643,7 +1644,7 @@ export class SyncEngine {
     if (localStat && base) {
       // Skip reading/hashing while the post-write stat signature still matches; unlike on-disk mtime, it is valid on mobile
       // (docs/plan.md §4).
-      if (!this.isLocallyUnchanged(base, localStat)) {
+      if (base.checkAfterFolderMove || !this.isLocallyUnchanged(base, localStat)) {
         const buf = await this.opts.localAdapter.readBinary(remote.path);
         localHash = await sha256(buf);
         localChanged = localHash !== base.localHash;
@@ -1716,11 +1717,12 @@ export class SyncEngine {
         }
       }
 
-      if (base && (base.isConflicted !== keepConflict || remoteFileIdChanged)) {
+      if (base && (base.isConflicted !== keepConflict || remoteFileIdChanged || base.checkAfterFolderMove)) {
         this.opts.stateDB.setFile({
           ...base,
           remoteFileId: remote.fileId ?? base.remoteFileId,
           isConflicted: keepConflict,
+          checkAfterFolderMove: undefined,
         });
       }
       await this.creationTime.align(this.client!, remote, localStat);

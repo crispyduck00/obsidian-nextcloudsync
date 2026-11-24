@@ -8,7 +8,7 @@ const messages: Record<FolderMoveIssue, string> = {
   locked: 'Nextcloud has locked the folder or a file inside it. Sync will retry the move.',
   protected: 'Nextcloud reports restricted access or a storage boundary. Review the move in Nextcloud or move the local folder back.',
   conflict: 'The source or destination has changed. Review both paths in Nextcloud or move the local folder back.',
-  'local-missing': 'The renamed local folder is missing. Restore it or move it back before syncing.',
+  'local-missing': 'The local destination was removed or is missing. Restore the original location locally or complete the move in Nextcloud.',
   scope: 'The folder contains paths outside the current sync scope. Move it back or review the exclusions.',
   unsupported: 'This server could not protect the folder move. If the original folder is present, move it to the same destination in Nextcloud or move the local folder back.',
   unobserved: 'This folder may have moved while Obsidian was closed. Verify the original folder and complete the move in Nextcloud, or move the local folder back.',
@@ -42,7 +42,7 @@ function issueFor(error: unknown): FolderMoveIssue {
 }
 
 interface FolderMovePorts {
-  state: Pick<StateDB, 'getPendingFolderMoves' | 'setPendingFolderMoves' | 'getDir' | 'getAllDirs' | 'getAllFiles' | 'save'>;
+  state: Pick<StateDB, 'getPendingFolderMoves' | 'setPendingFolderMoves' | 'getDir' | 'getAllDirs' | 'getAllFiles' | 'setFile' | 'save'>;
   local: Pick<LocalAdapter, 'isFolder'>;
   scope(): string;
   isExcluded(path: string): boolean;
@@ -79,6 +79,19 @@ export class PendingFolderMoves {
     return root ? root.source + path.slice(root.destination.length) : path;
   }
 
+  markDestinationRemoved(path: string): boolean {
+    const scope = this.deps.scope();
+    const existing = this.list();
+    let changed = false;
+    const next = existing.map(move => {
+      if (move.scope !== scope || move.destinationRemoved || !inFolder(move.destination, path)) return move;
+      changed = true;
+      return { ...move, destinationRemoved: true as const, issue: 'local-missing' as const };
+    });
+    if (changed) this.deps.state.setPendingFolderMoves(next);
+    return changed;
+  }
+
   capture(oldPath: string, newPath: string, inferred = false): boolean {
     if (oldPath === newPath || !validPath(oldPath) || !validPath(newPath) || this.coversChildEvent(oldPath, newPath)) return false;
     const scope = this.deps.scope();
@@ -88,16 +101,24 @@ export class PendingFolderMoves {
       .sort((a, b) => b.destination.length - a.destination.length)[0];
     const source = chain?.source ?? (ancestor ? ancestor.source + oldPath.slice(ancestor.destination.length) : oldPath);
     const base = this.deps.state.getDir(source);
+    const retarget = (move: PendingFolderMove): PendingFolderMove => move.scope === scope && inFolder(move.destination, oldPath)
+      ? { ...move, destination: newPath + move.destination.slice(oldPath.length) } : move;
     if (!chain && (this.current(source) || (!base && !this.deps.state.getAllFiles().some(file => inFolder(file.path, source))
-      && !this.deps.state.getAllDirs().some(dir => inFolder(dir.path, source))))) return false;
+      && !this.deps.state.getAllDirs().some(dir => inFolder(dir.path, source))))) {
+      // An untracked local parent can still contain destinations owned by pending moves.
+      const updated = existing.map(retarget);
+      if (updated.every((move, index) => move === existing[index])) return false;
+      this.deps.state.setPendingFolderMoves(updated);
+      return true;
+    }
 
     const next: PendingFolderMove = { ...chain, source, destination: newPath, scope,
       fileId: chain?.fileId ?? base?.remoteFileId ?? null, issue: inferred ? 'unobserved' : undefined,
       inferred: inferred || chain?.inferred ? true : undefined };
     const remaining = existing.filter(move => move !== chain && !(move.scope === scope && !move.attemptedDestination
-      && inFolder(move.source, source) && move.destination === newPath + move.source.slice(source.length)));
-    this.deps.state.setPendingFolderMoves([...remaining.map(move => move.scope === scope && inFolder(move.destination, oldPath)
-      ? { ...move, destination: newPath + move.destination.slice(oldPath.length) } : move), next]);
+      && !move.destinationRemoved && inFolder(move.source, source)
+      && move.destination === newPath + move.source.slice(source.length)));
+    this.deps.state.setPendingFolderMoves([...remaining.map(retarget), next]);
     return true;
   }
 
@@ -114,7 +135,7 @@ export class PendingFolderMoves {
     const { source, destination, fileId, attemptedDestination } = move;
     const paths = pathsOf(move);
     if (move.scope !== this.deps.scope() || paths.some(path => !validPath(path))) return this.recordIssue(move, 'scope');
-    if (source === destination && !attemptedDestination && await this.deps.local.isFolder(source)) {
+    if (source === destination && !attemptedDestination && !move.destinationRemoved && await this.deps.local.isFolder(source)) {
       if (this.current(source) === move) {
         this.replace(move, null);
         await this.deps.state.save();
@@ -137,11 +158,17 @@ export class PendingFolderMoves {
       if (arrivals.length > 1 || (original && arrivals.length)) return this.recordIssue(move, 'conflict');
       if (!original && arrivals.length === 1) {
         arrived = arrivals[0];
+        if (!await this.deps.local.isFolder(destination)) return this.recordIssue(move, 'local-missing');
       } else if (!original || (source !== destination && results.get(destination))) {
         return this.recordIssue(move, 'conflict');
       } else if ((source === destination || (move.inferred && !await this.deps.local.isFolder(destination)))
         && await this.deps.local.isFolder(source)) {
         if (this.current(source) === move) {
+          if (move.destinationRemoved) {
+            for (const file of this.deps.state.getAllFiles()) {
+              if (inFolder(file.path, source)) this.deps.state.setFile({ ...file, checkAfterFolderMove: true });
+            }
+          }
           this.replace(move, null);
           await this.deps.state.save();
         }
@@ -150,6 +177,7 @@ export class PendingFolderMoves {
         if (move.inferred) return this.recordIssue(move, 'unobserved');
         if (!client.moveTrackedFolder) return this.recordIssue(move, 'unsupported');
         if (paths.some(path => this.deps.isExcluded(path) || this.deps.containsExcludedFolder(path))) return this.recordIssue(move, 'scope');
+        if (move.destinationRemoved) return this.recordIssue(move, 'local-missing');
         if (!await this.deps.local.isFolder(destination)) return this.recordIssue(move, 'local-missing');
         if (this.trackingOccupied(destination)) return this.recordIssue(move, 'conflict');
         await this.deps.canWrite(client, source, destination);

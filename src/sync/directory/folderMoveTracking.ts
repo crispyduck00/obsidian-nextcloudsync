@@ -22,7 +22,7 @@ export async function prepareFolderMoveTracking(state: StateDB, source: string, 
     commit: () => {
       for (const file of files) {
         state.deleteFile(file.path);
-        state.setFile({ ...file, path: target(file.path) });
+        state.setFile({ ...file, path: target(file.path), checkAfterFolderMove: true });
       }
       for (const dir of dirs) {
         state.deleteDir(dir.path);

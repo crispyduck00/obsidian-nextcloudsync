@@ -107,6 +107,7 @@ export class DirectoryReconciler {
       if (this.deps.isRenameHeld?.(p)) continue;
       try {
         await this.deps.app.vault.adapter.mkdir(normalizePath(p));
+        if (this.deps.isRenameHeld?.(p)) continue;
         this.deps.stateDB.setDir({ path: p, remoteFileId: remoteDirs.get(p)?.fileId ?? null });
         this.deps.journal.recordHistory(p, 'downloaded');
       } catch (err) {
@@ -144,8 +145,12 @@ export class DirectoryReconciler {
         summary.errors.push({ path: p, message: `dir delete (local) failed: ${(err as Error).message}` });
       }
     }
-    for (const d of ensureTracked) this.deps.stateDB.setDir(d);
-    for (const p of dropTracked) this.deps.stateDB.deleteDir(p);
+    for (const d of ensureTracked) {
+      if (!this.deps.isRenameHeld?.(d.path)) this.deps.stateDB.setDir(d);
+    }
+    for (const p of dropTracked) {
+      if (!this.deps.isRenameHeld?.(p)) this.deps.stateDB.deleteDir(p);
+    }
   }
 
   private localDirectories(): Set<string> {

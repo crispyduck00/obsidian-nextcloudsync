@@ -131,7 +131,7 @@ export class TransferService {
   async downloadFile(
     client: IWebDAVClient,
     remote: RemoteFileInfo, remoteId: string,
-    idType: FileState['idType'], summary: SyncSessionSummary,
+    idType: FileState['idType'], summary: SyncSessionSummary, restoreMissing = false,
   ): Promise<void> {
     if (this.deps.isRenameHeld?.(remote.path)) return;
     // Skip oversized remote files BEFORE the GET, covering the normal download and the local-delete-vs-remote-edit
@@ -158,6 +158,9 @@ export class TransferService {
     }
     // A fetched body equal to the local file is not written (docs/spec.md §5.3a): the mtime stays and no vault event fires.
     const localStat = await this.deps.localAdapter.stat(remote.path);
+    // The note may reappear while a folder-move recovery GET is in flight. The next sync can
+    // compare both copies with the tracked baseline, including any edits made in the meantime.
+    if (restoreMissing && localStat) return;
     if (localStat && localStat.size === data.byteLength
         && bytesEqual(await this.deps.localAdapter.readBinary(remote.path), data)) {
       const sameHash = await sha256(data);

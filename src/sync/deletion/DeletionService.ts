@@ -55,6 +55,12 @@ export class DeletionService {
   ): Promise<'deleted' | 'restored' | 'kept'> {
     if (this.deps.isRenameHeld?.(remote.path)) return 'kept';
     if (client.statFolderMovePath && this.deps.canDeleteMissingChild && !await this.deps.canDeleteMissingChild(remote.path, summary)) return 'kept';
+    if (base.checkAfterFolderMove) {
+      await this.deps.assertLocalVaultAvailable?.();
+      if (await this.deps.localAdapter.stat(remote.path) || this.deps.isRenameHeld?.(remote.path)) return 'kept';
+      await this.deps.transfer.downloadFile(client, remote, remoteId, idType, summary, true);
+      return await this.deps.localAdapter.stat(remote.path) ? 'restored' : 'kept';
+    }
     if (!remote.etag && client.inspectDirectory) {
       // A root-ETag cache entry may have the old checksum but no per-file ETag for a conditional DELETE.
       const live = await client.statFile(remote.path);

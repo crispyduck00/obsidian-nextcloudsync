@@ -180,6 +180,8 @@ export interface FileState {
   localSize?: number;
   /** Server `lastModified` at the last converged state, separate from `localMtime`. */
   remoteMtime?: number;
+  /** Verify local presence at a moved path before treating absence there as a deletion. */
+  checkAfterFolderMove?: true;
   /**
    * Target creation time (Unix seconds) of the last local creation-time fix that the platform did not apply
    * (docs/spec.md §9.7). A planned local fix to the same target is skipped; any other target is tried.
@@ -218,6 +220,8 @@ export interface PendingFolderMove {
   scope: string;
   fileId: string | null;
   inferred?: true;
+  /** A local delete event invalidated the destination, even if the same path now exists again. */
+  destinationRemoved?: true;
   attemptedDestination?: string;
   issue?: FolderMoveIssue;
 }
