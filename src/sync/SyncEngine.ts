@@ -46,6 +46,7 @@ import { ResolutionService } from './resolution/ResolutionService';
 import { ConflictApplier } from './conflict/ConflictApplier';
 import { DirectoryReconciler } from './directory/DirectoryReconciler';
 import { WatchOperations } from './watch/WatchOperations';
+import { SyncActivityGate } from './SyncActivityGate';
 import { MirrorService } from './mirror/MirrorService';
 import { SyncHistoryStore } from '../data/SyncHistoryStore';
 import { IStatusBar } from '../ui/StatusBarItem';
@@ -95,6 +96,8 @@ interface SyncEngineOptions {
   readAppPassword?: AppPasswordReader;
   pluginDir: string;
   configDir: string;
+  /** Pause ordinary sync while the host plans or applies a remote mirror. */
+  isRemoteMirrorOpen?: () => boolean;
   // Host-owned predicate for this device's active log files, which must stay out of sync (docs/spec.md §9.1).
   isActiveLogFile?: (path: string) => boolean;
   // True while the user is typing into `path`. Consulted before any REMOTE -> LOCAL write, because writing under the cursor
@@ -142,6 +145,8 @@ export class SyncEngine {
   private readonly directories: DirectoryReconciler;
 
   private readonly watch: WatchOperations;
+  /** Shared/exclusive gate: lightweight path operations may overlap each other, never a full sync. */
+  private readonly activityGate = new SyncActivityGate();
 
   private readonly mirror: MirrorService;
   // Turns each session's over-the-size-limit skip tally into the one end-of-sync notice (docs/spec.md §9.4a).
@@ -301,7 +306,12 @@ export class SyncEngine {
       connect: () => this.connection(),
       renameTracker: () => this.getOrCreateRenameTracker(),
       isBlockedByWifiOnly: () => this.isBlockedByWifiOnly(),
-      isSyncRunning: () => this.running,
+      isSyncRunning: () => this.isSyncRunning(),
+      isCancelled: () => this.cancelled,
+      reconcileStructure: async () => {
+        if (!this.cancelled) await this.syncManual();
+      },
+      runNonFullSyncOperation: (fn) => this.activityGate.runShared(fn),
       processFile: (remote, summary) => this.processFileWithRetry(remote, summary),
       queueRetry: (p) => { this.retryQueue.push(p); },
       conflictEncounters: () => this.conflictEncounters,
@@ -406,11 +416,17 @@ export class SyncEngine {
     return isCellularBlocked(this.opts.settings.syncOnWifiOnly, Platform.isIosApp, conn?.type);
   }
 
+  /** True while a full-vault sync session or its final persistence is still active. */
+  isSyncRunning(): boolean {
+    return this.running || this.currentRun !== null || this.opts.isRemoteMirrorOpen?.() === true;
+  }
+
   async syncManual(opts: { manual?: boolean } = {}): Promise<void> {
     // Mobile has no status bar; NoticeStatusBar surfaces state there. The early returns below need explicit
     // notices because they exit before any toast exists.
     void this.opts.logger?.log(`sync: start (manual=${opts.manual === true})`);
-    if (this.running) {
+    // Prevent concurrent runs (avoid clashing with watch mode or scheduled sync).
+    if (this.isSyncRunning()) {
       void this.opts.logger?.log('sync: skipped — already running');
       if (Platform.isMobile) new Notice('⏳ A sync is already in progress.');
       return;
@@ -423,7 +439,9 @@ export class SyncEngine {
     // Set the balking flag synchronously (before any await) so a concurrent call still balks.
     this.running = true;
     this.cancelled = false;
-    const run = this.runSyncSession(opts.manual === true);
+    // Full sync is exclusive with watch/lightweight operations. Existing lightweight work may
+    // finish first; once this writer is queued, later lightweight work waits behind it.
+    const run = this.activityGate.runExclusive(() => this.runSyncSession(opts.manual === true));
     this.currentRun = run;
     try {
       await run;
@@ -557,6 +575,17 @@ export class SyncEngine {
     return this.watch.drainPending();
   }
 
+  /** The same active host resumes deferred work after its mirror dialog has closed. */
+  async resumeAfterRemoteMirror(): Promise<void> {
+    if (this.opts.isRemoteMirrorOpen?.()) return;
+    this.cancelled = false;
+    try {
+      await this.drainWatchPending();
+    } catch (err) {
+      void this.opts.logger?.log(`watch: could not resume after remote mirror — ${(err as Error).message}`);
+    }
+  }
+
   deleteSingleFile(path: string): Promise<void> {
     return this.watch.deleteSingleFile(path);
   }
@@ -670,6 +699,8 @@ export class SyncEngine {
     if (run) {
       try { await run; } catch { /* runSyncSession swallows its own errors */ }
     }
+    // A restore also changes StateDB and the local file. Maintenance must wait for its save, too.
+    await this.activityGate.runExclusive(() => undefined);
   }
 
   // Resets only the tracking index; no vault or remote file is touched, so the next sync runs as a first sync.
@@ -1155,8 +1186,10 @@ export class SyncEngine {
   }
 
   async restoreVersion(path: string, version: FileVersion): Promise<void> {
-    const { client, features } = await this.ensureClient();
-    return this.versions.restoreVersion(client, features, path, version);
+    return this.activityGate.runExclusive(async () => {
+      const { client, features } = await this.ensureClient();
+      await this.versions.restoreVersion(client, features, path, version);
+    });
   }
 
   private acquireLock(path: string): Promise<string | null> {
@@ -1534,4 +1567,3 @@ export class SyncEngine {
     });
   }
 }
-

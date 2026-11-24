@@ -1,8 +1,8 @@
 // Watch-on-edit single-file sync and the size-limit skip notice (docs/spec.md §9.4a).
 //
 // A watch sync is automatic: it keeps its own tally and logs the skipped file, but never shows a count notice
-// and never writes the per-session total line (OSN-6). When it runs next to a manual sync, either deferred until
-// that sync ends or alongside it, its skip stays out of the manual sync's count and notice (OSN-9).
+// and never writes the per-session total line (OSN-6). Whether watch is deferred by a manual run or is already
+// active and holds the manual run until it finishes, its skip stays out of the manual tally and notice (OSN-9).
 //
 // The vault holds two over-the-limit files and one file within the limit that the full sync sees, plus the
 // watched `w/big.bin`, which is over the limit and hidden from the full sync's scan: it stands for a file created
@@ -117,26 +117,28 @@ describe('[SPEC:OSN-9] a watch sync next to a manual sync keeps its own tally', 
       expectWatchSkipKeptApart(w);
     });
 
-    it('[SPEC:OSN-9] running alongside the manual sync: its skip is not in the manual notice or tally', async () => {
+    it('[SPEC:OSN-9] waits for an active watch and counts only the manual skips', async () => {
       const w = await watchWorld(incremental);
       const { held, release } = gate();
-      // The watch sync's server lookup stays pending while a whole manual sync runs.
-      w.client.statFile.mockImplementationOnce(async () => { await held; return null; });
+      const statStarted = gate();
+      w.client.statFile.mockImplementationOnce(async () => {
+        statStarted.release();
+        await held;
+        return null;
+      });
 
       const watch = w.engine.syncSingleFile(WATCH_PATH);
-      while (w.client.statFile.mock.calls.length === 0) await new Promise(r => setImmediate(r));
-      await w.manual();
-
-      // The manual sync is over; the watch sync was not deferred and is still waiting for the server.
-      expect(w.logs).not.toContain(DEFERRED_LOG);
-      expect(w.logs.some(l => l.startsWith('sync: done'))).toBe(true);
-      expect(watchSkipLogs(w)).toEqual([]);
-      expect(skipNotices().map(n => n.message)).toEqual([oversizeSkipNoticeText(2, LIMIT_MB)]);
-
-      release();
-      await watch;
+      await statStarted.held;
+      const manual = w.manual();
+      try {
+        expect(w.engine.isSyncRunning()).toBe(true);
+        expect(w.client.getFiles).not.toHaveBeenCalled();
+        expect(skipNotices()).toHaveLength(0);
+      } finally {
+        release();
+      }
+      await Promise.all([watch, manual]);
       await w.stateDB.flush();
-
       expectWatchSkipKeptApart(w);
     });
   });

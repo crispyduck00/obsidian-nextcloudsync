@@ -1,7 +1,7 @@
 // Direct tests for WatchOperations; no [SPEC:...] tags (WSF-* and the watch folder clauses stay with the
 // engine-level suites; docs/spec.md §5.7). Two properties carry most of the risk.
-// During a full sync an EDIT is deferred and re-evaluated afterwards while a DELETE is dropped outright: the
-// running scan would miss a late edit but already propagates a tracked path that vanished locally, so
+// During a full sync edits are re-evaluated and structural events coalesce into a fresh scan.
+// The scan rechecks recreated and renamed paths before deciding whether deletion is still appropriate, so
 // queuing a delete risks a second one. Getting either backwards loses data.
 // Notifications: watch mode runs unattended, so it stays silent for routine outcomes and speaks up when a
 // resolution discarded one side. A conflict settled deterministically shows up in NO summary counter, which
@@ -134,6 +134,7 @@ function build(o: Opts = {}, over: Partial<WatchDeps> = {}) {
     }) as unknown as RenameTracker,
     isBlockedByWifiOnly: () => false,
     isSyncRunning: () => o.running === true,
+    runNonFullSyncOperation: async (fn) => await fn(),
     processFile: async (r: RemoteFileInfo, s: SyncSessionSummary) => {
       calls.processed.push(r.path);
       await o.processFile?.(r, s);
@@ -252,8 +253,8 @@ describe('WatchOperations.syncSingleFile — deciding whether a round-trip is wo
 });
 
 describe('WatchOperations.deleteSingleFile', () => {
-  it('DROPS the deletion during a full sync instead of deferring it', async () => {
-    // The asymmetry with syncSingleFile is deliberate: the running scan already propagates a tracked
+  it('does not replay an immediate deletion during a full sync', async () => {
+    // Structural follow-up makes the later decision against the current filesystem.
     // path that is gone locally, so queuing this would risk a second delete.
     const { watch, calls } = build({ running: true, base: tracked() });
     await watch.deleteSingleFile('note.md');
@@ -463,5 +464,51 @@ describe('[SPEC:CPS-7] watch never handles plugin paths', () => {
     const { watch, untouched } = guarded();
     await watch.renameSingleFolder('Old', '.obsidian/plugins/q');
     untouched();
+  });
+});
+
+
+describe('Watch structural events during a running full scan', () => {
+  test.each(['file-delete', 'new-file-delete', 'file-rename', 'folder-create', 'folder-delete', 'folder-rename'])('rescans once after the run, without replaying a stale %s', async event => {
+    let running = true;
+    const scan = jest.fn(async () => {});
+    const { watch, calls } = build({ base: event === 'new-file-delete' ? undefined : tracked(), trackedDirs: ['Old'] }, { isSyncRunning: () => running, reconcileStructure: scan });
+    const perform = () => event === 'file-delete' || event === 'new-file-delete' ? watch.deleteSingleFile('note.md')
+      : event === 'file-rename' ? watch.renameSingleFile('note.md', 'Renamed.md')
+      : event === 'folder-create' ? watch.createSingleFolder('New')
+      : event === 'folder-delete' ? watch.deleteSingleFolder('Old')
+      : watch.renameSingleFolder('Old', 'New');
+    await perform();
+    await perform();
+    await watch.drainPending();
+    expect(scan).not.toHaveBeenCalled();
+    expect(calls.deleteFile).toEqual([]);
+    expect(calls.createDirectory).toEqual([]);
+    expect(calls.move).toEqual([]);
+    running = false;
+    await watch.drainPending();
+    await watch.drainPending();
+    expect(scan).toHaveBeenCalledTimes(1);
+    expect(calls.deleteFile).toEqual([]);
+    expect(calls.createDirectory).toEqual([]);
+    expect(calls.move).toEqual([]);
+  });
+
+  test('holds structural work and pending edits while stopped, then drains each once', async () => {
+    let running = true, stopped = false;
+    const scan = jest.fn(async () => {});
+    const { watch, calls } = build({ base: tracked(), localContent: 'new' }, { isSyncRunning: () => running, isCancelled: () => stopped, reconcileStructure: scan });
+    await watch.deleteSingleFile('note.md');
+    await watch.syncSingleFile('edit.md');
+    running = false;
+    stopped = true;
+    await watch.drainPending();
+    expect(scan).not.toHaveBeenCalled();
+    expect(calls.processed).toEqual([]);
+    stopped = false;
+    await watch.drainPending();
+    await watch.drainPending();
+    expect(scan).toHaveBeenCalledTimes(1);
+    expect(calls.processed).toEqual(['edit.md']);
   });
 });
