@@ -306,6 +306,7 @@ export class SyncEngine {
       localAdapter: opts.localAdapter,
       stateDB: opts.stateDB,
       mergeBase: this.mergeBase,
+      canApplyRestore: path => !this.isPathHeld(path) && !opts.isBeingEdited?.(path),
       flushMergeBase: () => this.opts.baseStore?.flush() ?? Promise.resolve(),
       // Markdown is always a mergeable text type in the sync engine even though `md` is
       // intentionally not stored in autoMergeFileTypes. Version compare/line history must mirror

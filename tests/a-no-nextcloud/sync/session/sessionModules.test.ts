@@ -305,6 +305,7 @@ describe('VersionService', () => {
     const service = new VersionService({
       localAdapter: {
         stat: async () => ({ size: 13, mtime: 777 }),
+        readBinary: async () => new TextEncoder().encode('original body').buffer,
         atomicWriteBinary: async (p: string) => { calls.wrote.push(p); },
       } as never,
       stateDB: {
@@ -585,8 +586,8 @@ describe('VersionService', () => {
       remoteMtime: 123456,
       mtime: 123456,
       isConflicted: false,
-      localMtime: 777,
     });
+    expect(calls.setFile?.localMtime).toBeUndefined();
     expect(calls.setFile?.localHash).not.toBe(calls.setFile?.remoteId);
     expect(calls.saves).toBe(1);
   });
