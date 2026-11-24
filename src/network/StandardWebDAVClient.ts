@@ -19,7 +19,7 @@ import {
   AppPasswordReader,
   CredentialsNotFoundError,
 } from '../types';
-import { IWebDAVClient } from './IWebDAVClient';
+import { IWebDAVClient, UploadOptions } from './IWebDAVClient';
 import { DavSyncSettings } from '../types';
 import { toRemotePath, hrefToRelative, encodeRemoteUrl, encodeServerUrl, ensureRemoteDir, mkcolStrict, prepareMissingParentRetry, isTransportFailure } from './remotePath';
 import { RemoteDirCache } from './RemoteDirCache';
@@ -241,11 +241,12 @@ export class StandardWebDAVClient implements IWebDAVClient {
 
   async uploadFile(
     remotePath: string, data: ArrayBuffer, mtime?: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; ctime?: number },
+    opts?: UploadOptions,
   ): Promise<void> {
     const headers: Record<string, string> = { Authorization: this.authHeader, ...NO_CACHE_HEADERS };
     if (mtime) headers['X-OC-MTime'] = String(Math.floor(mtime / 1000));
     if (opts?.ifMatchEtag) headers['If-Match'] = `"${opts.ifMatchEtag.replace(/^"|"$/g, '')}"`;
+    if (opts?.onlyIfAbsent) headers['If-None-Match'] = '*';
     // PUT first; on a missing parent MKCOL the ancestors and retry once. Standard WebDAV answers 409, Nextcloud 404.
     let res = await this.req({ url: this.remoteUrl(remotePath), method: 'PUT', headers, body: data, throw: false });
     let dirError: RemoteDirCreateError | null = null;
@@ -338,7 +339,7 @@ export class StandardWebDAVClient implements IWebDAVClient {
 
   async uploadChunked(
     _remotePath: string, _data: ArrayBuffer, _chunkSizeBytes: number,
-    _opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; mtime?: number; ctime?: number },
+    _opts?: UploadOptions & { mtime?: number },
   ): Promise<void> {
     throw new FeatureUnsupportedError('chunked-upload');
   }

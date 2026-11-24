@@ -16,6 +16,7 @@ import {
   SyncStatusReport,
 } from './statusFilter';
 import { formatClock24 } from './timeFormat';
+import { folderMoveStatus } from '../sync/PendingFolderMoves';
 import { fileRenameStatus } from '../sync/PendingFileRenames';
 
 // Survives render() (instance field, not a DOM attribute): a mid-flight re-render (filter toggle, "Sync now" completing)
@@ -110,6 +111,13 @@ export class SyncStatusModal extends Modal {
     }
 
     const report = this.getReport();
+    const moves = report.pendingFolderMoves ?? [];
+    if (moves.length) {
+      contentEl.createEl('h3', { text: 'Pending folder moves' });
+      for (const move of moves) {
+        new Setting(contentEl).setName(`${move.source} → ${move.destination}`).setDesc(folderMoveStatus(move));
+      }
+    }
     const renames = report.pendingFileRenames ?? [];
     if (renames.length) {
       contentEl.createEl('h3', { text: 'Pending file renames' });
@@ -144,7 +152,7 @@ export class SyncStatusModal extends Modal {
       'Files that failed and will be retried on the next sync.');
     this.addErrorSection(filtered.errors);
 
-    if (renames.length === 0 && filtered.history.length === 0 && filtered.conflictedFiles.length === 0
+    if (moves.length === 0 && renames.length === 0 && filtered.history.length === 0 && filtered.conflictedFiles.length === 0
         && filtered.retryFiles.length === 0 && filtered.errors.length === 0) {
       const allUnchecked = this.filterState.checked.size === 0;
       contentEl.createEl('p', {

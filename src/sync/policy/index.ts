@@ -79,3 +79,10 @@ export function isSystemExcluded(path: string, ctx: SystemExclusionContext): boo
   // `syncedCommunityPlugins` (docs/spec.md §7). ConfigSyncResolver decides, so the deletion guard follows it.
   return !ctx.isConfigPathIncluded(path);
 }
+
+export function ancestorMatching(path: string, matches: (directory: string) => boolean): string | undefined {
+  for (let parent = parentDir(path); parent; parent = parentDir(parent)) {
+    if (matches(parent)) return parent;
+  }
+  return undefined;
+}

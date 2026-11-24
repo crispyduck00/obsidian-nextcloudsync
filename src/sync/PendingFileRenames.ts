@@ -20,6 +20,9 @@ const issueMessages: Record<FileRenameIssue, string> = {
 };
 
 export function fileRenameStatus(rename: PendingFileRename): string {
+  if (rename.unconfirmedCreate) {
+    return 'The first upload could not be confirmed. Check the original path on the server and move the local file back to its original path to resume sync safely.';
+  }
   return rename.issue ? issueMessages[rename.issue] : 'Waiting to sync the rename.';
 }
 
@@ -50,6 +53,7 @@ interface RenamePorts {
   local: Pick<LocalAdapter, 'isFile'>;
   scope(): string;
   isExcluded(path: string): boolean;
+  canMove?(source: string, destination: string): Promise<void>;
   move(source: string, destination: string, etag: string): Promise<void>;
   moveTracking(source: string, destination: string, file: FileState): void;
   isCancelled(): boolean;
@@ -74,7 +78,10 @@ export class PendingFileRenames {
   }
 
   /** Recording is synchronous so an already-running sync can see the hold at its next write. */
-  capture(oldPath: string, newPath: string, origin: 'observed' | 'inferred' = 'observed'): boolean {
+  capture(
+    oldPath: string, newPath: string, origin: 'observed' | 'inferred' = 'observed',
+    trackedSource = oldPath, firstUploadInFlight = false,
+  ): boolean {
     if (oldPath === newPath || !validFilePath(oldPath) || !validFilePath(newPath)) return false;
     if (origin === 'inferred' && (this.holds(oldPath) || this.holds(newPath))) return false;
     const scope = this.deps.scope();
@@ -85,23 +92,49 @@ export class PendingFileRenames {
         ? null : { ...chain, destination: newPath, issue: undefined });
       return true;
     }
-    if (this.holds(oldPath) || this.deps.isExcluded(oldPath) || this.deps.isExcluded(newPath)) return false;
-    const base = this.deps.state.getFile(oldPath);
-    if (!base) return false;
-    const intent: PendingFileRename = { source: oldPath, destination: newPath, scope, fileId: base.remoteFileId };
+    if (this.holds(trackedSource) || this.deps.isExcluded(trackedSource) || this.deps.isExcluded(newPath)) return false;
+    const base = this.deps.state.getFile(trackedSource);
+    if (!base && !firstUploadInFlight) return false;
+    const intent: PendingFileRename = { source: trackedSource, destination: newPath, scope, fileId: base?.remoteFileId ?? null };
     if (origin === 'observed') intent.observed = true;
+    if (!base) intent.unconfirmedCreate = true;
     this.deps.state.setPendingFileRenames([...this.list(), intent]);
     return true;
   }
 
+  finishFirstUpload(path: string, file: FileState | null): boolean {
+    const rename = this.current(path);
+    if (!rename?.unconfirmedCreate || rename.scope !== this.deps.scope()) return false;
+    // null is a deliberate skip before the request. A failed or missing response never calls this.
+    this.replace(path, file ? { ...rename, fileId: file.remoteFileId, unconfirmedCreate: undefined } : null);
+    return true;
+  }
+
   captureFolder(oldPath: string, newPath: string): boolean {
-    let changed = false;
-    for (const rename of this.list()) {
-      if (rename.destination.startsWith(`${oldPath}/`)) {
-        changed = this.capture(rename.destination, newPath + rename.destination.slice(oldPath.length)) || changed;
-      }
-    }
-    return changed;
+    const scope = this.deps.scope();
+    const existing = this.list();
+    const updated = existing.flatMap(rename => {
+      if (rename.scope !== scope) return [rename];
+      const destination = rename.destination.startsWith(`${oldPath}/`) ? newPath + rename.destination.slice(oldPath.length) : rename.destination;
+      if (!rename.attemptedDestination && !rename.unconfirmedCreate && rename.source.startsWith(`${oldPath}/`)
+        && destination === newPath + rename.source.slice(oldPath.length)) return [];
+      return [destination === rename.destination ? rename : { ...rename, destination }];
+    });
+    if (updated.length === existing.length && updated.every((rename, i) => rename === existing[i])) return false;
+    this.deps.state.setPendingFileRenames(updated);
+    return true;
+  }
+
+  rebaseAfterFolderMove(source: string, destination: string): void {
+    const scope = this.deps.scope();
+    const rebase = (path: string): string => path.startsWith(`${source}/`) ? destination + path.slice(source.length) : path;
+    this.deps.state.setPendingFileRenames(this.list().flatMap(rename => {
+      if (rename.scope !== scope) return [rename];
+      const nextSource = rebase(rename.source);
+      const attemptedDestination = rename.attemptedDestination ? rebase(rename.attemptedDestination) : undefined;
+      if (nextSource === rename.destination && (!attemptedDestination || attemptedDestination === nextSource)) return [];
+      return [{ ...rename, source: nextSource, attemptedDestination }];
+    }));
   }
 
   retry(client: IWebDAVClient, shouldRetry: (rename: PendingFileRename) => boolean = () => true): Promise<boolean> {
@@ -118,7 +151,7 @@ export class PendingFileRenames {
 
   private async attempt(client: IWebDAVClient, rename: PendingFileRename): Promise<boolean> {
     const { source, destination, attemptedDestination } = rename;
-    if (this.current(source) !== rename) return false;
+    if (this.current(source) !== rename || rename.unconfirmedCreate) return false;
     const paths = pathsOf(rename);
     if (rename.scope !== this.deps.scope() || paths.some(path => !validFilePath(path) || this.deps.isExcluded(path))) {
       return this.recordIssue(source, 'scope');
@@ -159,6 +192,7 @@ export class PendingFileRenames {
       // file for a rename. Keep the server file in place if its content or parent no longer match.
       if (!rename.observed && (parentDir(source) !== parentDir(destination) ||
           !(await this.hasTrackedContent(client, original, base)))) return this.recordIssue(source, 'conflict');
+      await this.deps.canMove?.(source, destination);
       if (this.current(source) !== rename || this.deps.isCancelled()) return false;
       const prepared = { ...rename, attemptedDestination: destination };
       this.replace(source, prepared);

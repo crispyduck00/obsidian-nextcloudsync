@@ -192,9 +192,10 @@ export default class ObsidianNextcloudsync extends Plugin {
         debouncedUpload();
       }));
       this.registerEvent(this.app.vault.on('delete', (file: TAbstractFile) => {
+        if (isOwnSyncEvent(file.path)) return; // e.g. atomic write replacing the old copy
+        if (file instanceof TFolder) this.syncEngine?.rememberFolderDeletion(file.path);
         if (!watchOn()) return;
         pendingUploads.delete(file.path);
-        if (isOwnSyncEvent(file.path)) return; // e.g. atomic write replacing the old copy
         if (file instanceof TFolder) { void this.syncEngine?.deleteSingleFolder(file.path); return; }
         void this.syncEngine?.deleteSingleFile(file.path);
       }));

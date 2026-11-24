@@ -1,3 +1,4 @@
+import type { LocalAdapter } from '../../data/LocalAdapter';
 // Deletion propagation in both directions. applyLocalDeletion deletes on the server ONLY when a real content
 // hash proves the server copy never diverged. processRemoteDeletion applies a server deletion locally through
 // the user's "Deleted files" setting and never outside sync scope (docs/spec.md §8).
@@ -20,6 +21,8 @@ export type RemoteDeletionOutcome =
   | { status: 'failed'; message: string };
 
 export interface DeletionDeps {
+  assertLocalVaultAvailable?(): Promise<void>;
+  localAdapter?: Pick<LocalAdapter, 'stat'>;
   app: App;
   stateDB: Pick<StateDB, 'deleteFile' | 'getFile' | 'getAllFiles' | 'getAllDirs' | 'deleteDir'>;
   journal: SyncJournal;
@@ -44,6 +47,12 @@ export class DeletionService {
     remote: RemoteFileInfo, base: FileState, remoteId: string, idType: FileState['idType'],
     summary: SyncSessionSummary,
   ): Promise<'deleted' | 'restored' | 'kept'> {
+    if (base.checkAfterFolderMove) {
+      await this.deps.assertLocalVaultAvailable?.();
+      if (await this.deps.localAdapter?.stat(remote.path) || this.deps.isRenameHeld?.(remote.path)) return 'kept';
+      await this.deps.transfer.downloadFile(client, remote, remoteId, idType, summary, true);
+      return await this.deps.localAdapter?.stat(remote.path) ? 'restored' : 'kept';
+    }
     // Decide only from a real content hash: a SHA-256 match with the last synced base is the only proof the
     // server copy is unchanged.
     let serverHash = remote.checksum ?? null;

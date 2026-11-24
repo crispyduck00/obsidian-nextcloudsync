@@ -23,6 +23,7 @@ const noopStatusBar = {
 export interface Device {
   engine: SyncEngine;
   vault: FakeVault;
+  localAdapter: LocalAdapter;
   stateDB: StateDB;
   baseStore: MergeBaseStore;
   cleanSideStore: CleanSideStore;
@@ -69,7 +70,7 @@ export function makeDevice(
     pluginDir: PLUGIN_DIR,
     configDir: CONFIG_DIR,
   } as never);
-  return { engine, vault, stateDB, baseStore, cleanSideStore, client, settings, sync: () => engine.syncManual({ manual: true }) };
+  return { engine, vault, localAdapter, stateDB, baseStore, cleanSideStore, client, settings, sync: () => engine.syncManual({ manual: true }) };
 }
 
 // Models an app restart: a fresh engine over the same vault with every store re-read from disk.

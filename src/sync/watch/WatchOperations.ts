@@ -48,6 +48,7 @@ export interface WatchDeps {
   deletion: DeletionService;
   resolution: Pick<ResolutionService, 'dropCleanSnapshot'>;
   isSystemExcluded(path: string): boolean;
+  reconcileFolderMove?(): Promise<void>;
   // Plugin files sync only in full runs; watch mode never handles them.
   isPluginPath(path: string): boolean;
   connect(): Promise<Connection>;
@@ -169,7 +170,7 @@ export class WatchOperations {
           conn.client, conn.uploadStrategy,
           path, localHash, base?.remoteId ?? localHash, base?.idType ?? 'sha256',
           { path, fileId: base?.remoteFileId ?? null, checksum: null, etag: null, size: stat.size, lastModified: stat.mtime, creationTime: 0 },
-          summary,
+          summary, true,
         );
       }
       // Coalesced via a trailing debounce so rapid edits do not each rewrite the state file; onunload flushes it.
@@ -261,7 +262,8 @@ export class WatchOperations {
     try {
       if (this.deps.isRenameHeld?.(path)) return;
       await conn.client.createDirectory(path);
-      this.deps.stateDB.setDir({ path, remoteFileId: null });
+      const current = await conn.client.statFolderMovePath?.(path);
+      this.deps.stateDB.setDir({ path, remoteFileId: current?.directoryId ?? null });
       this.deps.stateDB.requestSave();
       void this.deps.logger?.log(`watch: folder created → MKCOL ${path}`);
     } catch (err) {
@@ -302,26 +304,11 @@ export class WatchOperations {
     this.deps.stateDB.requestSave();
   }
 
-  // The server moves the whole subtree. Child-file rename events fired alongside are handled best-effort by
-  // renameSingleFile; their 404s are harmless because the parent MOVE already relocated them.
   async renameSingleFolder(oldPath: string, newPath: string): Promise<void> {
-    if (this.deps.hasRenameInFolder?.(oldPath) || this.deps.hasRenameInFolder?.(newPath)) return;
     if (this.deps.isPluginPath(oldPath) || this.deps.isPluginPath(newPath)) return;
-    if (this.deps.isSystemExcluded(oldPath) && this.deps.isSystemExcluded(newPath)) return;
-    if (this.skippedOnCellular('folder-rename', `${oldPath} → ${newPath}`)) return;
-    const conn = await this.deps.connect();
-    this.begin();
-    try {
-      await conn.client.moveFile(oldPath, newPath);
-      this.deps.stateDB.deleteDir(oldPath);
-      this.deps.stateDB.setDir({ path: newPath, remoteFileId: null });
-      this.deps.stateDB.requestSave();
-      void this.deps.logger?.log(`watch: folder renamed → MOVE ${oldPath} → ${newPath}`);
-    } catch (err) {
-      console.warn(`[SyncEngine] Single-folder rename failed ${oldPath} → ${newPath}:`, err);
-    } finally {
-      this.end();
-    }
+    if (this.deps.isSystemExcluded(oldPath) || this.deps.isSystemExcluded(newPath)) return;
+    if (this.skippedOnCellular('folder-rename', `${oldPath} → ${newPath}`) || this.deps.isSyncRunning()) return;
+    await this.deps.reconcileFolderMove?.();
   }
 
   // Called once the run has finished. The set is drained into a local copy first so re-entry cannot loop.

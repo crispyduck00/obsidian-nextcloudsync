@@ -178,3 +178,16 @@ export function readPropPatchOutcome(xml: string, ns: string, localName: string)
   }
   return 'rejected';
 }
+
+export function readRemovalProtection(prop: Element): boolean {
+  const read = (name: string): string | undefined =>
+    prop.getElementsByTagNameNS(NC_NS, name)[0]?.textContent?.trim().toLowerCase();
+  const permissions = prop.getElementsByTagNameNS(OC_NS, 'permissions')[0]?.textContent ?? '';
+  const mountRoot = read('is-mount-root');
+  return !permissions.includes('D') || mountRoot === 'true' || mountRoot === '1'
+    || (!mountRoot && /^(group|shared|external|federated)$/.test(read('mount-type') ?? ''))
+    || ['true', '1'].includes(read('is-protected') ?? '')
+    || ['false', '0'].includes(read('is-deletable') ?? '')
+    || ['false', '0'].includes(read('is-renameable') ?? '')
+    || ['false', '0'].includes(read('is-moveable') ?? '');
+}

@@ -1,6 +1,40 @@
-import { NextcloudFeatures, RemoteFileInfo, RemoteDirInfo, SyncChanges, FileVersion, VaultRootOutcome } from '../types';
+import { DirState, NextcloudFeatures, RemoteFileInfo, RemoteDirInfo, SyncChanges, FileVersion, VaultRootOutcome } from '../types';
+
+export interface RemoteDirectoryInspection {
+  protected: boolean;
+  fileId: string | null;
+}
+
+
+export interface TrackedDirectories {
+  getDir(path: string): DirState | undefined;
+  getRemoteRootFileId?(): string | null;
+  setRemoteRootFileId?(fileId: string): void;
+}
+
+/** Brackets an actual MKCOL attempt. An ID is supplied only by an acknowledged creation. */
+export type DirectoryCreationObserver = (path: string) => ((fileId: string | null) => void) | undefined;
+
+export interface UploadOptions {
+  /** Hash of the body already computed by the caller. */
+  precomputedSha256?: string;
+  /** Guard an existing revision by ETag and, for Nextcloud, by its checksum when available. */
+  ifMatchEtag?: string | null;
+  expectedRemoteChecksum?: string;
+  /** Refuse to overwrite a path that came into existence concurrently. */
+  onlyIfAbsent?: boolean;
+  /** Creation time in milliseconds. An omitted value leaves the server default. */
+  ctime?: number;
+  /** Called only with an identity from the response to a successful conditional creation. */
+  onCreatedFileId?: (fileId: string) => void;
+  /** ETag confirmed by the successful write response. */
+  onUploadedEtag?: (etag: string) => void;
+}
 
 export interface IWebDAVClient {
+  inspectDirectory?(path: string, includeDescendants?: boolean, isExcluded?: (path: string) => boolean): Promise<RemoteDirectoryInspection | null>;
+  /** Observe acknowledged directory creations to coordinate a simultaneous local rename. */
+  trackKnownDirectories?(state: TrackedDirectories, observeCreation?: DirectoryCreationObserver): void;
   connect(): Promise<NextcloudFeatures>;
   /**
    * The COMPLETE listing beneath `path` (the vault root when `path` is '') (docs/spec.md §5.2).
@@ -55,10 +89,13 @@ export interface IWebDAVClient {
    */
   uploadFile(
     remotePath: string, data: ArrayBuffer, mtime?: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; ctime?: number },
+    opts?: UploadOptions,
   ): Promise<void>;
   /** MOVE with Overwrite:F, optionally conditioned on the source revision. */
   moveFile(oldPath: string, newPath: string, ifMatchEtag?: string): Promise<void>;
+  statFolderMovePath?(path: string): Promise<{ directoryId: string | null } | null>;
+  moveTrackedFolder?(source: string, destination: string, fileId: string, canSend: () => Promise<boolean>,
+    isExcluded: (path: string) => boolean): Promise<void>;
   deleteFile(path: string, expectedRemoteId: string): Promise<void>;
   getSyncToken(): Promise<string | null>;
   /**
@@ -86,7 +123,7 @@ export interface IWebDAVClient {
    */
   uploadChunked(
     remotePath: string, data: ArrayBuffer, chunkSizeBytes: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; mtime?: number; ctime?: number },
+    opts?: UploadOptions & { mtime?: number },
   ): Promise<void>;
 
   /**

@@ -40,6 +40,7 @@ describeLive('Layer B — empty-dir pruning end-to-end (engine)', (getEnv) => {
     expect(b.vault.folderExists('2011')).toBe(true);
 
     a.vault.deleteLocalTree('2011');
+    a.engine.rememberFolderDeletion('2011');
     await a.sync();
 
     // The files are gone AND the now-empty directory is pruned.

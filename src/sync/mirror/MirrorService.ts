@@ -47,7 +47,7 @@ export interface MirrorDeps {
   oversizeSkips: Pick<OversizeSkipNotifier, 'sessionFinished'>;
   enumerateIncludedConfigPaths(): Promise<string[]>;
   isSystemExcluded(path: string): boolean;
-  hasPendingFileRenames?(): boolean;
+  hasPendingRenames?(): boolean;
   // Writes the state DB, the merge bases and the history to disk; rejects when a write fails.
   persist(): Promise<void>;
   // Mirror can run before any sync has, so this may need to connect.
@@ -62,8 +62,8 @@ export class MirrorService {
   constructor(private readonly deps: MirrorDeps) {}
 
   async planRemoteMirror(onPhase?: (label: string) => void): Promise<MirrorPlan> {
-    if (this.deps.hasPendingFileRenames?.()) {
-      return buildMirrorPlan([], [], [], () => false, false, 'Resolve pending file renames in Sync status before mirroring.');
+    if (this.deps.hasPendingRenames?.()) {
+      return buildMirrorPlan([], [], [], () => false, false, 'Resolve pending renames in Sync status before mirroring.');
     }
     onPhase?.('Connecting to the server…');
     let client: IWebDAVClient;
@@ -141,8 +141,8 @@ export class MirrorService {
   ): Promise<MirrorResult> {
     const result: MirrorResult = { downloaded: 0, deleted: 0, skipped: plan.skipCount, createdDirs: 0, errors: [], pluginsNeedingRestart: [] };
     if (!plan.ok) return result;
-    if (this.deps.hasPendingFileRenames?.()) {
-      result.errors.push({ path: '', message: 'Resolve pending file renames in Sync status before mirroring.' });
+    if (this.deps.hasPendingRenames?.()) {
+      result.errors.push({ path: '', message: 'Resolve pending renames in Sync status before mirroring.' });
       return result;
     }
 

@@ -66,6 +66,7 @@ describeLive('Layer B — guarded delete propagation (feature 086 / issue #46)',
     expect((await baseClient.getFiles('')).map((f) => f.path)).toContain('GDP31/a.md');
 
     a.vault.deleteLocalTree('GDP31');
+    a.engine.rememberFolderDeletion('GDP31');
     await a.sync();
 
     expect((await baseClient.getFiles('')).map((f) => f.path)).not.toContain('GDP31/a.md');

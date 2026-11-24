@@ -35,6 +35,7 @@ describeLive('Layer B — directory rename propagation (engine)', (getEnv) => {
     // Same content gives a hash match, so SyncEngine detects a rename and issues a MOVE instead of delete + upload.
     a.vault.seedLocal('new/note.md', 'hello from old');
     a.vault.deleteLocalTree('old');
+    a.engine.rememberFolderRename('old', 'new');
     await a.sync();
 
     expect(await baseClient.remoteExists('new/note.md')).toBe(true);
@@ -65,6 +66,7 @@ describeLive('Layer B — directory rename propagation (engine)', (getEnv) => {
     // Concurrent divergence: A renames 1111 → 2222 locally; B creates a NEW file under 2222/.
     a.vault.seedLocal('2222/file.md', 'content-from-1111');
     a.vault.deleteLocalTree('1111');
+    a.engine.rememberFolderRename('1111', '2222');
 
     b.vault.seedLocal('2222/other.md', 'content-from-B');
 
