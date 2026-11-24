@@ -407,8 +407,9 @@ export class SyncEngine {
       connect: () => this.connection(),
       isRenameHeld: (p) => this.isPathHeld(p),
       hasRenameInFolder: (p) => this.hasRenameInFolder(p),
-      reconcileFolderMove: async () => {
-        await this.syncManualWithResult();
+      isCancelled: () => this.cancelled,
+      reconcileStructure: async () => {
+        if (!this.cancelled) await this.syncManualWithResult();
       },
       retryFileRename: (client, _source, destination) =>
         this.retryPendingFileRenames(client, rename => rename.destination === destination),
@@ -1173,7 +1174,6 @@ export class SyncEngine {
   }
 
   syncRememberedFileRename(oldPath: string, newPath: string): Promise<void> {
-    if (this.isSyncRunning()) return Promise.resolve();
     return this.watch.renameSingleFile(oldPath, newPath);
   }
 

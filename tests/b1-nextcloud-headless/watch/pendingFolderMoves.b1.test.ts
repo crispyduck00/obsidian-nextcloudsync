@@ -19,6 +19,64 @@ async function moveLocally(device: Device, source: string, destination: string):
 }
 
 describeLive('Persistent folder moves against Nextcloud', getEnv => {
+  it('applies a nested folder move observed after this scan has already visited its files', async () => {
+    const env = getEnv();
+    const { client: writer, ws } = await setupWorkspace(env);
+    const from = 'Project', to = 'Archive/Project';
+    try {
+      await writer.uploadFile(from + '/Project.md', textBuf('project note'));
+      await writer.uploadFile(from + '/Sub/attachment.bin', textBuf('attachment'));
+      await writer.uploadFile('zz-last.md', textBuf('last'));
+      await writer.createDirectory('Archive');
+      const rootId = (await writer.statFolderMovePath(from))?.directoryId;
+      const noteId = (await writer.statFile(from + '/Project.md'))?.fileId;
+      const attachmentId = (await writer.statFile(from + '/Sub/attachment.bin'))?.fileId;
+      expect([rootId, noteId, attachmentId]).toEqual([expect.any(String), expect.any(String), expect.any(String)]);
+
+      const device = makeDevice(env, ws.remoteBase, 'late-folder-move', { networkConcurrency: 1 });
+      await device.sync();
+      const list = device.client.getFiles.bind(device.client);
+      jest.spyOn(device.client, 'getFiles').mockImplementation(async path =>
+        [...await list(path)].sort((a, b) => a.path.localeCompare(b.path)));
+      let pause!: () => void, resume!: () => void;
+      const reached = new Promise<void>(resolve => { pause = resolve; });
+      const gate = new Promise<void>(resolve => { resume = resolve; });
+      const stat = device.localAdapter.stat.bind(device.localAdapter);
+      const visited = new Set<string>();
+      let held = false;
+      jest.spyOn(device.localAdapter, 'stat').mockImplementation(async path => {
+        if (!held && path === 'zz-last.md') {
+          held = true;
+          pause();
+          await gate;
+        }
+        visited.add(path);
+        return stat(path);
+      });
+      const sync = device.engine.syncManual({ manual: true, refreshRemote: true });
+      try {
+        // A completed scan must also release the test if the expected synchronization point disappears.
+        await Promise.race([reached, sync]);
+        expect(held).toBe(true);
+        expect(visited.has(from + '/Project.md')).toBe(true);
+        expect(visited.has(from + '/Sub/attachment.bin')).toBe(true);
+        await moveLocally(device, from, to);
+        await device.engine.renameSingleFolder(from, to);
+      } finally {
+        resume();
+        await sync;
+      }
+      expect(await writer.statFolderMovePath(from)).toBeNull();
+      expect((await writer.statFolderMovePath(to))?.directoryId).toBe(rootId);
+      expect((await writer.statFile(to + '/Project.md'))?.fileId).toBe(noteId);
+      expect((await writer.statFile(to + '/Sub/attachment.bin'))?.fileId).toBe(attachmentId);
+      expect(decodeBuf(await writer.downloadFile(to + '/Sub/attachment.bin'))).toBe('attachment');
+      expect(device.engine.getStatusReport().pendingFolderMoves).toEqual([]);
+    } finally {
+      await cleanupWorkspace(writer, ws);
+    }
+  });
+
   it('retains the Nextcloud file ID for a heading-driven rename of a freshly downloaded note', async () => {
     const env = getEnv();
     const { client: writer, ws } = await setupWorkspace(env);

@@ -8,6 +8,8 @@ Retain writer-preferred shared/exclusive coordination and upstream per-path lock
 
 The remote-mirror dialog also reserves the vault while its preview awaits confirmation and while applying. Normal full and Watch operations wait until the dialog closes. Closing the dialog resumes the active engine and its queued work. Unloading the plugin or replacing the engine leaves the old engine stopped.
 
+Local structural events that arrive during a full sync request one coalesced follow-up scan. That scan uses the current files and identities, so a late delete, recreation, rename, or folder move is decided from the final state. It never replays a stale delete. Stopping the engine keeps the pending work for the next permitted run.
+
 ## Upstream base and independence
 
 - Base: upstream `1.0.18`, commit `21f89023fdaee58068276df3cff876fcc74a1e95`.
