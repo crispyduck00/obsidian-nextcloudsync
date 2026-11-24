@@ -149,12 +149,14 @@ export class WatchOperations {
     const localHash = await sha256(data);
     if (base && localHash === base.localHash) return; // content unchanged (e.g. mtime-only touch)
 
-    const conn = await this.deps.connect();
     // A real summary: its counters decide whether to notify the user, and processFile maintains them as in a full sync.
     const summary = this.deps.journal.newSummary();
     const conflictsBefore = this.deps.conflictEncounters();
+    let connected = false;
     this.begin();
     try {
+      const conn = await this.deps.connect();
+      connected = true;
       const remote = await conn.client.statFile(path);
       if (remote) {
         void this.deps.logger?.log(`watch: remote state fetched → classifying ${path}`);
@@ -178,7 +180,7 @@ export class WatchOperations {
       console.warn(`[SyncEngine] Single-file sync failed for ${path}:`, err);
       void this.deps.logger?.log(`watch: FAILED ${path} — ${(err as Error).message}`, 'error');
       this.deps.journal.recordError(summary, path, err);
-      if (err instanceof NetworkError) this.deps.queueRetry(path);
+      if (!connected || err instanceof NetworkError) this.deps.queueRetry(path);
     } finally {
       this.end();
     }
@@ -204,11 +206,11 @@ export class WatchOperations {
       void this.deps.logger?.log(`watch: full sync in progress → deletion of ${path} left to the running scan`);
       return;
     }
-    const conn = await this.deps.connect();
     const summary = this.deps.journal.newSummary();
     const conflictsBefore = this.deps.conflictEncounters();
     this.begin();
     try {
+      const conn = await this.deps.connect();
       // The same decision the full scan makes for a path missing from its listing (ask the server, forget on 404,
       // else demand a checksum match). It owns the StateDB cleanup, keeping the entry when the DELETE fails so
       // the delete is retried instead of coming back as a re-download.
@@ -235,10 +237,10 @@ export class WatchOperations {
   }
 
   private async renameSingleFileLocked(oldPath: string, newPath: string): Promise<void> {
-    await this.deps.connect();
-    const rt = this.deps.renameTracker();
     this.begin();
     try {
+      await this.deps.connect();
+      const rt = this.deps.renameTracker();
       await rt.applyLocalRename(oldPath, newPath);
       this.deps.stateDB.requestSave();
     } catch (err) {
@@ -252,9 +254,9 @@ export class WatchOperations {
   async createSingleFolder(path: string): Promise<void> {
     if (this.deps.isSystemExcluded(path) || this.deps.isPluginPath(path)) return;
     if (this.skippedOnCellular('folder-create', path)) return;
-    const conn = await this.deps.connect();
     this.begin();
     try {
+      const conn = await this.deps.connect();
       await conn.client.createDirectory(path);
       this.deps.stateDB.setDir({ path, remoteFileId: null });
       this.deps.stateDB.requestSave();
@@ -278,10 +280,10 @@ export class WatchOperations {
       void this.deps.logger?.log(`watch: full sync in progress → folder deletion of ${path} left to the running scan`);
       return;
     }
-    const conn = await this.deps.connect();
     this.begin();
     let succeeded = false;
     try {
+      const conn = await this.deps.connect();
       await conn.client.deleteCollection(path); // 404 is handled inside as success
       void this.deps.logger?.log(`watch: folder deleted → remote collection removed ${path}`);
       succeeded = true;
@@ -302,9 +304,9 @@ export class WatchOperations {
     if (this.deps.isPluginPath(oldPath) || this.deps.isPluginPath(newPath)) return;
     if (this.deps.isSystemExcluded(oldPath) && this.deps.isSystemExcluded(newPath)) return;
     if (this.skippedOnCellular('folder-rename', `${oldPath} → ${newPath}`)) return;
-    const conn = await this.deps.connect();
     this.begin();
     try {
+      const conn = await this.deps.connect();
       await conn.client.moveFile(oldPath, newPath);
       this.deps.stateDB.deleteDir(oldPath);
       this.deps.stateDB.setDir({ path: newPath, remoteFileId: null });
