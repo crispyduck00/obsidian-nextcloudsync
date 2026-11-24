@@ -249,10 +249,11 @@ export class MirrorService {
             void this.deps.logger?.log(`mirror: ${remote.path} changed locally since the plan — left for the next sync`);
             continue;
           }
+          const existing = this.deps.stateDB.getFile(remote.path);
           const hash = planned.hash ?? remote.checksum;
           if (!hash) continue;
           this.deps.stateDB.setFile({
-            ...convergedState(remote, hash, nowStat),
+            ...convergedState(remote, hash, nowStat, existing),
             localSize: nowStat.size, localMtime: nowStat.mtime, remoteMtime: remote.lastModified,
           });
         }

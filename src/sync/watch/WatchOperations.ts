@@ -6,8 +6,8 @@
 //
 // Rules that run through all of it:
 //   Never run alongside a full sync. A multi-step resolve must not interleave with the full sync writing the
-//   same file. Edits are deferred until the run ends. Structural events request one fresh full scan
-//   because the current scan may already have passed the affected path.
+//   same file. Edits are re-evaluated after the run. Structural events request one fresh scan because
+//   the running scan may have already passed the affected path.
 //   Stay silent unless the user has to know: only a failure or a genuine divergence raises a notice.
 //   Respect "Wi-Fi only": on cellular each operation does nothing, and the next full sync's scan picks the
 //   change up (docs/spec.md §5.7c).
@@ -248,7 +248,7 @@ export class WatchOperations {
     // Decide "nothing changed" from LOCAL data only, before touching the network: the stat-signature fast path
     // answers most saves without reading the file, and a miss falls back to hashing.
     if (base && this.locallyUnchanged(base, stat)) return;
-    if (base && await hashLocalFile(this.deps.localAdapter, this.deps.stateDB, path, stat, base) === base.localHash) return; // content unchanged (e.g. mtime-only touch)
+    if (base && await hashLocalFile(this.deps.localAdapter, this.deps.stateDB, path, stat, base) === base.localHash) return;
 
     // A real summary: its counters decide whether to notify the user, and processFile maintains them as in a full sync.
     const summary = this.deps.journal.newSummary();
@@ -302,11 +302,14 @@ export class WatchOperations {
   }
 
   private async deleteSingleFileLocked(path: string): Promise<void> {
-    // The full run may still be uploading a previously untracked file at this path.
-    if (this.deferStructure()) return;
     if (this.deps.isRenameHeld?.(path)) return;
-    const base = this.deps.stateDB.getFile(path);
-    if (!base) return; // not tracked, nothing to do on the remote
+    // The running scan may have already passed this file. Re-scan the final structure afterward
+    // instead of remembering a DELETE that might be stale if the path is recreated or moved.
+    if (this.deferStructure()) {
+      void this.deps.logger?.log(`watch: full sync in progress → queued structural follow-up for deletion of ${path}`);
+      return;
+    }
+    if (!this.deps.stateDB.getFile(path)) return;
     return this.deps.runNonFullSyncOperation(() => this.deleteSingleFileActive(path));
   }
 
@@ -390,7 +393,7 @@ export class WatchOperations {
   async deleteSingleFolder(path: string): Promise<void> {
     if (this.deps.hasRenameInFolder?.(path)) return;
     if (this.deps.isSystemExcluded(path) || this.deps.isPluginPath(path)) return;
-    if (this.skippedOnCellular('folder-delete', path)) return;
+    if (this.skippedOnCellular('folder-delete', path) || this.deferStructure()) return;
     if (this.deps.stateDB.getDir(path)) {
       await this.deps.logger?.log(`watch: folder removed locally; remote folder retained → ${path}`);
     }
@@ -409,8 +412,8 @@ export class WatchOperations {
     return true;
   }
 
-  // Called once the run has finished. The set is drained into a local copy first so re-entry cannot loop.
-  // Failures are per-path and already handled inside syncSingleFile.
+  // Consume a structural request before awaiting its scan so it cannot recursively request itself.
+  // Remove individual edits only when attempted, preserving the rest if the host stops or pauses.
   async drainPending(): Promise<void> {
     if (this.deps.isCancelled?.() || this.deps.isSyncRunning()) return;
     if (this.pendingStructure) {

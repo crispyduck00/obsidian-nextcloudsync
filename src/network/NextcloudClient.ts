@@ -108,12 +108,6 @@ function readJsonObject(res: RequestUrlResponse): Record<string, unknown> | null
   }
 }
 
-function reportUploadedEtag(response: RequestUrlResponse, callback?: (etag: string) => void): void {
-  if (!callback) return;
-  const etag = Object.entries(response.headers ?? {}).find(([name]) => name.toLowerCase() === 'etag')?.[1];
-  if (etag) callback(etag.replace(/"/g, ''));
-}
-
 export class NextcloudClient implements IWebDAVClient {
   private features: NextcloudFeatures | null = null;
   private readonly createdDirs = new RemoteDirCache();

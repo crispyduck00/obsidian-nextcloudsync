@@ -73,7 +73,6 @@ export class NextcloudSyncSettingTab extends PluginSettingTab implements Setting
     target[last] = value;
     await this.plugin.saveSettings();
     // Re-arm the auto-sync timer immediately so a new interval takes effect without a reload.
-    if (key === 'watchOnChangeEnabled') this.plugin.refreshWatchTiming();
     if (key === 'syncIntervalMinutes') this.plugin.applyAutoSyncInterval();
     if (key === 'useClientPush') {
       await this.plugin.applyClientPushSettings();

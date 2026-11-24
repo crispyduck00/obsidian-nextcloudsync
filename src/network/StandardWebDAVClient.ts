@@ -243,7 +243,7 @@ export class StandardWebDAVClient implements IWebDAVClient {
 
   async uploadFile(
     remotePath: string, data: ArrayBuffer, mtime?: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; onlyIfAbsent?: boolean; ctime?: number; onUploadedEtag?: (etag: string) => void },
+    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; onlyIfAbsent?: boolean; ctime?: number },
   ): Promise<void> {
     const headers: Record<string, string> = { Authorization: this.authHeader, ...NO_CACHE_HEADERS };
     if (mtime) headers['X-OC-MTime'] = String(Math.floor(mtime / 1000));
@@ -342,7 +342,7 @@ export class StandardWebDAVClient implements IWebDAVClient {
 
   async uploadChunked(
     _remotePath: string, _data: ArrayBuffer, _chunkSizeBytes: number,
-    _opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; mtime?: number; ctime?: number; onUploadedEtag?: (etag: string) => void },
+    _opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; mtime?: number; ctime?: number },
   ): Promise<void> {
     throw new FeatureUnsupportedError('chunked-upload');
   }

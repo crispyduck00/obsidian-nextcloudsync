@@ -1,5 +1,4 @@
 import { App, Notice, Platform, TFolder, apiVersion } from 'obsidian';
-import { hashLocalFile } from '../data/localSignature';
 import { CreationTimeAligner } from './ctime/CreationTimeAligner';
 import {
   DavSyncSettings,
@@ -39,6 +38,7 @@ import { RemoteListingSource, type FullScanListing } from './scan/RemoteListingS
 import { SyncJournal } from './session/SyncJournal';
 import { OversizeSkipNotifier } from './session/OversizeSkipNotifier';
 import { MergeBaseRecorder } from './session/MergeBaseRecorder';
+import { hashLocalFile } from '../data/localSignature';
 import { TransferService } from './transfer/TransferService';
 import { VersionService, VersionComparison } from './versions/VersionService';
 import { LineHistoryResult } from './versions/lineHistory';
@@ -133,11 +133,6 @@ interface SyncEngineOptions {
   pluginsAwaitingRestart?: Set<string>;
 }
 
-type PushRootState = StateDB & {
-  getRootListingGeneration?(): number;
-  getRemoteRootFileId?(): string | null;
-};
-
 export class SyncEngine {
   private autoSyncHandle: number | null = null;
   private lastSummary: SyncSessionSummary | null = null;
@@ -181,6 +176,7 @@ export class SyncEngine {
   private readonly activityGate = new SyncActivityGate();
   /** Resolves notify_push IDs and delegates only safe known-file work to the existing classifier. */
   private readonly remotePush: RemotePushReconciler;
+  /** Push-only observation. The ordinary sync cache is owned by StateDB. */
   private teamMountListing?: { client: IWebDAVClient; scope: string; root: RemoteRootInfo; ids: Set<string> };
   private observedPushRoot?: { etag: string; client: IWebDAVClient; scope: string; generation: number };
 
@@ -411,14 +407,14 @@ export class SyncEngine {
       connect: () => this.connection(),
       isRenameHeld: (p) => this.isPathHeld(p),
       hasRenameInFolder: (p) => this.hasRenameInFolder(p),
-      retryFileRename: (client, _source, destination) =>
-        this.retryPendingFileRenames(client, rename => rename.destination === destination),
-      isBlockedByWifiOnly: () => this.isBlockedByWifiOnly(),
-      isSyncRunning: () => this.isSyncRunning(),
       isCancelled: () => this.cancelled,
       reconcileStructure: async () => {
         if (!this.cancelled) await this.syncManualWithResult();
       },
+      retryFileRename: (client, _source, destination) =>
+        this.retryPendingFileRenames(client, rename => rename.destination === destination),
+      isBlockedByWifiOnly: () => this.isBlockedByWifiOnly(),
+      isSyncRunning: () => this.isSyncRunning(),
       runNonFullSyncOperation: (fn) => this.activityGate.runShared(fn),
       processFile: (remote, summary) => this.processFileWithRetry(remote, summary),
       queueRetry: (p) => { this.retryQueue.push(p); },
@@ -1178,7 +1174,6 @@ export class SyncEngine {
   }
 
   syncRememberedFileRename(oldPath: string, newPath: string): Promise<void> {
-    if (this.isSyncRunning()) return Promise.resolve();
     return this.watch.renameSingleFile(oldPath, newPath);
   }
 
@@ -1483,7 +1478,8 @@ export class SyncEngine {
       if (this.isPathHeld(path)) localFiles.delete(path);
     }
 
-    // Server-computed checksums (no download) let identical files count as unchanged rather than conflicts.
+    // On first contact Nextcloud may still advertise the checksum of a pre-restore version.
+    // Recalculate for equal-size overlaps only. Remote-only files already require a download.
     if (this.features?.isNextcloud) remoteFiles = remoteFiles.map(file => withTrustedChecksum(file, undefined, true));
     await this.remoteListing.resolveRemoteChecksums(client,
       remoteFiles.filter(file => localFiles.get(file.path)?.size === file.size && file.size <= MAX_HASH_SIZE), localFiles);
@@ -1869,8 +1865,8 @@ export class SyncEngine {
         this.opts.stateDB.setFile({
           ...base,
           remoteFileId: remote.fileId ?? base.remoteFileId,
-          isConflicted: keepConflict,
           remoteEtag: remote.etag ?? base.remoteEtag,
+          isConflicted: keepConflict,
           checkAfterFolderMove: undefined,
         });
       }
@@ -1879,7 +1875,7 @@ export class SyncEngine {
     }
 
     if (localChanged && !remoteChanged) {
-      await this.uploadOrConflict(remote, base, remoteId, idType, summary);
+      await this.uploadOrConflict(remote, base, remoteId, summary);
     } else if (!localChanged && remoteChanged) {
       if (this.deferIfBeingEdited(remote.path, 'download')) return;
       await this.downloadFile(remote, remoteId, idType, summary, { stat: localStat, hash: localStat ? localHash : undefined });
@@ -1891,15 +1887,15 @@ export class SyncEngine {
 
   // If-Match 412: the remote changed between PROPFIND and PUT, so treat it as a conflict instead of overwriting (docs/spec.md §6.5).
   private async uploadOrConflict(
-    remote: RemoteFileInfo, base: FileState | undefined,
-    remoteId: string, idType: FileState['idType'], summary: SyncSessionSummary,
+    remote: RemoteFileInfo, base: FileState | undefined, remoteId: string, summary: SyncSessionSummary,
   ): Promise<void> {
     try {
       if (!remote.etag && this.client!.inspectDirectory) {
         // Listings reconstructed from State hold the checksum but may omit the ETag.
         // Obtain a live revision before overwriting an existing file.
-        const current = await this.client!.statFile(remote.path);
-        if (!current?.etag) throw new Error('Nextcloud did not confirm the current file revision. Local changes were kept.');
+        const live = await this.client!.statFile(remote.path);
+        if (!live?.etag) throw new Error('Nextcloud did not confirm the current file revision. Local changes were kept.');
+        const current = withTrustedChecksum(live, base, this.features?.isNextcloud);
         const identity = remoteIdOf(current);
         if (identity.remoteId !== remoteId || (remote.fileId && current.fileId !== remote.fileId)) {
           await this.handleConflict(remote.path, base, current, identity.remoteId, identity.idType, summary);
@@ -1940,7 +1936,7 @@ export class SyncEngine {
         }
         return true;
       case 'upload':
-        await this.uploadOrConflict(remote, base, side.remoteId, side.idType, summary);
+        await this.uploadOrConflict(remote, base, side.remoteId, summary);
         return true;
       case 'hold':
         await this.handleConflict(remote.path, base, remote, side.remoteId, side.idType, summary);
@@ -2296,9 +2292,9 @@ export class SyncEngine {
       (path) => path,
       (path) => localFiles.get(path)?.size ?? 0,
       async (path) => {
+        const lf = localFiles.get(path);
+        if (!lf || this.isPathHeld(path)) return;
         try {
-          const lf = localFiles.get(path);
-          if (!lf || this.isPathHeld(path)) return;
           await this.uploadFile({
             path, fileId: null, checksum: null, etag: null, size: lf.size, lastModified: 0,
             creationTime: remoteMap.get(path)?.creationTime ?? 0,
@@ -2325,7 +2321,8 @@ export class SyncEngine {
       this.opts.stateDB.setFile({
         path, localHash: remote.checksum!, remoteId: remote.checksum!, idType: 'sha256',
         size: lf.size, mtime, remoteFileId: remote.fileId, isConflicted: false,
-        remoteEtag: remote.etag ?? undefined, localMtime: lf.mtime, localSize: lf.size, remoteMtime: remote.lastModified,
+        remoteEtag: remote.etag ?? undefined, remoteMtime: remote.lastModified,
+        localMtime: lf.mtime, localSize: lf.size,
       });
       await this.creationTime.align(this.client!, remote);
     }
