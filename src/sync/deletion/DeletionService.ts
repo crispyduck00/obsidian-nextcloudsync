@@ -70,8 +70,7 @@ export class DeletionService {
     }
     // Decide only from a real content hash: a SHA-256 match with the last synced base is the only proof the
     // server copy is unchanged.
-    const canInspect = 'inspectDirectory' in client && typeof client.inspectDirectory === 'function';
-    remote = withTrustedChecksum(remote, base, canInspect);
+    remote = withTrustedChecksum(remote, base, !!client.inspectDirectory);
     let serverHash = remote.checksum;
     if (!serverHash) {
       try { serverHash = await client.recalcChecksum(remote.path); } catch { serverHash = null; }
