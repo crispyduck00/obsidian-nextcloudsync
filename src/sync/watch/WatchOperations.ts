@@ -6,8 +6,8 @@
 //
 // Rules that run through all of it:
 //   Never run alongside a full sync. A multi-step resolve must not interleave with the full sync writing the
-//   same file. Edits are DEFERRED (re-evaluated when the run ends); deletions are DROPPED, since the running
-//   scan already propagates a tracked path that vanished locally and queuing one risks a second delete.
+//   same file. Edits are deferred until the run ends. Structural events request one fresh full scan
+//   because the current scan may already have passed the affected path.
 //   Stay silent unless the user has to know: only a failure or a genuine divergence raises a notice.
 //   Respect "Wi-Fi only": on cellular each operation does nothing, and the next full sync's scan picks the
 //   change up (docs/spec.md §5.7c).
@@ -49,6 +49,7 @@ export interface WatchDeps {
   deletion: DeletionService;
   resolution: Pick<ResolutionService, 'dropCleanSnapshot'>;
   isSystemExcluded(path: string): boolean;
+  reconcileStructure?(): Promise<void>;
   // Plugin files sync only in full runs; watch mode never handles them.
   isPluginPath(path: string): boolean;
   connect(): Promise<Connection>;
@@ -92,6 +93,7 @@ export class WatchOperations {
   // not dropped, since the full sync may already have passed that file). In memory only: losing them on reload is
   // harmless because the next full sync detects the same change, and persisting would add a second source of truth.
   private readonly pendingPaths = new Set<string>();
+  private pendingStructure = false;
 
   constructor(private readonly deps: WatchDeps) {}
 
@@ -206,14 +208,10 @@ export class WatchOperations {
   }
 
   private async deleteSingleFileLocked(path: string): Promise<void> {
+    // The full run may still be uploading a previously untracked file at this path.
+    if (this.deferStructure()) return;
     const base = this.deps.stateDB.getFile(path);
     if (!base) return; // not tracked, nothing to do on the remote
-    // During a full sync do nothing, and do NOT defer: the running scan propagates the deletion itself, so
-    // queuing it here would only risk a second delete.
-    if (this.deps.isSyncRunning()) {
-      void this.deps.logger?.log(`watch: full sync in progress → deletion of ${path} left to the running scan`);
-      return;
-    }
     return this.deps.runNonFullSyncOperation(() => this.deleteSingleFileActive(path));
   }
 
@@ -251,7 +249,9 @@ export class WatchOperations {
   }
 
   private async renameSingleFileLocked(oldPath: string, newPath: string): Promise<void> {
+    if (this.deferStructure()) return;
     return this.deps.runNonFullSyncOperation(async () => {
+      if (this.deferStructure()) return;
       await this.deps.connect();
       const rt = this.deps.renameTracker();
       this.begin();
@@ -269,8 +269,9 @@ export class WatchOperations {
   // MKCOL is idempotent (405 swallowed), which also makes it safe against a stray download-created-folder event.
   async createSingleFolder(path: string): Promise<void> {
     if (this.deps.isSystemExcluded(path) || this.deps.isPluginPath(path)) return;
-    if (this.skippedOnCellular('folder-create', path)) return;
+    if (this.skippedOnCellular('folder-create', path) || this.deferStructure()) return;
     return this.deps.runNonFullSyncOperation(async () => {
+      if (this.deferStructure()) return;
       const conn = await this.deps.connect();
       this.begin();
       try {
@@ -291,14 +292,10 @@ export class WatchOperations {
   async deleteSingleFolder(path: string): Promise<void> {
     if (this.deps.isSystemExcluded(path) || this.deps.isPluginPath(path)) return;
     if (this.skippedOnCellular('folder-delete', path)) return;
+    if (this.deferStructure()) return;
     if (!this.deps.stateDB.getDir(path)) return;
-    // Same rule as deleteSingleFile, and this is the loudest sink (a recursive collection DELETE): a running scan
-    // trashes folders itself and those trashes fire delete events, which must not become unproven DELETEs.
-    if (this.deps.isSyncRunning()) {
-      void this.deps.logger?.log(`watch: full sync in progress → folder deletion of ${path} left to the running scan`);
-      return;
-    }
     return this.deps.runNonFullSyncOperation(async () => {
+      if (this.deferStructure()) return;
       const conn = await this.deps.connect();
       this.begin();
       let succeeded = false;
@@ -322,8 +319,9 @@ export class WatchOperations {
   async renameSingleFolder(oldPath: string, newPath: string): Promise<void> {
     if (this.deps.isPluginPath(oldPath) || this.deps.isPluginPath(newPath)) return;
     if (this.deps.isSystemExcluded(oldPath) && this.deps.isSystemExcluded(newPath)) return;
-    if (this.skippedOnCellular('folder-rename', `${oldPath} → ${newPath}`)) return;
+    if (this.skippedOnCellular('folder-rename', `${oldPath} → ${newPath}`) || this.deferStructure()) return;
     return this.deps.runNonFullSyncOperation(async () => {
+      if (this.deferStructure()) return;
       const conn = await this.deps.connect();
       this.begin();
       try {
@@ -340,15 +338,26 @@ export class WatchOperations {
     });
   }
 
+  private deferStructure(): boolean {
+    if (!this.deps.isSyncRunning()) return false;
+    this.pendingStructure = true;
+    return true;
+  }
+
   // Called once the run has finished. The set is drained into a local copy first so re-entry cannot loop.
   // Failures are per-path and already handled inside syncSingleFile.
   async drainPending(): Promise<void> {
-    if (this.deps.isCancelled?.()) return;
+    if (this.deps.isCancelled?.() || this.deps.isSyncRunning()) return;
+    if (this.pendingStructure) {
+      this.pendingStructure = false;
+      await this.deps.reconcileStructure?.();
+    }
     if (this.pendingPaths.size === 0) return;
     const paths = [...this.pendingPaths];
-    this.pendingPaths.clear();
     void this.deps.logger?.log(`watch: full sync finished → re-evaluating ${paths.length} deferred path(s)`);
     for (const p of paths) {
+      if (this.deps.isCancelled?.() || this.deps.isSyncRunning()) return;
+      this.pendingPaths.delete(p);
       await this.syncSingleFile(p);
     }
   }

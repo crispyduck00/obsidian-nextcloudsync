@@ -22,3 +22,5 @@ The size-notice regression test now checks that a manual sync waits for active W
 TypeScript build checks, ESLint and the changed/added Nextcloud-independent tests run for this topic before integration. The combined tree additionally runs the full public suite and regression scenarios. Exact counts and toolchain are recorded in the integration validation document.
 
 Live Group Folder/internal-share, Nextcloud version-count and Windows/Android checks remain required for stable promotion. Existing 0.1.1 real-device tests are the preserved baseline; they are not claimed as tests of this new candidate.
+
+Watch structural events arriving after a full scan has inspected their path request one fresh ordinary scan when the run finishes. The follow-up rechecks current state, coalesces bursts, and preserves pending work through cancellation without replaying stale individual DELETE, MOVE or MKCOL requests.

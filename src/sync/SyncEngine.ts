@@ -308,6 +308,9 @@ export class SyncEngine {
       isBlockedByWifiOnly: () => this.isBlockedByWifiOnly(),
       isSyncRunning: () => this.isSyncRunning(),
       isCancelled: () => this.cancelled,
+      reconcileStructure: async () => {
+        if (!this.cancelled) await this.syncManual();
+      },
       runNonFullSyncOperation: (fn) => this.activityGate.runShared(fn),
       processFile: (remote, summary) => this.processFileWithRetry(remote, summary),
       queueRetry: (p) => { this.retryQueue.push(p); },
