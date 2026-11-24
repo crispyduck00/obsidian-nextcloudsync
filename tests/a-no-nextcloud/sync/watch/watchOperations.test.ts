@@ -382,6 +382,30 @@ describe('WatchOperations — the notification rule', () => {
   });
 });
 
+describe('WatchOperations — connection failure', () => {
+  const operations: Array<[string, (watch: WatchOperations) => Promise<void>]> = [
+    ['file edit', watch => watch.syncSingleFile('note.md')],
+    ['file removal', watch => watch.deleteSingleFile('note.md')],
+    ['file rename', watch => watch.renameSingleFile('note.md', 'Renamed.md')],
+    ['folder creation', watch => watch.createSingleFolder('New')],
+    ['folder removal', watch => watch.deleteSingleFolder('Old')],
+    ['folder rename', watch => watch.renameSingleFolder('Old', 'New')],
+  ];
+
+  it.each(operations)('contains a connection failure for %s without changing tracking', async (_operation, execute) => {
+    const { watch, calls } = build({ localContent: 'edited', base: tracked(), trackedDirs: ['Old'] }, {
+      connect: async () => { throw new NetworkError(0, 'unreachable', 'GET'); },
+    });
+
+    await expect(execute(watch)).resolves.toBeUndefined();
+    expect(calls.status.at(-1)).not.toBe('syncing');
+    expect(calls.saves).toBe(0);
+    expect(calls.setDir).toEqual([]);
+    expect(calls.deleteDir).toEqual([]);
+    expect(calls.deleteFile).toEqual([]);
+  });
+});
+
 describe('WatchOperations — the status bar', () => {
   it('shows activity for the duration of an operation and returns to idle', async () => {
     const { watch, calls } = build({ localContent: 'edited', base: tracked() });
