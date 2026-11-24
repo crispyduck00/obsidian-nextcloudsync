@@ -167,6 +167,20 @@ function build(o: Opts = {}, over: Partial<ConflictDeps> = {}) {
   };
 }
 
+it('keeps the server revision when an auto-created folder note is a prefix of the complete remote note', async () => {
+  const heading = '# Project\n';
+  const body = heading + '\nExisting notes\n';
+  const { applier, conn, calls, diskContent } = build({
+    local: { content: heading, mtime: 1000, size: heading.length }, remoteBody: body,
+  });
+  const remote = remoteInfo({ size: body.length });
+  await applier.handleConflict(conn, remote.path, undefined, remote, 'r1', 'etag', summary());
+  expect(diskContent()).toBe(body);
+  expect(calls.uploadMtime).toHaveLength(0);
+  expect(calls.setFile).toHaveLength(1);
+  expect(calls.setFile[0]).toMatchObject({ isConflicted: false, remoteEtag: remote.etag });
+});
+
 describe('ConflictApplier.handleConflict — the size guard', () => {
   it('skips the whole conflict when the remote is over the cap, and does NOT queue a retry [SPEC:OSN-1]', async () => {
     // Re-fetching would fail the same way every sync; raising the cap self-heals it instead.
