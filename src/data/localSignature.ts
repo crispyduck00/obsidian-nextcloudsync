@@ -44,3 +44,10 @@ export async function withLocalSignature(
   if (remoteMtime != null) fs.remoteMtime = remoteMtime;
   return fs;
 }
+
+export function invalidateLocalSignature(state: Pick<StateDB, 'getFile' | 'setFile'>, path: string): void {
+  const base = state.getFile(path);
+  if (base && (base.localMtime !== undefined || base.localSize !== undefined)) {
+    state.setFile({ ...base, localMtime: undefined, localSize: undefined });
+  }
+}

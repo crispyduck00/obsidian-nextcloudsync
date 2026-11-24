@@ -5,11 +5,11 @@
 // and the tracked remote file id — no Activity API or path-based author heuristics.
 // Restore also converges the remote identity and persisted common merge base.
 import { FileVersion, FeatureUnsupportedError, NextcloudFeatures } from '../../types';
-import { LocalAdapter } from '../../data/LocalAdapter';
+import { LocalAdapter, LocalFileChangedError } from '../../data/LocalAdapter';
 import { StateDB } from '../../data/StateDB';
 import { IWebDAVClient } from '../../network/IWebDAVClient';
 import { isSafeVaultRelativePath } from '../../network/remotePath';
-import { withLocalSignature } from '../../data/localSignature';
+import { invalidateLocalSignature } from '../../data/localSignature';
 import { sha256 } from '../../util/hash';
 import { LineHistoryResult, reconstructLineHistory, VersionSnapshot } from './lineHistory';
 import { chronologicalVersionTimeline } from './versionTimeline';
@@ -20,11 +20,12 @@ import type { MergeBaseRecorder } from '../session/MergeBaseRecorder';
 import { isAnomalousRemoteContent } from '../../util/limits';
 
 export interface VersionDeps {
-  localAdapter: Pick<LocalAdapter, 'stat' | 'atomicWriteBinary'>;
+  localAdapter: Pick<LocalAdapter, 'stat' | 'readBinary' | 'atomicWriteBinary'>;
   stateDB: Pick<StateDB, 'getFile' | 'setFile' | 'save' | 'setRemoteRootEtag'>;
   mergeBase?: Pick<MergeBaseRecorder, 'recordBytes'>;
   flushMergeBase?(): Promise<void>;
   isTextEligible?(path: string): boolean;
+  canApplyRestore?(path: string): boolean;
 }
 
 export interface VersionComparison {
@@ -42,7 +43,8 @@ export class VersionService {
    * current remote file. Nextcloud includes that current revision in the versions collection.
    */
   async listVersions(client: IWebDAVClient, features: NextcloudFeatures, path: string): Promise<FileVersion[]> {
-    const { fileId, current } = await this.verifyTarget(client, features, path);
+    const fileId = this.trackedFileId(features, path);
+    const current = await this.verifyTarget(client, path, fileId);
     const versions = (await client.listVersions(fileId)).map(version => ({ ...version, sourceFileId: fileId }));
     if (current.lastModified <= 0) return versions;
 
@@ -108,7 +110,8 @@ export class VersionService {
     if (!this.deps.isTextEligible?.(path)) {
       throw new Error('Version compare is available for text files only.');
     }
-    const { fileId } = await this.verifyTarget(client, features, path, [before, after]);
+    const fileId = this.trackedFileId(features, path);
+    await this.verifyTarget(client, path, fileId, [before, after]);
     const [beforeData, afterData] = await Promise.all([
       this.readVersionData(client, path, fileId, before),
       this.readVersionData(client, path, fileId, after),
@@ -132,7 +135,8 @@ export class VersionService {
     if (!this.deps.isTextEligible?.(path)) {
       throw new Error('Line history is available for text files only.');
     }
-    const { fileId } = await this.verifyTarget(client, features, path, [...listedVersions, targetVersion]);
+    const fileId = this.trackedFileId(features, path);
+    await this.verifyTarget(client, path, fileId, [...listedVersions, targetVersion]);
     const timeline = chronologicalVersionTimeline(listedVersions);
     const targetIndex = timeline.findIndex((version) =>
       version.versionId === targetVersion.versionId && version.isCurrent === targetVersion.isCurrent,
@@ -183,7 +187,8 @@ export class VersionService {
     if (!this.deps.isTextEligible?.(path)) {
       throw new Error('Version browser is available for text files only.');
     }
-    const { fileId } = await this.verifyTarget(client, features, path, [version]);
+    const fileId = this.trackedFileId(features, path);
+    await this.verifyTarget(client, path, fileId, [version]);
     const data = await this.readVersionData(client, path, fileId, version);
     return new TextDecoder().decode(data);
   }
@@ -193,37 +198,50 @@ export class VersionService {
     client: IWebDAVClient, features: NextcloudFeatures, path: string, version: FileVersion,
   ): Promise<void> {
     if (version.isCurrent || version.isCurrentRevisionAnchor) return;
-    const { fileId, current } = await this.verifyTarget(client, features, path, [version]);
+    const fileId = this.trackedFileId(features, path);
+    const canWrite = () => this.deps.canApplyRestore?.(path) !== false;
+    if (!canWrite()) throw new LocalFileChangedError(path);
+    const { localAdapter, stateDB } = this.deps;
+    const stat = await localAdapter.stat(path);
+    const hash = stat ? await sha256(await localAdapter.readBinary(path)) : undefined;
+    const current = await this.verifyTarget(client, path, fileId, [version]);
     if (!current.etag) throw new Error('Nextcloud did not supply a revision for the current file. Run Sync now and retry.');
 
-    this.deps.stateDB.setRemoteRootEtag(null);
+    stateDB.setRemoteRootEtag(null);
     await client.restoreVersion(version, fileId, { path, etag: current.etag });
     // GET and PROPFIND are separate requests: a concurrent remote edit must not pair one body's
     // hash with another version's ETag. Read a stable identity around GET, retry once, then fail
     // without replacing the local file. The next full scan recovers the changed remote tree.
     const { data, remote } = await this.readRestoredFile(client, path, fileId);
-
-    await this.deps.localAdapter.atomicWriteBinary(path, data);
-
-    // 3. Converge StateDB to the same identity model used by normal sync classification.
     const localHash = await sha256(data);
+
+    try {
+      await localAdapter.atomicWriteBinary(path, data, undefined, undefined, { stat, hash, canWrite });
+    } catch (err) {
+      if (!(err instanceof LocalFileChangedError)) throw err;
+      invalidateLocalSignature(stateDB, path);
+      await stateDB.save();
+      throw new Error(`Nextcloud restored the version, but the local edit was kept. ${err.message} Run Sync now.`, { cause: err });
+    }
+
+    // The next sync hashes the local file so an edit just after the commit cannot inherit this baseline.
     const { remoteId, idType } = remoteIdOf(remote);
-    const stat = await this.deps.localAdapter.stat(path);
-    this.deps.stateDB.setFile(await withLocalSignature(this.deps.localAdapter, {
+    stateDB.setFile({
       path,
       localHash,
       remoteId,
       idType,
-      size: remote.size || stat?.size || data.byteLength,
+      size: remote.size || data.byteLength,
       mtime: remote.lastModified || stat?.mtime || Date.now(),
+      remoteMtime: remote.lastModified,
       remoteFileId: remote.fileId ?? fileId,
       isConflicted: false,
-    }, remote.lastModified));
+    });
     this.deps.mergeBase?.recordBytes(path, data);
     // Persist the common base before the StateDB calls the restore converged. A crash must not
     // leave the old base paired with a newly saved restored baseline.
     await this.deps.flushMergeBase?.();
-    await this.deps.stateDB.save();
+    await stateDB.save();
   }
 
   private async readRestoredFile(
@@ -259,20 +277,24 @@ export class VersionService {
       : client.getVersionContent(version, fileId);
   }
 
-  // Account DAV can find a file ID after the object was moved out of the configured vault.
-  private async verifyTarget(
-    client: IWebDAVClient, features: NextcloudFeatures, path: string, versions: FileVersion[] = [],
-  ): Promise<{ fileId: string; current: RemoteFileInfo }> {
+  private trackedFileId(features: NextcloudFeatures, path: string): string {
     if (!features.isNextcloud || !features.hasAccountDav || !isSafeVaultRelativePath(path)) {
       throw new FeatureUnsupportedError('versions');
     }
     const fileId = this.deps.stateDB.getFile(path)?.remoteFileId;
     if (!fileId) throw new FeatureUnsupportedError('versions');
+    return fileId;
+  }
+
+  // Account DAV can find a file ID after the object was moved out of the configured vault.
+  private async verifyTarget(
+    client: IWebDAVClient, path: string, fileId: string, versions: FileVersion[] = [],
+  ): Promise<RemoteFileInfo> {
     const current = await client.statFile(path);
     if (current?.fileId !== fileId || versions.some(version => version.sourceFileId && version.sourceFileId !== fileId)) {
       this.deps.stateDB.setRemoteRootEtag(null);
       throw new Error('The file at this path has changed. Run Sync now and reopen version history.');
     }
-    return { fileId, current };
+    return current;
   }
 }

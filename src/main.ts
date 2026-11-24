@@ -351,13 +351,22 @@ export default class ObsidianNextcloudsync extends Plugin {
       );
       this.newFolderQueue = newFolderQueue;
 
-      this.registerEvent(this.app.workspace.on('editor-change', (_editor, info) => {
-        const path = info.file?.path;
-        if (path && !isPluginEvent(path) && !isOwnSyncEvent(path)) this.lastLocalEdit.set(path, Date.now());
+      const pendingEditorSaves = new WeakSet<TFile>();
+      this.registerEvent(this.app.workspace.on('editor-change', (_editor, { file }) => {
+        if (!file || isPluginEvent(file.path) || isInternalEventPath(file.path)) return;
+        this.lastLocalEdit.set(file.path, Date.now());
+        if (watchOn() && this.localAdapter?.shouldIgnore(file.path)) {
+          // The editor and the saved-file event can arrive in either order. An unchanged echo
+          // stops at the watcher's local content check, before any server request.
+          pendingEditorSaves.add(file);
+          queueDebouncedFile(file.path);
+        }
       }));
 
       this.registerEvent(this.app.vault.on('modify', (file: TAbstractFile) => {
-        if (!guard(file) || isPluginEvent(file.path) || isOwnSyncEvent(file.path)) return;
+        if (!guard(file) || isPluginEvent(file.path) || isInternalEventPath(file.path)) return;
+        const editorSave = pendingEditorSaves.delete(file);
+        if (!editorSave && this.localAdapter?.shouldIgnore(file.path)) return;
         this.lastLocalEdit.set(file.path, Date.now());
         queueDebouncedFile(file.path);
       }));
