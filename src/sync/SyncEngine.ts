@@ -1086,7 +1086,9 @@ export class SyncEngine {
     return this.canDeleteFromMissingFolder(parentDirOf(path), summary);
   }
 
-  private async canDeleteFromMissingFolder(folder: string, summary: SyncSessionSummary): Promise<boolean> {
+  private async canDeleteFromMissingFolder(
+    folder: string, summary: SyncSessionSummary, listedDirectoryId?: string,
+  ): Promise<boolean> {
     let missing: string | undefined;
     for (let parent = folder; parent; parent = parentDirOf(parent)) {
       const dir = this.opts.stateDB.getDir(parent);
@@ -1097,7 +1099,15 @@ export class SyncEngine {
       }
       missing = parent;
       const observed = this.observedFolderDeletes.get(parent);
-      if (observed?.fileId === dir.remoteFileId && observed.scope === this.fileRenameScope()) return true;
+      if (observed?.fileId === dir.remoteFileId && observed.scope === this.fileRenameScope()) {
+        // Record the verified missing descendant before a sibling download can recreate the
+        // ancestor locally. Subsequent file work still has to prove each individual deletion.
+        if (listedDirectoryId && parent !== folder
+            && this.opts.stateDB.getDir(folder)?.remoteFileId === listedDirectoryId) {
+          this.observedFolderDeletes.set(folder, { scope: observed.scope, fileId: listedDirectoryId });
+        }
+        return true;
+      }
     }
     if (!missing) return true;
     if (!summary.errors.some(error => error.path === missing)) {
@@ -1551,7 +1561,7 @@ export class SyncEngine {
         for (const dir of remoteDirs) {
           if (!dir.fileId || !trackedParents.has(dir.path) || local.has(dir.path) || isHeld(dir.path) || this.isRenameHeld(dir.path) || this.isSystemExcluded(dir.path)
             || this.opts.stateDB.getDir(dir.path)?.remoteFileId !== dir.fileId) continue;
-          if (!await this.canDeleteFromMissingFolder(dir.path, summary)) {
+          if (!await this.canDeleteFromMissingFolder(dir.path, summary, dir.fileId)) {
             missingLocally.add(dir.path);
           }
         }
