@@ -47,6 +47,7 @@ import { ConflictApplier } from './conflict/ConflictApplier';
 import { DirectoryReconciler } from './directory/DirectoryReconciler';
 import { WatchOperations } from './watch/WatchOperations';
 import { RemotePushReconciler, type RemoteBatchReconcileResult, type RemotePushBatch } from './push/RemotePushReconciler';
+import { matchesTrackedRemote } from './push/matchesTrackedRemote';
 import type { ClientPushScopeResult } from './push/PushSyncScheduler';
 import { MirrorService } from './mirror/MirrorService';
 import { SyncHistoryStore } from '../data/SyncHistoryStore';
@@ -111,6 +112,11 @@ interface SyncEngineOptions {
   pluginsAwaitingRestart?: Set<string>;
 }
 
+type PushRootState = StateDB & {
+  getRootListingGeneration?(): number;
+  getRemoteRootFileId?(): string | null;
+};
+
 export class SyncEngine {
   private autoSyncHandle: number | null = null;
   private lastSummary: SyncSessionSummary | null = null;
@@ -148,6 +154,7 @@ export class SyncEngine {
   /** Resolves notify_push IDs and delegates only safe known-file work to the existing classifier. */
   private readonly remotePush: RemotePushReconciler;
   private teamMountListing?: { client: IWebDAVClient; scope: string; root: RemoteRootInfo; ids: Set<string> };
+  private observedPushRoot?: { etag: string; client: IWebDAVClient; scope: string; generation: number | undefined };
 
   private readonly mirror: MirrorService;
   // Turns each session's over-the-size-limit skip tally into the one end-of-sync notice (docs/spec.md §9.4a).
@@ -441,6 +448,13 @@ export class SyncEngine {
     return isCellularBlocked(this.opts.settings.syncOnWifiOnly, Platform.isIosApp, conn?.type);
   }
 
+  /** Whether a new background sync operation may use the current network. */
+  canRunWatchSync(): boolean {
+    if (typeof navigator === 'undefined') return true;
+    if (navigator.onLine === false) return false;
+    return !this.isBlockedByWifiOnly();
+  }
+
   /** True while a full-vault sync session is running. Used by external trigger schedulers. */
   isSyncRunning(): boolean {
     return this.running;
@@ -453,9 +467,9 @@ export class SyncEngine {
    * context; this method never updates StateDB, so only a real full scan advances the authoritative
    * stored root ETag.
    */
-  async shouldReconcileClientPush(probeOnly?: true): Promise<ClientPushScopeResult> {
+  async shouldReconcileClientPush(_fileIds: readonly string[] = [], probeOnly?: true): Promise<ClientPushScopeResult> {
     const unknown: ClientPushScopeResult = probeOnly ? { kind: 'ignore' } : { kind: 'full-sync' };
-    if (probeOnly && (navigator.onLine === false || !this.opts.settings.useClientPush)) return unknown;
+    if (probeOnly && (!this.canRunWatchSync() || !this.opts.settings.useClientPush)) return unknown;
     // Preserve the existing Wi-Fi-only behavior without making a new network request on cellular.
     if (this.isBlockedByWifiOnly()) return unknown;
 
@@ -466,27 +480,37 @@ export class SyncEngine {
     if (!client || this.features?.isNextcloud !== true || !this.hasCurrentClientCredentials(password)) {
       return unknown;
     }
+    const scope = this.pushScopeKey();
 
     // A token-capable server can advance StateDB without a real full scan, while remoteRootEtag is
     // deliberately updated only by full scans. Avoid using a potentially stale baseline there.
     if (this.opts.stateDB.getSyncToken()) return unknown;
 
+    const db = this.opts.stateDB as PushRootState;
+    const fingerprint = db.getSyncScopeFingerprint?.();
+    if (fingerprint != null && fingerprint !== computeSyncScopeFingerprint(this.opts.settings)) return unknown;
     const listing = this.teamMountListing;
-    if (probeOnly && (!listing?.ids.size || listing.client !== client || listing.scope !== this.pushScopeKey())) return unknown;
-    const stored = this.opts.stateDB.getRemoteRootEtag() ?? (probeOnly ? listing?.root.etag : null);
-    if (stored == null) return unknown;
+    if (probeOnly && (!listing?.ids.size || listing.client !== client || listing.scope !== scope)) return unknown;
+    // The first sync may not yet have a stored ETag. Its own listing supplies a read-only baseline for this probe.
+    const stored = db.getRemoteRootEtag() ?? (probeOnly ? listing?.root.etag : null);
+    const generation = db.getRootListingGeneration?.();
+    const observed = this.observedPushRoot;
+    const observedEtag = observed?.client === client && observed.scope === scope && observed.generation === generation
+      ? observed.etag : null;
+    if (stored == null && observedEtag == null) return unknown;
 
     const root = client.getRootInfo
       ? await client.getRootInfo()
       : { etag: await client.getRootEtag(), fileId: null };
     // Capability and root information can go stale during a password change. Let the normal
     // sync path reconnect and establish the scope before using a targeted result.
-    if (root.etag == null || client !== this.client || !this.hasCurrentClientCredentials(password)
-      || (probeOnly && (root.fileId !== listing?.root.fileId || listing !== this.teamMountListing
-        || listing.scope !== this.pushScopeKey() || this.isBlockedByWifiOnly() || navigator.onLine === false))) {
+    const expectedRoot = db.getRemoteRootFileId?.() ?? (probeOnly ? listing?.root.fileId : null);
+    if (root.etag == null || (expectedRoot && root.fileId !== expectedRoot) || client !== this.client
+      || (probeOnly && listing !== this.teamMountListing)
+      || scope !== this.pushScopeKey() || generation !== db.getRootListingGeneration?.() || !this.hasCurrentClientCredentials(password)) {
       return unknown;
     }
-    if (root.etag !== stored) {
+    if (root.etag !== stored && root.etag !== observedEtag) {
       void this.opts.logger?.log(`client-push: vault root ETag changed (${stored} → ${root.etag}) → reconciliation required`);
       return { kind: 'targeted', rootFileId: root.fileId?.trim() || null, rootEtag: root.etag };
     }
@@ -502,6 +526,28 @@ export class SyncEngine {
 
   private pushScopeKey(): string {
     return JSON.stringify([this.pushAccountKey(), computeSyncScopeFingerprint(this.opts.settings), this.opts.settings.maxFileSizeMB]);
+  }
+
+  /** Read-only proof for unknown IDs, generic notifications and reconnect gaps after targeted sync. */
+  async verifyClientPushRoot(root: Extract<ClientPushScopeResult, { kind: 'targeted' }>): Promise<boolean> {
+    const client = this.client;
+    if (!client?.getRootInfo || !root.rootFileId || this.features?.isNextcloud !== true || this.isSyncRunning()
+      || !this.canRunWatchSync() || !this.hasCurrentClientCredentials(this.connectedPassword)) return false;
+    const db = this.opts.stateDB as PushRootState;
+    // A standalone Push topic keeps the ordinary full fallback until the root-listing guard is composed.
+    if (!db.getRootListingGeneration) return false;
+    if (db.getSyncToken() || db.getRemoteRootEtag() == null || this.retryQueue.length) return false;
+    const generation = db.getRootListingGeneration();
+    const scope = this.pushScopeKey();
+    const password = this.connectedPassword;
+    const [files, dirs] = await Promise.all([client.getFiles(''), client.getDirectories('')]);
+    const latest = await client.getRootInfo();
+    if (latest.etag !== root.rootEtag || latest.fileId !== root.rootFileId || client !== this.client
+      || this.isSyncRunning() || !this.canRunWatchSync() || generation !== db.getRootListingGeneration() || scope !== this.pushScopeKey()
+      || !this.hasCurrentClientCredentials(password) || this.retryQueue.length) return false;
+    if (!matchesTrackedRemote(files, dirs, this.rebuildRemoteFilesFromState(), this.rebuildRemoteDirsFromState(), path => this.isSystemExcluded(path))) return false;
+    this.observedPushRoot = { etag: root.rootEtag, client, scope, generation };
+    return true;
   }
 
   private hasCurrentClientCredentials(password: string | null): boolean {

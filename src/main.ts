@@ -674,7 +674,8 @@ export default class ObsidianNextcloudsync extends Plugin {
       isSyncRunning: () => this.syncEngine?.isSyncRunning() ?? false,
       canSync: () => !this.mirrorInProgress,
       canProbeTeamMount: () => !this.mirrorInProgress && !document.hidden && navigator.onLine !== false && this.pushClient?.getStatus().state === 'connected',
-      shouldSync: async (probeOnly) => this.syncEngine?.shouldReconcileClientPush(probeOnly) ?? true,
+      shouldSync: async (fileIds, probeOnly) => this.syncEngine?.shouldReconcileClientPush(fileIds, probeOnly) ?? true,
+      verifyRoot: async (root) => this.syncEngine?.verifyClientPushRoot(root) ?? false,
       onReconciliationTriggered: () => this.pushStatusItem?.pulse(),
       reconcileFileIds: async (batch) => {
         const engine = this.syncEngine;

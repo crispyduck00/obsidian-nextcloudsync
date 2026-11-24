@@ -8,6 +8,10 @@ Root scope is unchanged: unchanged root is ignored, changed root can select know
 
 Push uses the same live app-password source as WebDAV. A change restarts discovery and socket authentication with one credential, cancels the old attempt and preserves the existing reconnect catch-up. A missing secret parks Push without network retries. While the cached DAV connection belongs to an earlier password, the scope gate requests normal reconciliation so the engine can reconnect before trusting a root ETag or selecting file IDs.
 
+Push batches retain a two-second maximum initial wait and failed authoritative reconciliation backs off to at most one attempt per minute. A targeted batch covers only its file IDs. Generic, unknown, and reconnect hints require a separate complete-root proof before they can be discarded. A verified observation is scoped to its client, settings, and root-listing generation.
+
+The independent guarded-root reconciliation fix supplies the root-listing generation and optional root identity APIs. Before that fix is composed, this standalone topic uses the ordinary full fallback for an ambiguous root. Persistent rename intent is owned by its separate fix topic. Integration routes pushed IDs for held renames through the same authoritative fallback and retains their original conditional MOVE.
+
 ### Newly discovered Team Folders
 
 Nextcloud `notify_push` 1.4.2 caches a storage's recipient list for four to five minutes. A new Team Folder can initially have an empty or incomplete list. File edits made during that window can miss the other account's socket, and cache expiry alone does not replay them. For established mounts, file notifications use the usual Push path. [Recipient cache in notify_push 1.4.2](https://github.com/nextcloud/notify_push/blob/e393d172087e872fa88dc87baa39e6eb1bbde496/src/storage_mapping.rs#L32-L44)

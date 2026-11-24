@@ -56,13 +56,13 @@ describe('silent Team Folder probes', () => {
     const { engine, client, connect, getRootInfo, stateDB, onTeamMountDiscovered } = makeEngine();
     stateDB.getRemoteRootEtag.mockReturnValue(null);
     await connect();
-    await expect(engine.shouldReconcileClientPush(true)).resolves.toEqual({ kind: 'ignore' });
+    await expect(engine.shouldReconcileClientPush([], true)).resolves.toEqual({ kind: 'ignore' });
     expect(getRootInfo).not.toHaveBeenCalled();
 
     client.onTeamMountListing!(original, new Map([['', 'root-id']]));
-    await expect(engine.shouldReconcileClientPush(true)).resolves.toEqual({ kind: 'ignore' });
+    await expect(engine.shouldReconcileClientPush([], true)).resolves.toEqual({ kind: 'ignore' });
     getRootInfo.mockResolvedValue(changed);
-    await expect(engine.shouldReconcileClientPush(true)).resolves.toEqual({
+    await expect(engine.shouldReconcileClientPush([], true)).resolves.toEqual({
       kind: 'targeted', rootFileId: 'root-id', rootEtag: 'changed',
     });
     await expect(engine.shouldReconcileClientPush()).resolves.toEqual({ kind: 'full-sync' });
@@ -96,7 +96,7 @@ describe('silent Team Folder probes', () => {
     await engine.abortAndWait(); // the mirror dialog does this before obtaining its preview listing
     client.onTeamMountListing!(original, mounts);
     expect(onTeamMountDiscovered).not.toHaveBeenCalled();
-    await expect(engine.shouldReconcileClientPush(true)).resolves.toEqual({ kind: 'ignore' });
+    await expect(engine.shouldReconcileClientPush([], true)).resolves.toEqual({ kind: 'ignore' });
     expect(getRootInfo).not.toHaveBeenCalled();
 
     let finish!: (result: boolean) => void;
@@ -116,7 +116,7 @@ describe('silent Team Folder probes', () => {
     await connect();
     client.onTeamMountListing!(original, mounts);
     expect(onTeamMountDiscovered).not.toHaveBeenCalled();
-    await expect(engine.shouldReconcileClientPush(true)).resolves.toEqual({ kind: 'ignore' });
+    await expect(engine.shouldReconcileClientPush([], true)).resolves.toEqual({ kind: 'ignore' });
     expect(getRootInfo).not.toHaveBeenCalled();
 
     settings.excludedFolders = [];
@@ -124,7 +124,7 @@ describe('silent Team Folder probes', () => {
     client.onTeamMountListing!(original, new Map([['RenamedTeam', '42']]));
     expect(onTeamMountDiscovered).toHaveBeenCalledTimes(1);
     client.onTeamMountListing!(original, new Map());
-    await expect(engine.shouldReconcileClientPush(true)).resolves.toEqual({ kind: 'ignore' });
+    await expect(engine.shouldReconcileClientPush([], true)).resolves.toEqual({ kind: 'ignore' });
     expect(getRootInfo).not.toHaveBeenCalled();
     client.onTeamMountListing!(original, mounts);
     expect(onTeamMountDiscovered).toHaveBeenCalledTimes(2);
@@ -140,18 +140,71 @@ describe('silent Team Folder probes', () => {
       .mockResolvedValueOnce({ ...changed, fileId: 'replacement' })
       .mockImplementationOnce(async () => { settings.maxFileSizeMB++; return changed; });
     for (let i = 0; i < 3; i++) {
-      await expect(engine.shouldReconcileClientPush(true)).resolves.toEqual({ kind: 'ignore' });
+      await expect(engine.shouldReconcileClientPush([], true)).resolves.toEqual({ kind: 'ignore' });
     }
-    await expect(engine.shouldReconcileClientPush(true)).resolves.toEqual({ kind: 'ignore' });
+    await expect(engine.shouldReconcileClientPush([], true)).resolves.toEqual({ kind: 'ignore' });
     settings.maxFileSizeMB--;
     settings.username = 'another-account';
     client.onTeamMountListing!(original, mounts);
-    await expect(engine.shouldReconcileClientPush(true)).resolves.toEqual({ kind: 'ignore' });
+    await expect(engine.shouldReconcileClientPush([], true)).resolves.toEqual({ kind: 'ignore' });
     settings.username = DEFAULT_SETTINGS.username;
     stateDB.getSyncToken.mockReturnValueOnce('token');
-    await expect(engine.shouldReconcileClientPush(true)).resolves.toEqual({ kind: 'ignore' });
+    await expect(engine.shouldReconcileClientPush([], true)).resolves.toEqual({ kind: 'ignore' });
     setPassword('rotated-password');
-    await expect(engine.shouldReconcileClientPush(true)).resolves.toEqual({ kind: 'ignore' });
+    await expect(engine.shouldReconcileClientPush([], true)).resolves.toEqual({ kind: 'ignore' });
     expect(getRootInfo).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('whole-root proof composed with guarded root listings', () => {
+  const root = { kind: 'targeted' as const, rootFileId: 'root-id', rootEtag: 'changed' };
+  const file = { path: 'note.md', fileId: 'note-id', etag: 'note-etag', checksum: 'note-checksum', size: 5, lastModified: 10 };
+
+  test('uses the ordinary fallback when the independent root-listing guard is absent', async () => {
+    const { engine, client, connect, getRootInfo } = makeEngine();
+    const getFiles = jest.fn(async () => [file]);
+    Object.assign(client, { getFiles });
+    await connect();
+    await expect(engine.verifyClientPushRoot(root)).resolves.toBe(false);
+    expect(getFiles).not.toHaveBeenCalled();
+    expect(getRootInfo).not.toHaveBeenCalled();
+  });
+
+  test('certifies only the complete included remote view and invalidates after a listing generation change', async () => {
+    const { engine, client, connect, getRootInfo, stateDB } = makeEngine();
+    let generation = 0;
+    Object.assign(stateDB, { getRootListingGeneration: () => generation });
+    Object.assign(client, { getFiles: async () => [file], getDirectories: async () => [] });
+    const listing = engine as unknown as {
+      rebuildRemoteFilesFromState(): typeof file[];
+      rebuildRemoteDirsFromState(): [];
+    };
+    jest.spyOn(listing, 'rebuildRemoteFilesFromState').mockReturnValue([file]);
+    jest.spyOn(listing, 'rebuildRemoteDirsFromState').mockReturnValue([]);
+    getRootInfo.mockResolvedValue({ etag: root.rootEtag, fileId: root.rootFileId });
+    await connect();
+    await expect(engine.verifyClientPushRoot(root)).resolves.toBe(true);
+    await expect(engine.shouldReconcileClientPush()).resolves.toEqual({ kind: 'ignore' });
+    generation++;
+    await expect(engine.shouldReconcileClientPush()).resolves.toEqual(root);
+  });
+
+  test('rejects a partial view or a proof that races a root-listing invalidation', async () => {
+    const { engine, client, connect, getRootInfo, stateDB } = makeEngine();
+    let generation = 0;
+    Object.assign(stateDB, { getRootListingGeneration: () => generation });
+    const getFiles = jest.fn(async () => [] as typeof file[]);
+    Object.assign(client, { getFiles, getDirectories: async () => [] });
+    const listing = engine as unknown as {
+      rebuildRemoteFilesFromState(): typeof file[];
+      rebuildRemoteDirsFromState(): [];
+    };
+    jest.spyOn(listing, 'rebuildRemoteFilesFromState').mockReturnValue([file]);
+    jest.spyOn(listing, 'rebuildRemoteDirsFromState').mockReturnValue([]);
+    getRootInfo.mockResolvedValue({ etag: root.rootEtag, fileId: root.rootFileId });
+    await connect();
+    await expect(engine.verifyClientPushRoot(root)).resolves.toBe(false);
+    getFiles.mockImplementationOnce(async () => { generation++; return [file]; });
+    await expect(engine.verifyClientPushRoot(root)).resolves.toBe(false);
   });
 });

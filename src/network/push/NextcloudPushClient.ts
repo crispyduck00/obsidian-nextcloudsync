@@ -527,9 +527,12 @@ export function parseFileNotification(message: string): PushFileNotification | n
   try {
     const parsed = JSON.parse(payload) as unknown;
     if (!Array.isArray(parsed)) return { fileIds: null, raw: message };
-    const fileIds = parsed
-      .filter((id): id is string | number => typeof id === 'string' || typeof id === 'number')
-      .map(String);
+    const fileIds: string[] = [];
+    for (const id of parsed) {
+      if (typeof id === 'number' && Number.isSafeInteger(id) && id > 0) fileIds.push(String(id));
+      else if (typeof id === 'string' && id.trim()) fileIds.push(id.trim());
+      else return { fileIds: null, raw: message };
+    }
     return { fileIds, raw: message };
   } catch {
     // A malformed id payload still means the server told us "a file changed". Falling back to a
