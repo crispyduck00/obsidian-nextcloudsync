@@ -83,7 +83,7 @@ describe('[SPEC:WSF-5] SyncEngine.deleteSingleFile — C-2 deletion classificati
   });
 
   it('C-2 row 4: server checksum matches base — remote is deleted and tracking is dropped', async () => {
-    const stateDB = makeStateDB(fileState('Notes/synced.md', 'h1'));
+    const stateDB = makeStateDB({ ...fileState('Notes/synced.md', 'h1'), size: 3 });
     const localAdapter = makeLocalAdapter();
     const remote: RemoteFileInfo = {
       path: 'Notes/synced.md', fileId: 'f1', checksum: 'h1', etag: 'e1', size: 3, lastModified: 1,
@@ -116,7 +116,7 @@ describe('[SPEC:WSF-5] SyncEngine.deleteSingleFile — C-2 deletion classificati
     // The data-safety guarantee under test: the remote copy is NOT deleted...
     expect(deleteFile).not.toHaveBeenCalled();
     // ...its content is restored locally instead of letting the delete win...
-    expect(downloadFile).toHaveBeenCalledWith('Notes/edited-elsewhere.md');
+    expect(downloadFile).toHaveBeenCalledWith('Notes/edited-elsewhere.md', 'e2');
     expect(localAdapter.files['Notes/edited-elsewhere.md']).toBe(REMOTE_BODY);
     // ...and the file stays tracked (as a converged file, pointing at the restored content).
     expect(stateDB.deleteFile).not.toHaveBeenCalled();

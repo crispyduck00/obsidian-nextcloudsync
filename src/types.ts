@@ -186,6 +186,8 @@ export interface FileState {
   localSize?: number;
   /** Server `lastModified` at the last converged state, separate from `localMtime`. */
   remoteMtime?: number;
+  /** ETag of the converged remote revision, including when `remoteId` is a checksum. */
+  remoteEtag?: string;
   /** Verify local presence at a moved path before treating absence there as a deletion. */
   checkAfterFolderMove?: true;
   /**

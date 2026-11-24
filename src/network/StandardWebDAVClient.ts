@@ -209,8 +209,10 @@ export class StandardWebDAVClient implements IWebDAVClient {
     throw new SyncTokenExpiredError();
   }
 
-  async downloadFile(remotePath: string): Promise<ArrayBuffer> {
-    const res = await this.reqReadonly({ url: this.remoteUrl(remotePath), method: 'GET', headers: { Authorization: this.authHeader, ...NO_CACHE_HEADERS }, throw: false });
+  async downloadFile(remotePath: string, ifMatchEtag?: string): Promise<ArrayBuffer> {
+    const headers = { Authorization: this.authHeader, ...NO_CACHE_HEADERS,
+      ...(ifMatchEtag ? { 'If-Match': `"${ifMatchEtag.replace(/^"|"$/g, '')}"` } : {}) };
+    const res = await this.reqReadonly({ url: this.remoteUrl(remotePath), method: 'GET', headers, throw: false });
     if (res.status !== 200) throw new NetworkError(res.status, '', 'GET');
     return res.arrayBuffer;
   }

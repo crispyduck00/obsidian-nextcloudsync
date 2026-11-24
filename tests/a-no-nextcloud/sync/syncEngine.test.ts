@@ -175,7 +175,7 @@ describe('SyncEngine.handleConflict — strategy actions (feature 037)', () => {
     expect(arg.remoteId).toBe('rem-checksum');
     // Forced prefer-remote resolution must fetch through the shared client.downloadFile(), the single choke
     // point where NO_CACHE_HEADERS is applied (proven in noCacheHeaders.test.ts).
-    expect(h.client.downloadFile).toHaveBeenCalledWith('image.png');
+    expect(h.client.downloadFile).toHaveBeenCalledWith('image.png', 'etag-1');
   });
 
   it('latest-mtime → prefers the newer side (remote newer here → overwrites local)', async () => {
@@ -404,7 +404,7 @@ describe('SyncEngine.processRemoteFile — stale conflict-flag clearing', () => 
       }),
       readBinary: jest.fn(async () => new ArrayBuffer(0)),
     };
-    const stateDB = { getFile: jest.fn(() => base), setFile, getLastSyncTime: jest.fn(() => 0) };
+    const stateDB = { getFile: jest.fn(() => ({ remoteEtag: 'etag-1', ...base })), setFile, getLastSyncTime: jest.fn(() => 0) };
     const opts = {
       app: {}, settings: {}, localAdapter, stateDB,
       statusBar: {}, webdavFactory: {}, pluginDir: '', configDir: '.obsidian',
@@ -419,7 +419,7 @@ describe('SyncEngine.processRemoteFile — stale conflict-flag clearing', () => 
 
   it('clears a stale isConflicted flag when an unchanged file has converged', async () => {
     const base: FileState = {
-      path: 'note.md', localHash: 'lh', remoteId: 'same-checksum', idType: 'sha256',
+      path: 'note.md', localHash: 'same-checksum', remoteId: 'same-checksum', idType: 'sha256',
       size: 12, mtime: 1000, remoteFileId: 'fid-1', isConflicted: true,
       localMtime: 1000, localSize: 12,
     };
@@ -434,7 +434,7 @@ describe('SyncEngine.processRemoteFile — stale conflict-flag clearing', () => 
 
   it('keeps an unchanged marker-bearing file conflicted after the marker content has synced', async () => {
     const base: FileState = {
-      path: 'note.md', localHash: 'lh', remoteId: 'same-checksum', idType: 'sha256',
+      path: 'note.md', localHash: 'same-checksum', remoteId: 'same-checksum', idType: 'sha256',
       size: 12, mtime: 1000, remoteFileId: 'fid-1', isConflicted: true,
       localMtime: 1000, localSize: 12,
     };
@@ -452,7 +452,7 @@ describe('SyncEngine.processRemoteFile — stale conflict-flag clearing', () => 
 
   it('keeps the conflict flag when marker verification cannot read the local file', async () => {
     const base: FileState = {
-      path: 'note.md', localHash: 'lh', remoteId: 'same-checksum', idType: 'sha256',
+      path: 'note.md', localHash: 'same-checksum', remoteId: 'same-checksum', idType: 'sha256',
       size: 12, mtime: 1000, remoteFileId: 'fid-1', isConflicted: true,
       localMtime: 1000, localSize: 12,
     };
@@ -463,7 +463,7 @@ describe('SyncEngine.processRemoteFile — stale conflict-flag clearing', () => 
 
   it('does not write when an unchanged file was never conflicted', async () => {
     const base: FileState = {
-      path: 'note.md', localHash: 'lh', remoteId: 'same-checksum', idType: 'sha256',
+      path: 'note.md', localHash: 'same-checksum', remoteId: 'same-checksum', idType: 'sha256',
       size: 12, mtime: 1000, remoteFileId: 'fid-1', isConflicted: false,
       localMtime: 1000, localSize: 12,
     };
@@ -474,7 +474,7 @@ describe('SyncEngine.processRemoteFile — stale conflict-flag clearing', () => 
 
   it('refreshes a missing remoteFileId when an unchanged file has converged', async () => {
   const base: FileState = {
-    path: 'note.md', localHash: 'lh', remoteId: 'same-checksum', idType: 'sha256',
+    path: 'note.md', localHash: 'same-checksum', remoteId: 'same-checksum', idType: 'sha256',
     size: 12, mtime: 1000, remoteFileId: null, isConflicted: false,
     localMtime: 1000, localSize: 12,
   };
@@ -492,7 +492,7 @@ describe('SyncEngine.processRemoteFile — stale conflict-flag clearing', () => 
 
 it('refreshes a stale remoteFileId when an unchanged file has converged', async () => {
   const base: FileState = {
-    path: 'note.md', localHash: 'lh', remoteId: 'same-checksum', idType: 'sha256',
+    path: 'note.md', localHash: 'same-checksum', remoteId: 'same-checksum', idType: 'sha256',
     size: 12, mtime: 1000, remoteFileId: 'old-fid', isConflicted: false,
     localMtime: 1000, localSize: 12,
   };
@@ -510,7 +510,7 @@ it('refreshes a stale remoteFileId when an unchanged file has converged', async 
 
 it('does not discard a known remoteFileId when the current remote reports none', async () => {
   const base: FileState = {
-    path: 'note.md', localHash: 'lh', remoteId: 'same-checksum', idType: 'sha256',
+    path: 'note.md', localHash: 'same-checksum', remoteId: 'same-checksum', idType: 'sha256',
     size: 12, mtime: 1000, remoteFileId: 'fid-1', isConflicted: false,
     localMtime: 1000, localSize: 12,
   };

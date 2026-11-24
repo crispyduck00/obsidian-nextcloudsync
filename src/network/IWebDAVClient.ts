@@ -33,6 +33,8 @@ export interface UploadOptions {
   ctime?: number;
   /** Called only with an identity from the response to a successful conditional creation. */
   onCreatedFileId?: (fileId: string) => void;
+  /** ETag confirmed by the successful write response. */
+  onUploadedEtag?: (etag: string) => void;
 }
 
 export interface IWebDAVClient {
@@ -99,8 +101,8 @@ export interface IWebDAVClient {
   deleteCollection(path: string): Promise<void>;
   /** Changes since `syncToken`. @throws RemoteListingUnreadableError when a 207 body cannot be parsed (never an empty change set). */
   getChanges(syncToken: string): Promise<SyncChanges>;
-  /** Downloads a remote file and returns its bytes (returned, not stored in a field, so concurrent downloads cannot race). */
-  downloadFile(remotePath: string): Promise<ArrayBuffer>;
+  /** Read bytes from the listed revision when an ETag is supplied. A superseded revision fails with HTTP 412. */
+  downloadFile(remotePath: string, ifMatchEtag?: string): Promise<ArrayBuffer>;
   /**
    * Uploads via a single PUT.
    * @param mtime ms epoch; sent as X-OC-MTime so Nextcloud preserves the timestamp.

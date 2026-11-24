@@ -7,6 +7,7 @@ import { RemoteDirInfo, RemoteFileInfo } from '../types';
 export interface LocalFileEntry {
   path: string;
   hash: string;
+  knownRemoteHash?: string;
   // Local stat at plan time; apply refuses to mark a skipped file converged when it has changed since.
   size: number;
   mtime: number;
@@ -14,6 +15,7 @@ export interface LocalFileEntry {
 
 export interface SkippedFile {
   path: string;
+  hash?: string;
   size: number;
   mtime: number;
 }
@@ -80,9 +82,9 @@ export function buildMirrorPlan(
   const skipped: SkippedFile[] = [];
   for (const r of remoteEligible) {
     const local = localByPath.get(r.path);
-    // Skip only when a server checksum proves the content matches; anything else downloads (safe side).
-    if (local != null && r.checksum != null && r.checksum === local.hash) {
-      skipped.push({ path: r.path, size: local.size, mtime: local.mtime });
+    const remoteHash = r.checksum ?? local?.knownRemoteHash;
+    if (local && remoteHash && local.size === r.size && remoteHash === local.hash) {
+      skipped.push({ path: r.path, hash: local.hash, size: local.size, mtime: local.mtime });
     } else {
       downloads.push(r);
     }

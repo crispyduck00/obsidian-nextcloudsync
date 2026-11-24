@@ -2,9 +2,11 @@
 // sees no difference. Planning and applying are separate calls; a plan that could not be built reliably
 // returns `ok: false` with no actions, so a failed remote listing yields ZERO deletions.
 import { TFolder, Vault, App, normalizePath } from 'obsidian';
-import { FileState, RemoteFileInfo, RemoteDirInfo, SyncSessionSummary } from '../../types';
+import { RemoteFileInfo, RemoteDirInfo, SyncSessionSummary } from '../../types';
 import { buildMirrorPlan, MirrorPlan, MirrorResult, LocalFileEntry } from '../mirrorPlan';
 import { planStateConvergence, planDirConvergence, leftoverFileState } from './convergence';
+import { remoteIdOf, withTrustedChecksum } from '../remoteIdentity';
+import { convergedState } from '../identity/contentIdentity';
 import { LocalAdapter } from '../../data/LocalAdapter';
 import { StateDB } from '../../data/StateDB';
 import { IStatusBar } from '../../ui/StatusBarItem';
@@ -111,27 +113,37 @@ export class MirrorService {
       if (st) localStats.set(p, { size: st.size, mtime: st.mtime });
     }
 
-    // Server-computed checksums for files on both sides (no download). Without them, files put on the server
-    // by another tool carry none and are re-downloaded even when identical. Best-effort: unsupported servers
-    // leave null and those files fall back to download.
+    // An unobserved revision may advertise a previous version's checksum, including on a fresh device.
+    // Resolve only same-size candidates. A missing or different-sized local file needs the body anyway.
+    const knownHashes = new Map<string, string>();
+    remoteFiles = remoteFiles.map(remote => {
+      const base = this.deps.stateDB.getFile(remote.path);
+      const checked = withTrustedChecksum(remote, base, true);
+      if (!checked.checksum && base?.idType === 'etag' && !base.isConflicted && remote.etag === base.remoteId
+          && remote.size === base.size && remote.fileId === base.remoteFileId) {
+        knownHashes.set(remote.path, base.localHash);
+      }
+      return checked;
+    });
+    const comparable = remoteFiles.filter(r => localStats.get(r.path)?.size === r.size && !this.deps.isSystemExcluded(r.path));
     onPhase?.('Checking server checksums…');
-    await this.deps.remoteListing.resolveRemoteChecksums(client, remoteFiles, localStats);
+    await this.deps.remoteListing.resolveRemoteChecksums(client, comparable.filter(r => !knownHashes.has(r.path)), localStats);
 
     onPhase?.('Checking local files…');
     // Hash only when the remote counterpart has a checksum to compare against; otherwise it is downloaded anyway.
-    const remoteChecksum = new Map(remoteFiles.map((r) => [r.path, r.checksum] as const));
+    const remoteChecksum = new Map(comparable.map(r => [r.path, r.checksum ?? knownHashes.get(r.path)]));
     const localFiles: LocalFileEntry[] = [];
     for (const [path, st] of localStats) {
       let hash = '';
       const cs = remoteChecksum.get(path);
-      if (cs != null && !this.deps.isSystemExcluded(path)) {
+      if (cs != null) {
         try {
           hash = await sha256(await this.deps.localAdapter.readBinary(path));
         } catch {
           hash = '';
         }
       }
-      localFiles.push({ path, hash, size: st.size, mtime: st.mtime });
+      localFiles.push({ path, hash, knownRemoteHash: knownHashes.get(path), size: st.size, mtime: st.mtime });
     }
 
     // Empty folders included, for local-only folder deletion.
@@ -228,11 +240,8 @@ export class MirrorService {
           leftoverFiles,
         );
         const plannedByPath = new Map(plan.skipped.map((s) => [s.path, s] as const));
-        // Skipped files (content already matched) never ran downloadFile; track them as unchanged
-        // (localHash === remoteId), else the next sync reads them as a conflict.
+        // Record the compared bytes and their remote revision for files that did not need a download.
         for (const remote of toTrack) {
-          const remoteId = remote.checksum ?? remote.etag ?? String(remote.size);
-          const idType: FileState['idType'] = remote.checksum ? 'sha256' : (remote.etag ? 'etag' : 'size');
           // A file that changed after the plan was built must not be marked converged: the next sync decides.
           const planned = plannedByPath.get(remote.path);
           const nowStat = await this.deps.localAdapter.stat(remote.path);
@@ -241,12 +250,12 @@ export class MirrorService {
             continue;
           }
           const existing = this.deps.stateDB.getFile(remote.path);
-          const localHash = remote.checksum ?? existing?.localHash ?? remoteId;
-          this.deps.stateDB.setFile(await withLocalSignature(this.deps.localAdapter, {
-            path: remote.path, localHash, remoteId, idType,
-            size: remote.size, mtime: remote.lastModified || (existing?.mtime ?? 0),
-            remoteFileId: remote.fileId, isConflicted: false,
-          }, remote.lastModified));
+          const hash = planned.hash ?? remote.checksum;
+          if (!hash) continue;
+          this.deps.stateDB.setFile({
+            ...convergedState(remote, hash, nowStat, existing),
+            localSize: nowStat.size, localMtime: nowStat.mtime, remoteMtime: remote.lastModified,
+          });
         }
         // Also clears entries whose local file was already absent but still tracked.
         for (const path of toDrop) {
@@ -313,8 +322,7 @@ export class MirrorService {
     const eligible = plan.downloads.filter((d) => !this.deps.isSystemExcluded(d.path));
     const { rest, manifests } = partitionPluginManifestsLast(eligible, (d) => d.path, this.deps.app.vault.configDir);
     for (const remote of [...rest, ...manifests]) {
-      const remoteId = remote.checksum ?? remote.etag ?? String(remote.size);
-      const idType: FileState['idType'] = remote.checksum ? 'sha256' : (remote.etag ? 'etag' : 'size');
+      const { remoteId, idType } = remoteIdOf(remote);
       try {
         const before = summary.downloadedCount;
         await this.deps.transfer.downloadFile(client, remote, remoteId, idType, summary);

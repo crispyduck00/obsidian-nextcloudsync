@@ -6,6 +6,8 @@ const ATTACHMENT = 'attachment.bin';
 const TRACKED = 'unrelated.md';
 
 function useNextcloudRoot(w: World): void {
+  const synced = w.stateDB.getFile(TRACKED)!;
+  w.stateDB.setFile({ ...synced, remoteEtag: `"${synced.remoteId}"` });
   w.client.getRootEtag.mockResolvedValue(ROOT);
   w.client.getFiles.mockImplementation(async () => (await w.listing()).map(file => ({
     ...file, etag: `"${file.checksum}"`,

@@ -207,11 +207,11 @@ async function buildEngine(
 // Records `path` as converged: the recorded hash matches the body on disk, and the stat signature
 // matches what the vault double reports. Both matter — the signature keeps the file out of the upload
 // pass, and the hash is what every deletion decision is proved against.
-async function track(stateDB: StateDB, path: string, body: string): Promise<FileState> {
+async function track(stateDB: StateDB, path: string, body: string, remoteEtag?: string): Promise<FileState> {
   const hash = await sha256(toBuf(body));
   const size = enc.encode(body).length;
   const fs: FileState = {
-    path, localHash: hash, remoteId: hash, idType: 'sha256',
+    path, localHash: hash, remoteId: hash, idType: 'sha256', remoteEtag,
     size, mtime: BASE_MTIME, remoteFileId: `fid-${path}`, isConflicted: false,
     localMtime: BASE_MTIME, localSize: size, remoteMtime: BASE_MTIME,
   };
@@ -280,7 +280,7 @@ describe('Missing shared folders and concurrent directory changes', () => {
     const inspectDirectory = jest.fn(async () => ({ protected: true, fileId: 'dir-Shared' }));
     const moveFile = jest.fn();
     Object.assign(h.client, { inspectDirectory, moveFile });
-    await track(h.stateDB, note.path, 'a');
+    await track(h.stateDB, note.path, 'a', note.etag);
     trackDir(h.stateDB, 'Shared');
 
     if (operation === 'sync') await h.sync();
@@ -304,7 +304,7 @@ describe('Missing shared folders and concurrent directory changes', () => {
     const h = await buildEngine({}, ['Shared'], world({ listing: [note], dirs: [remoteDir('Shared')], stat: () => note }));
     const inspectDirectory = jest.fn(async () => ({ protected: true, fileId: 'dir-Shared' }));
     Object.assign(h.client, { inspectDirectory });
-    await track(h.stateDB, note.path, 'a');
+    await track(h.stateDB, note.path, 'a', note.etag);
     trackDir(h.stateDB, 'Shared');
 
     await h.engine.deleteSingleFile(note.path);
@@ -318,7 +318,7 @@ describe('Missing shared folders and concurrent directory changes', () => {
     const h = await buildEngine({}, ['Shared'], world({ stat: () => note }));
     Object.assign(h.app.vault.adapter, { stat: async () => null });
     Object.assign(h.client, { inspectDirectory: async () => ({ protected: true, fileId: 'dir-Shared' }) });
-    await track(h.stateDB, note.path, 'a');
+    await track(h.stateDB, note.path, 'a', note.etag);
     trackDir(h.stateDB, 'Shared');
 
     await h.engine.deleteSingleFile(note.path);
@@ -633,7 +633,7 @@ describe('[SPEC:GDP-23] a path the server has EDITED is not a deletion at all', 
 
     const summary = await h.sync();
 
-    expect(h.client.downloadFile).toHaveBeenCalledWith(path);
+    expect(h.client.downloadFile).toHaveBeenCalledWith(path, remote.etag ?? undefined);
     expect(h.client.deleteFile).not.toHaveBeenCalled();
     expect(h.client.uploadFile).not.toHaveBeenCalled();
     expect(h.vault[path]).toBe('new local draft');

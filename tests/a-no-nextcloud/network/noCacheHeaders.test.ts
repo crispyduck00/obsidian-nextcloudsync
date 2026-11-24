@@ -27,6 +27,13 @@ describe('NO_CACHE_HEADERS', () => {
 describe('downloadFile requestUrl headers (no-cache)', () => {
   beforeEach(() => mockRequestUrl.mockReset());
 
+  it.each([NextcloudClient, StandardWebDAVClient])('rejects a superseded revision without returning bytes', async Client => {
+    mockRequestUrl.mockReturnValueOnce(res(412));
+    const client = new Client(settings, () => 'app-pw', 'Vault');
+    await expect(client.downloadFile('note.md', '"observed"')).rejects.toMatchObject({ status: 412, method: 'GET' });
+    expect(mockRequestUrl.mock.calls[0][0].headers).toMatchObject({ 'If-Match': '"observed"', ...NO_CACHE_HEADERS });
+  });
+
   it('NextcloudClient.downloadFile sends Cache-Control: no-store and Pragma: no-cache', async () => {
     mockRequestUrl.mockReturnValueOnce(res(200, { arrayBuffer: new TextEncoder().encode('hello').buffer }));
     const client = new NextcloudClient(settings, () => 'app-pw', 'Vault');
