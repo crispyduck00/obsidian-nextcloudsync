@@ -9,7 +9,7 @@ import { IWebDAVClient } from '../../network/IWebDAVClient';
 import { IUploadStrategy } from '../upload/IUploadStrategy';
 import { SyncJournal } from '../session/SyncJournal';
 import { MergeBaseRecorder } from '../session/MergeBaseRecorder';
-import { withLocalSignature } from '../../data/localSignature';
+import { localReadSignature, withLocalSignature } from '../../data/localSignature';
 import { FileLogger } from '../../util/FileLogger';
 import { FIXED } from '../../util/fixedSyncConfig';
 import { isAnomalousRemoteContent, isOverFileSizeLimit } from '../../util/limits';
@@ -51,14 +51,17 @@ export class TransferService {
 
   async uploadFile(
     client: IWebDAVClient, uploadStrategy: IUploadStrategy,
-    path: string, localHash: string, remoteId: string,
-    idType: FileState['idType'], remote: RemoteFileInfo,
+    remote: RemoteFileInfo,
     summary: SyncSessionSummary,
   ): Promise<void> {
+    const { path } = remote;
     const stat = await this.deps.localAdapter.stat(path);
     if (!stat) return;
 
+    const observedAt = Date.now();
     const data = await this.deps.localAdapter.readBinary(path);
+    const signature = localReadSignature(stat, observedAt, data.byteLength);
+    const localHash = await sha256(data);
 
     // A path locked by someone else is skipped and queued for retry.
     let token: string | null;
@@ -77,7 +80,7 @@ export class TransferService {
       // If-Match with the known remote etag makes a remote changed since our baseline return 412
       // (PreconditionFailedError, a conflict). New local files carry a null etag, so no precondition.
       outcome = await uploadStrategy.upload(client, path, data, stat.mtime, {
-        ifMatchEtag: remote.etag,
+        ifMatchEtag: remote.etag, precomputedSha256: localHash,
         ctime: uploadCreationTimeMs(stat.ctime, remote.creationTime),
       });
     } finally {
@@ -111,14 +114,16 @@ export class TransferService {
     }
     this.deps.journal.recordHistory(path, 'uploaded', undefined, {
       localHash, remoteId: uploadedRemoteId, remoteIdType: uploadedIdType,
-      localSize: stat.size, remoteSize: remote.size,
+      localSize: data.byteLength, remoteSize: remote.size,
     });
 
-    this.deps.stateDB.setFile(await withLocalSignature(this.deps.localAdapter, {
+    // The returned PUT can race the next local edit. Keep the signature from before reading its body.
+    this.deps.stateDB.setFile({
       path, localHash, remoteId: uploadedRemoteId, idType: uploadedIdType,
-      size: stat.size, mtime: stat.mtime,
+      size: data.byteLength, mtime: stat.mtime, ...signature,
       remoteFileId: remote.fileId, isConflicted: false,
-    }, remote.lastModified));
+      remoteMtime: remote.lastModified,
+    });
     // The remote now equals the uploaded body, so it is the new merge base.
     this.deps.mergeBase.recordBytes(path, data);
   }

@@ -62,7 +62,7 @@ describe('SyncEngine first upload creation time (executePlan, C4)', () => {
     const args = upload.mock.calls[0] as unknown as unknown[];
     expect(args[1]).toBe(PATH);
     expect(args[3]).toBe(MTIME);
-    expect(args[4]).toEqual({ precomputedSha256: expect.any(String), ctime: LOCAL_CTIME });
+    expect(args[4]).toEqual({ ifMatchEtag: null, precomputedSha256: expect.any(String), ctime: LOCAL_CTIME });
   });
 
   it(`${spec('CT-4')} sends the ctime on a readOnly platform as well`, async () => {
@@ -99,7 +99,7 @@ describe('SyncEngine first upload creation time (executePlan, C4)', () => {
 describe('SyncEngine new local file creation time (processLocalModifications, C6)', () => {
   it(`${spec('CT-4')} passes a synthetic remote with creationTime 0 and uploads the local ctime`, async () => {
     const { upload, uploadFile } = await runNewLocalFile('settable');
-    const remoteArg = uploadFile.mock.calls[0][4] as RemoteFileInfo;
+    const remoteArg = uploadFile.mock.calls[0][0] as RemoteFileInfo;
     expect(remoteArg.creationTime).toBe(0);
     expect(upload).toHaveBeenCalledTimes(1);
     expect((upload.mock.calls[0] as unknown as unknown[])[4]).toMatchObject({ ctime: LOCAL_CTIME });
