@@ -77,7 +77,7 @@ export interface IWebDAVClient {
   /** Retrieves the content of the given version. */
   getVersionContent(version: FileVersion, fileId: string): Promise<ArrayBuffer>;
   /** Restores the given version as the current file (MOVE restore). */
-  restoreVersion(version: FileVersion, fileId: string): Promise<void>;
+  restoreVersion(version: FileVersion, fileId: string, target?: { path: string; etag: string }): Promise<void>;
 
   /**
    * Uploads in chunks; the file appears atomically at the final path.
