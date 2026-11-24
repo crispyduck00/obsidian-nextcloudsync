@@ -30,6 +30,32 @@ function observePush(device: Device) {
 }
 
 describeLive('Client Push vault scope and ETag against Nextcloud', getEnv => {
+  it('handles the push echo for a newly uploaded note through its confirmed file ID', async () => {
+    const env = getEnv();
+    const { client: writer, ws } = await setupWorkspace(env);
+    const device = makeDevice(env, ws.remoteBase, 'own-first-upload');
+    const { scheduler, targeted, verifyRoot, sync } = observePush(device);
+    try {
+      await writer.uploadFile('Existing.md', textBuf('baseline'));
+      await device.sync();
+      await device.sync();
+      device.vault.seedLocal('New.md', '# New\n');
+      await device.engine.syncSingleFile('New.md');
+      const remote = await writer.statFile('New.md');
+      expect(remote?.fileId).toBeTruthy();
+      expect(device.stateDB.getFile('New.md')?.remoteFileId).toBe(remote?.fileId);
+
+      scheduler.notify(parseFileNotification(`notify_file_id ["${remote?.fileId}"]`)!);
+      await waitUntil(() => scheduler.getStatus().lastTriggeredSyncAt !== null, 'first upload echo did not settle');
+      expect(targeted).toHaveBeenCalledTimes(1);
+      expect(verifyRoot).not.toHaveBeenCalled();
+      expect(sync).not.toHaveBeenCalled();
+    } finally {
+      scheduler.stop();
+      await cleanupWorkspace(writer, ws);
+    }
+  });
+
   it.each(['new file ID', 'generic', 'reconnect'])('preserves a second pending server change after a targeted edit at the same ETag (%s)', async hint => {
     const env = getEnv();
     const { client: writer, ws } = await setupWorkspace(env);

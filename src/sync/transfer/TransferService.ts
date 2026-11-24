@@ -103,13 +103,21 @@ export class TransferService {
     // plain WebDAV the next PROPFIND yields an ETag, so ask the server and record that instead.
     let uploadedRemoteId = localHash;
     let uploadedIdType: FileState['idType'] = 'sha256';
-    if (!this.deps.clientReportsChecksums()) {
-      // A failed or empty stat keeps the sha256 values on purpose: recording nothing would strand the baseline
-      // and the next sync would see BOTH sides changed (a conflict over the user's file). The cost is one
-      // redundant download, after which the real remote id is recorded.
+    let uploadedFileId = remote.fileId;
+    let uploadedRemoteMtime = remote.lastModified;
+    const reportsChecksums = this.deps.clientReportsChecksums();
+    if (!reportsChecksums || (onlyIfAbsent && !uploadedFileId)) {
       try {
         const fresh = await client.statFile(path);
-        if (fresh) ({ remoteId: uploadedRemoteId, idType: uploadedIdType } = remoteIdOf(fresh));
+        if (fresh && !reportsChecksums) {
+          // Plain WebDAV tracks the server's ETag. On a failed stat keep the SHA-256 baseline.
+          ({ remoteId: uploadedRemoteId, idType: uploadedIdType } = remoteIdOf(fresh));
+        } else if (fresh?.fileId && fresh.checksum === localHash) {
+          // A new Nextcloud file gets its ID on the server. Only index the ID if the stat
+          // still describes the uploaded bytes; a peer may already have replaced the path.
+          uploadedFileId = fresh.fileId;
+          uploadedRemoteMtime = fresh.lastModified;
+        }
       } catch (err) {
         void this.deps.logger?.log(`upload: could not re-read ${path} after upload — ${(err as Error).message}`);
       }
@@ -122,8 +130,8 @@ export class TransferService {
     this.deps.stateDB.setFile(await withLocalSignature(this.deps.localAdapter, {
       path, localHash, remoteId: uploadedRemoteId, idType: uploadedIdType,
       size: stat.size, mtime: stat.mtime,
-      remoteFileId: remote.fileId, isConflicted: false,
-    }, remote.lastModified));
+      remoteFileId: uploadedFileId, isConflicted: false,
+    }, uploadedRemoteMtime));
     // The remote now equals the uploaded body, so it is the new merge base.
     this.deps.mergeBase.recordBytes(path, data);
   }
