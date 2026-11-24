@@ -28,6 +28,7 @@ export interface SettingDefinitionsHost {
   vaultName: string;
   syncTargetUrl(): string;
 
+  refreshWatchTiming?(): void;
   runSyncNow(): unknown;
   runRemoteMirror(): unknown;
   resetVaultIndex(): unknown;
@@ -83,6 +84,7 @@ export const RENDER_ONLY_ROWS = {
     'syncIntervalMinutes',
     'networkTimeoutSeconds',
     'networkConcurrency',
+    'watchDebounceSeconds',
     'maxFileSizeMB',
     'excludedFolders',         // list plus an add row with its own folder picker
     'autoMergeFileTypes',      // string[] shown comma-joined; needs a parse/format round-trip
@@ -298,6 +300,16 @@ function syncGroup(host: SettingDefinitionsHost): SettingDefinitionGroup {
       aliases: ['watch', 'auto sync', 'realtime', 'live', 'on save'],
       control: { type: 'toggle', key: 'watchOnChangeEnabled' },
     },
+    slider(
+      host,
+      'Watch delay after an edit (seconds)',
+      'Wait this long after the last change to each file before Sync on file change uploads it.',
+      ['debounce', 'delay', 'watch'],
+      SLIDER_LIMITS.watchDebounce,
+      () => s.watchDebounceSeconds,
+      (v) => { s.watchDebounceSeconds = v; },
+      () => host.refreshWatchTiming?.(),
+    ),
     slider(
       host,
       'Maximum file size (MB)',
