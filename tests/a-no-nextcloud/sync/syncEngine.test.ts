@@ -175,7 +175,7 @@ describe('SyncEngine.handleConflict — strategy actions (feature 037)', () => {
     expect(arg.remoteId).toBe('rem-checksum');
     // Forced prefer-remote resolution must fetch through the shared client.downloadFile(), the single choke
     // point where NO_CACHE_HEADERS is applied (proven in noCacheHeaders.test.ts).
-    expect(h.client.downloadFile).toHaveBeenCalledWith('image.png');
+    expect(h.client.downloadFile).toHaveBeenCalledWith('image.png', 'etag-1');
   });
 
   it('latest-mtime → prefers the newer side (remote newer here → overwrites local)', async () => {
@@ -419,7 +419,7 @@ describe('SyncEngine.processRemoteFile — stale conflict-flag clearing', () => 
 
   it('clears a stale isConflicted flag when an unchanged file has converged', async () => {
     const base: FileState = {
-      path: 'note.md', localHash: 'lh', remoteId: 'same-checksum', idType: 'sha256',
+      path: 'note.md', localHash: 'same-checksum', remoteId: 'same-checksum', idType: 'sha256',
       size: 12, mtime: 1000, remoteFileId: 'fid-1', isConflicted: true,
       localMtime: 1000, localSize: 12,
     };
@@ -463,9 +463,9 @@ describe('SyncEngine.processRemoteFile — stale conflict-flag clearing', () => 
 
   it('does not write when an unchanged file was never conflicted', async () => {
     const base: FileState = {
-      path: 'note.md', localHash: 'lh', remoteId: 'same-checksum', idType: 'sha256',
+      path: 'note.md', localHash: 'same-checksum', remoteId: 'same-checksum', idType: 'sha256',
       size: 12, mtime: 1000, remoteFileId: 'fid-1', isConflicted: false,
-      localMtime: 1000, localSize: 12,
+      localMtime: 1000, localSize: 12, remoteEtag: 'etag-1',
     };
     const h = buildHarness(base);
     await h.invoke(makeSummary());

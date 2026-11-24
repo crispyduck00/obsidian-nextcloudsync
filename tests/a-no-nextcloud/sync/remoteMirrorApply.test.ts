@@ -288,7 +288,7 @@ describe('[SPEC:MIR-5] applyRemoteMirror — a skipped file changed since the pl
   const skippedPlan = () => plan({
     skipCount: 1,
     skipped: [{ path: 'a.md', size: 1, mtime: 0 }],
-    remoteFiles: [remote('a.md', 'remote-hash')],
+    remoteFiles: [{ ...remote('a.md', 'remote-hash'), etag: 'current' }],
   });
 
   it('[SPEC:MIR-5] leaves the tracked state untouched when the current stat differs', async () => {
@@ -299,6 +299,15 @@ describe('[SPEC:MIR-5] applyRemoteMirror — a skipped file changed since the pl
     expect(store.get('a.md')).toEqual(before);
   });
 
+  it('preserves ETag identity when a previous download proved a read-only revision', async () => {
+    const { engine, store } = makeEngine({ tracked: [], localFiles: ['a.md'] });
+    await engine.applyRemoteMirror(plan({
+      skipCount: 1, skipped: [{ path: 'a.md', hash: 'actual-bytes', size: 1, mtime: 0 }],
+      remoteFiles: [{ ...remote('a.md', ''), etag: 'current', checksum: null }],
+    }));
+    expect(store.get('a.md')).toMatchObject({ localHash: 'actual-bytes', remoteId: 'current', idType: 'etag', remoteEtag: 'current' });
+  });
+
   it('[SPEC:MIR-5] records the file as converged when the current stat matches the plan', async () => {
     const stat = jest.fn(async () => ({ size: 1, mtime: 0 }));
     const { engine, store } = makeEngine({
@@ -307,6 +316,7 @@ describe('[SPEC:MIR-5] applyRemoteMirror — a skipped file changed since the pl
     await engine.applyRemoteMirror(skippedPlan());
     const a = store.get('a.md')!;
     expect(a.localHash).toBe(a.remoteId);
+    expect(a.remoteEtag).toBe('current');
   });
 });
 

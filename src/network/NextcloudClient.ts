@@ -86,7 +86,11 @@ function readCreatedFileId(headers?: Record<string, string>): string | null {
   return /^0*([1-9]\d*)(?:oc[a-z0-9]+)?$/i.exec(header?.trim() ?? '')?.[1] ?? null;
 }
 
-function reportFileCreation(response: RequestUrlResponse, opts?: UploadOptions): void {
+function reportUpload(response: RequestUrlResponse, opts?: UploadOptions): void {
+  if (opts?.onUploadedEtag) {
+    const etag = Object.entries(response.headers ?? {}).find(([name]) => name.toLowerCase() === 'etag')?.[1];
+    if (etag) opts.onUploadedEtag(etag.replace(/"/g, ''));
+  }
   if (response.status !== 201 || !opts?.onlyIfAbsent || !opts.onCreatedFileId) return;
   const fileId = readCreatedFileId(response.headers);
   if (fileId) opts.onCreatedFileId(fileId);
@@ -102,6 +106,12 @@ function readJsonObject(res: RequestUrlResponse): Record<string, unknown> | null
     // The body is not JSON: treat it as no evidence rather than failing the connection.
     return null;
   }
+}
+
+function reportUploadedEtag(response: RequestUrlResponse, callback?: (etag: string) => void): void {
+  if (!callback) return;
+  const etag = Object.entries(response.headers ?? {}).find(([name]) => name.toLowerCase() === 'etag')?.[1];
+  if (etag) callback(etag.replace(/"/g, ''));
 }
 
 export class NextcloudClient implements IWebDAVClient {
@@ -478,8 +488,10 @@ export class NextcloudClient implements IWebDAVClient {
     return await this.parseSyncChanges(res.text, { op: 'getChanges', path: '', status: res.status, method: 'REPORT' });
   }
 
-  async downloadFile(remotePath: string): Promise<ArrayBuffer> {
-    const res = await this.reqReadonly({ url: this.remoteUrl(remotePath), method: 'GET', headers: { Authorization: this.authHeader, ...NO_CACHE_HEADERS }, throw: false });
+  async downloadFile(remotePath: string, ifMatchEtag?: string): Promise<ArrayBuffer> {
+    const headers = { Authorization: this.authHeader, ...NO_CACHE_HEADERS,
+      ...(ifMatchEtag ? { 'If-Match': `"${ifMatchEtag.replace(/^"|"$/g, '')}"` } : {}) };
+    const res = await this.reqReadonly({ url: this.remoteUrl(remotePath), method: 'GET', headers, throw: false });
     if (res.status !== 200) throw new NetworkError(res.status, '', 'GET');
     // Return the bytes directly (no shared field) so concurrent downloads cannot race each other.
     return res.arrayBuffer;
@@ -547,7 +559,7 @@ export class NextcloudClient implements IWebDAVClient {
     }
     // A parent we could not create explains the failure better than the PUT's own status, so it wins, but only after the retry had its chance.
     if (res.status < 200 || res.status >= 300) throw dirError ?? new NetworkError(res.status, res.text, 'PUT');
-    reportFileCreation(res, opts);
+    reportUpload(res, opts);
   }
 
   async recalcChecksum(remotePath: string): Promise<string | null> {
@@ -838,7 +850,7 @@ export class NextcloudClient implements IWebDAVClient {
 
       // Verify the checksum after assembly (FR-012), passing the precomputed hash to avoid hashing the buffer twice.
       await this.verifyRemoteChecksum(remotePath, data, sum);
-      reportFileCreation(move, opts);
+      reportUpload(move, opts);
     } catch (err) {
       // On abort, discard the session so no incomplete file is left at the final path (FR-011).
       await this.req({ url: sessionUrl, method: 'DELETE', headers: { Authorization: this.authHeader, ...NO_CACHE_HEADERS }, throw: false }).catch(() => undefined);

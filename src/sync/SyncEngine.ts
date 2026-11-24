@@ -42,7 +42,7 @@ import { MergeBaseRecorder } from './session/MergeBaseRecorder';
 import { TransferService } from './transfer/TransferService';
 import { VersionService, VersionComparison } from './versions/VersionService';
 import { LineHistoryResult } from './versions/lineHistory';
-import { remoteIdOf } from './remoteIdentity';
+import { remoteIdOf, withTrustedChecksum } from './remoteIdentity';
 import { checksumProvesIdentical, convergedState } from './identity/contentIdentity';
 import { DeletionService } from './deletion/DeletionService';
 import { ResolutionService } from './resolution/ResolutionService';
@@ -1484,7 +1484,9 @@ export class SyncEngine {
     }
 
     // Server-computed checksums (no download) let identical files count as unchanged rather than conflicts.
-    await this.remoteListing.resolveRemoteChecksums(client, remoteFiles, localFiles);
+    if (this.features?.isNextcloud) remoteFiles = remoteFiles.map(file => withTrustedChecksum(file, undefined, true));
+    await this.remoteListing.resolveRemoteChecksums(client,
+      remoteFiles.filter(file => localFiles.get(file.path)?.size === file.size && file.size <= MAX_HASH_SIZE), localFiles);
 
     const plan = await this.buildInitialPlan(localFiles, remoteFiles);
     // With no recorded state, every local file the server lacks is an UPLOAD, including files deleted on another device
@@ -1777,8 +1779,9 @@ export class SyncEngine {
     await Promise.all(tasks);
   }
 
-  private async processRemoteFile(remote: RemoteFileInfo, summary: SyncSessionSummary): Promise<void> {
-    const base = this.opts.stateDB.getFile(remote.path);
+  private async processRemoteFile(info: RemoteFileInfo, summary: SyncSessionSummary): Promise<void> {
+    const base = this.opts.stateDB.getFile(info.path);
+    const remote = withTrustedChecksum(info, base, this.features?.isNextcloud);
     const localStat = await this.opts.localAdapter.stat(remote.path);
     const { remoteId, idType } = remoteIdOf(remote);
 
@@ -1861,11 +1864,13 @@ export class SyncEngine {
         }
       }
 
-      if (base && (base.isConflicted !== keepConflict || remoteFileIdChanged || base.checkAfterFolderMove)) {
+      if (base && (base.isConflicted !== keepConflict || remoteFileIdChanged || base.checkAfterFolderMove
+          || (remote.etag && base.remoteEtag !== remote.etag))) {
         this.opts.stateDB.setFile({
           ...base,
           remoteFileId: remote.fileId ?? base.remoteFileId,
           isConflicted: keepConflict,
+          remoteEtag: remote.etag ?? base.remoteEtag,
           checkAfterFolderMove: undefined,
         });
       }
@@ -1905,8 +1910,11 @@ export class SyncEngine {
       await this.uploadFile(remote, summary);
     } catch (err) {
       if (!(err instanceof PreconditionFailedError)) throw err;
-      void this.opts.logger?.log(`upload: If-Match 412 (remote changed during sync) → conflict → ${remote.path}`);
-      await this.handleConflict(remote.path, base, remote, remoteId, idType, summary);
+      const live = await this.client!.statFile(remote.path);
+      if (!live?.etag) throw err;
+      const current = withTrustedChecksum(live, base, this.features?.isNextcloud);
+      const identity = remoteIdOf(current);
+      await this.handleConflict(remote.path, base, current, identity.remoteId, identity.idType, summary);
     }
   }
 
@@ -2317,7 +2325,7 @@ export class SyncEngine {
       this.opts.stateDB.setFile({
         path, localHash: remote.checksum!, remoteId: remote.checksum!, idType: 'sha256',
         size: lf.size, mtime, remoteFileId: remote.fileId, isConflicted: false,
-        localMtime: lf.mtime, localSize: lf.size, remoteMtime: remote.lastModified,
+        remoteEtag: remote.etag ?? undefined, localMtime: lf.mtime, localSize: lf.size, remoteMtime: remote.lastModified,
       });
       await this.creationTime.align(this.client!, remote);
     }
@@ -2381,7 +2389,7 @@ export class SyncEngine {
   }
 
   private rebuildRemoteFilesFromState(): RemoteFileInfo[] {
-    return this.remoteListing.rebuildRemoteFilesFromState();
+    return this.remoteListing.rebuildRemoteFilesFromState(true);
   }
 
   private rebuildRemoteDirsFromState(): RemoteDirInfo[] {

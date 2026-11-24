@@ -214,6 +214,10 @@ export class VersionService {
     // without replacing the local file. The next full scan recovers the changed remote tree.
     const { data, remote } = await this.readRestoredFile(client, path, fileId);
     const localHash = await sha256(data);
+    // Group Folders can report the old checksum after a restore. Keep the confirmed ETag when
+    // the same-length body disproves it. Preserve the existing iOS length-mismatch tolerance.
+    const checksum = remote.size === data.byteLength && remote.checksum !== localHash ? null : remote.checksum;
+    if (!checksum && !remote.etag) throw new Error('Nextcloud did not confirm the restored revision. Run Sync now.');
 
     try {
       await localAdapter.atomicWriteBinary(path, data, undefined, undefined, { stat, hash, canWrite });
@@ -225,7 +229,7 @@ export class VersionService {
     }
 
     // The next sync hashes the local file so an edit just after the commit cannot inherit this baseline.
-    const { remoteId, idType } = remoteIdOf(remote);
+    const { remoteId, idType } = remoteIdOf({ ...remote, checksum });
     stateDB.setFile({
       path,
       localHash,
@@ -234,6 +238,7 @@ export class VersionService {
       size: remote.size || data.byteLength,
       mtime: remote.lastModified || stat?.mtime || Date.now(),
       remoteMtime: remote.lastModified,
+      remoteEtag: remote.etag ?? undefined,
       remoteFileId: remote.fileId ?? fileId,
       isConflicted: false,
     });

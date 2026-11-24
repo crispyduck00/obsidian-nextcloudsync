@@ -27,6 +27,13 @@ describe('NO_CACHE_HEADERS', () => {
 describe('downloadFile requestUrl headers (no-cache)', () => {
   beforeEach(() => mockRequestUrl.mockReset());
 
+  it.each([NextcloudClient, StandardWebDAVClient])('rejects a superseded revision without returning bytes', async Client => {
+    mockRequestUrl.mockReturnValueOnce(res(412));
+    const client = new Client(settings, () => 'app-pw', 'Vault');
+    await expect(client.downloadFile('note.md', '"observed"')).rejects.toMatchObject({ status: 412, method: 'GET' });
+    expect(mockRequestUrl.mock.calls[0][0].headers).toMatchObject({ 'If-Match': '"observed"', ...NO_CACHE_HEADERS });
+  });
+
   it('NextcloudClient.downloadFile sends Cache-Control: no-store and Pragma: no-cache', async () => {
     mockRequestUrl.mockReturnValueOnce(res(200, { arrayBuffer: new TextEncoder().encode('hello').buffer }));
     const client = new NextcloudClient(settings, () => 'app-pw', 'Vault');
@@ -86,6 +93,19 @@ describe('T008: NextcloudClient remaining methods send NO_CACHE_HEADERS', () => 
       .mockReturnValueOnce(res(207, { text: EMPTY_MULTISTATUS })); // REPORT (getSyncToken)
     await makeClient().connect();
     expectAllCallsNoCache();
+  });
+
+  it('reports the response ETag only after a successful upload', async () => {
+    const onUploadedEtag = jest.fn();
+    mockRequestUrl.mockReturnValueOnce(res(201, { headers: { ETag: '"confirmed"' } }));
+    await makeClient().uploadFile('note.md', new ArrayBuffer(1), undefined, { onUploadedEtag });
+    expect(onUploadedEtag).toHaveBeenCalledWith('confirmed');
+    expect(mockRequestUrl).toHaveBeenCalledTimes(1);
+
+    mockRequestUrl.mockReturnValueOnce(res(412, { headers: { etag: '"rejected"' } }));
+    await expect(makeClient().uploadFile('note.md', new ArrayBuffer(1), undefined, { onUploadedEtag }))
+      .rejects.toMatchObject({ name: 'PreconditionFailedError', path: 'note.md' });
+    expect(onUploadedEtag).toHaveBeenCalledTimes(1);
   });
 
   it('getFiles() sends NO_CACHE_HEADERS on the PROPFIND call', async () => {

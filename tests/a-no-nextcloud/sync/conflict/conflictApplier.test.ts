@@ -421,7 +421,7 @@ describe('ConflictApplier.resolveByWrite — creation time [SPEC:CT-3]', () => {
         const { applier, conn, calls } = build({ upload: 'ok', local: { content: 'x', mtime: 1, size: 1, ctime: local } });
         await applier.resolveByWrite(conn, 'note.md', 'merged\n', clean, remoteAt(server), 'old-remote', 'etag', summary());
         expect(calls.wroteCtime).toEqual([expectedWrite]);
-        expect(calls.uploadOpts).toEqual([expect.objectContaining({ ctime: expectedUpload, ifMatchEtag: '"r1"' })]);
+        expect(calls.uploadOpts).toEqual([expect.objectContaining({ ctime: expectedUpload, onUploadedEtag: expect.any(Function), ifMatchEtag: '"r1"' })]);
       });
     }
 

@@ -469,12 +469,12 @@ describe('[SPEC:CT-4] uploadFile sends the creation time with the PUT', () => {
 
   it('sends the content checksum, revision and creation time together', async () => {
     const opts = await optsOf(T_OLD, { etag: '"r9"', creationTime: T_NEW });
-    expect(opts).toEqual({ precomputedSha256: expect.any(String), ifMatchEtag: '"r9"', ctime: T_OLD });
+    expect(opts).toEqual({ precomputedSha256: expect.any(String), ifMatchEtag: '"r9"', ctime: T_OLD, onUploadedEtag: expect.any(Function) });
   });
 
   it('sends ctime undefined when the server value is unknown', async () => {
     const opts = await optsOf(T_OLD, { creationTime: undefined });
-    expect(opts).toEqual({ precomputedSha256: expect.any(String), ifMatchEtag: '"e1"', ctime: undefined });
+    expect(opts).toEqual({ precomputedSha256: expect.any(String), ifMatchEtag: '"e1"', ctime: undefined, onUploadedEtag: expect.any(Function) });
   });
 
   it('sends the local value when the server holds 0 and the local value is valid', async () => {

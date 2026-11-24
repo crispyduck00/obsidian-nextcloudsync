@@ -188,6 +188,8 @@ export interface FileState {
   remoteMtime?: number;
   /** Verify local presence at a moved path before treating absence there as a deletion. */
   checkAfterFolderMove?: true;
+  /** ETag of the converged remote revision, including checksum-based identities. */
+  remoteEtag?: string;
   /**
    * Target creation time (Unix seconds) of the last local creation-time fix that the platform did not apply
    * (docs/spec.md §9.7). A planned local fix to the same target is skipped; any other target is tried.

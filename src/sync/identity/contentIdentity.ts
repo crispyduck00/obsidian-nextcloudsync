@@ -29,5 +29,6 @@ export function convergedState(
       ...(previous.ctimeLocalAttempt !== undefined ? { ctimeLocalAttempt: previous.ctimeLocalAttempt } : {}),
       ...(previous.ctimeRemoteAttempt !== undefined ? { ctimeRemoteAttempt: previous.ctimeRemoteAttempt } : {}),
     } : {}),
+    remoteEtag: remote.etag ?? undefined,
   };
 }

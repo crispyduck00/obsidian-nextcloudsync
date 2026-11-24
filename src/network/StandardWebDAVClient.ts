@@ -209,8 +209,10 @@ export class StandardWebDAVClient implements IWebDAVClient {
     throw new SyncTokenExpiredError();
   }
 
-  async downloadFile(remotePath: string): Promise<ArrayBuffer> {
-    const res = await this.reqReadonly({ url: this.remoteUrl(remotePath), method: 'GET', headers: { Authorization: this.authHeader, ...NO_CACHE_HEADERS }, throw: false });
+  async downloadFile(remotePath: string, ifMatchEtag?: string): Promise<ArrayBuffer> {
+    const headers = { Authorization: this.authHeader, ...NO_CACHE_HEADERS,
+      ...(ifMatchEtag ? { 'If-Match': `"${ifMatchEtag.replace(/^"|"$/g, '')}"` } : {}) };
+    const res = await this.reqReadonly({ url: this.remoteUrl(remotePath), method: 'GET', headers, throw: false });
     if (res.status !== 200) throw new NetworkError(res.status, '', 'GET');
     return res.arrayBuffer;
   }
@@ -241,7 +243,7 @@ export class StandardWebDAVClient implements IWebDAVClient {
 
   async uploadFile(
     remotePath: string, data: ArrayBuffer, mtime?: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; onlyIfAbsent?: boolean; ctime?: number },
+    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; onlyIfAbsent?: boolean; ctime?: number; onUploadedEtag?: (etag: string) => void },
   ): Promise<void> {
     const headers: Record<string, string> = { Authorization: this.authHeader, ...NO_CACHE_HEADERS };
     if (mtime) headers['X-OC-MTime'] = String(Math.floor(mtime / 1000));
@@ -340,7 +342,7 @@ export class StandardWebDAVClient implements IWebDAVClient {
 
   async uploadChunked(
     _remotePath: string, _data: ArrayBuffer, _chunkSizeBytes: number,
-    _opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; mtime?: number; ctime?: number },
+    _opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; mtime?: number; ctime?: number; onUploadedEtag?: (etag: string) => void },
   ): Promise<void> {
     throw new FeatureUnsupportedError('chunked-upload');
   }
