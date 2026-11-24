@@ -7,7 +7,7 @@ import { AsyncMutex } from '../util/AsyncMutex';
 import { sha256 } from '../util/hash';
 import { MAX_HASH_SIZE } from '../util/limits';
 import { parentDir } from './policy';
-import { remoteIdOf } from './remoteIdentity';
+import { remoteIdOf, withTrustedChecksum } from './remoteIdentity';
 
 const issueMessages: Record<FileRenameIssue, string> = {
   locked: 'Nextcloud has locked the file. The rename will be retried.',
@@ -210,7 +210,8 @@ export class PendingFileRenames {
 
   private async hasTrackedContent(client: IWebDAVClient, original: RemoteFileInfo, base: FileState): Promise<boolean> {
     if (base.isConflicted || original.size !== base.size || base.size > MAX_HASH_SIZE) return false;
-    if (original.checksum) return original.checksum === base.localHash;
+    const { checksum } = withTrustedChecksum(original, base);
+    if (checksum) return checksum === base.localHash;
     if (base.idType === 'etag' && original.etag === base.remoteId) return true;
     const bytes = await client.downloadFile(original.path);
     return bytes.byteLength === base.size && await sha256(bytes) === base.localHash;

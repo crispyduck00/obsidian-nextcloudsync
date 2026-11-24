@@ -15,6 +15,7 @@ import { removeEmptyLocalDirectory } from './removeEmptyLocalDirectory';
 import { sha256 } from '../../util/hash';
 import type { LocalAdapter } from '../../data/LocalAdapter';
 import type { RemoteFolderGuard } from '../directory/RemoteFolderGuard';
+import { withTrustedChecksum } from '../remoteIdentity';
 
 // What a local deletion did; a caller that must report failures (the mirror) reads it, an ordinary sync ignores it.
 export type RemoteDeletionOutcome =
@@ -69,7 +70,8 @@ export class DeletionService {
     }
     // Decide only from a real content hash: a SHA-256 match with the last synced base is the only proof the
     // server copy is unchanged.
-    let serverHash = remote.checksum ?? null;
+    remote = withTrustedChecksum(remote, base);
+    let serverHash = remote.checksum;
     if (!serverHash) {
       try { serverHash = await client.recalcChecksum(remote.path); } catch { serverHash = null; }
     }

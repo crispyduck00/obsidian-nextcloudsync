@@ -18,6 +18,7 @@ export function matchesTrackedRemote(
     return included.size === 0;
   };
   return match(files, trackedFiles, (old, current) => old.size === current.size && old.lastModified === current.lastModified
+    && (!old.etag || old.etag === current.etag)
     && (!!old.checksum && old.checksum === current.checksum || !!old.etag && old.etag === current.etag))
     && match(dirs, trackedDirs, () => true);
 }

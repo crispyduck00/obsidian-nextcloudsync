@@ -254,6 +254,7 @@ export class ConflictApplier {
     }
     const mergedHash = await sha256(mergedData);
     let uploaded = false;
+    let uploadedEtag: string | undefined;
     try {
       const lockToken = await this.deps.transfer.acquireLock(conn.client, path);
       try {
@@ -262,6 +263,7 @@ export class ConflictApplier {
           ifMatchEtag: remote.etag,
           ...(remote.checksum ? { expectedRemoteChecksum: remote.checksum } : {}),
           ctime: uploadCreationTimeMs(before?.ctime, remote.creationTime),
+          onUploadedEtag: etag => { uploadedEtag = etag; },
         });
         if (outcome !== 'skipped') {
           summary.uploadedCount++; uploaded = true; this.deps.journal.recordHistory(path, 'uploaded');
@@ -291,6 +293,7 @@ export class ConflictApplier {
       idType: uploaded ? 'sha256' : idType,
       size: stat?.size ?? 0, mtime: mergeMtime,
       remoteFileId: remote.fileId,
+      remoteEtag: uploaded ? uploadedEtag : remote.etag ?? undefined,
       // Stays true after a failed upload even for a clean merge, or the next sync reads the state as converged.
       isConflicted: !clean || !uploaded,
     };
@@ -409,6 +412,7 @@ export class ConflictApplier {
     const state: FileState = {
       path, localHash, remoteId, idType, size: remote.size, mtime,
       remoteFileId: remote.fileId, isConflicted: false, remoteMtime: remote.lastModified,
+      remoteEtag: remote.etag ?? undefined,
     };
     this.deps.stateDB.setFile(expected
       ? state

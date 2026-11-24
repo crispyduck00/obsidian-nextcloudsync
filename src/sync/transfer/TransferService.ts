@@ -17,6 +17,7 @@ import { sha256 } from '../../util/hash';
 import { remoteIdOf } from '../remoteIdentity';
 import { uploadCreationTimeMs, writeCreationTimeMs } from '../../util/creationTime';
 import { bytesEqual } from '../identity/contentIdentity';
+import { hasCompleteMarkerSet } from '../ConflictResolver';
 import type { LocalWritePort } from '../plugins/PluginSyncCoordinator';
 import type { CreationTimePort } from '../ctime/CreationTimeAligner';
 
@@ -79,6 +80,7 @@ export class TransferService {
     let finish: ReturnType<NonNullable<TransferDeps['beginFirstUpload']>> | undefined;
     let recorded: UploadOutcome | undefined;
     let createdFileId: string | undefined;
+    let uploadedEtag: string | undefined;
     try {
       let outcome: 'uploaded' | 'skipped';
       try {
@@ -90,6 +92,7 @@ export class TransferService {
           ifMatchEtag: remote.etag,
           ...(remote.checksum ? { expectedRemoteChecksum: remote.checksum } : {}),
           ...(onlyIfAbsent ? { onlyIfAbsent, onCreatedFileId: (id: string) => { createdFileId = id; } } : {}),
+          onUploadedEtag: etag => { uploadedEtag = etag; },
           ctime: uploadCreationTimeMs(stat.ctime, remote.creationTime),
         });
       } finally {
@@ -112,8 +115,8 @@ export class TransferService {
       let uploadedRemoteId = localHash;
       let uploadedIdType: FileState['idType'] = 'sha256';
       let uploadedFileId = createdFileId ?? remote.fileId;
-      let uploadedRemoteMtime = remote.lastModified;
       const reportsChecksums = this.deps.clientReportsChecksums();
+      let uploadedRemoteMtime = uploadedEtag ? Math.floor(stat.mtime / 1000) * 1000 : remote.lastModified;
       if (!reportsChecksums || (onlyIfAbsent && !uploadedFileId)) {
         try {
           const fresh = await client.statFile(path);
@@ -124,6 +127,7 @@ export class TransferService {
             // A new Nextcloud file gets its ID on the server. Only index the ID if the stat
             // still describes the uploaded bytes; a peer may already have replaced the path.
             uploadedFileId = fresh.fileId;
+            uploadedEtag ??= fresh.etag ?? undefined;
             uploadedRemoteMtime = fresh.lastModified;
           }
         } catch (err) {
@@ -139,6 +143,7 @@ export class TransferService {
         path, localHash, remoteId: uploadedRemoteId, idType: uploadedIdType,
         size: stat.size, mtime: stat.mtime,
         remoteFileId: uploadedFileId, isConflicted: false,
+        remoteEtag: uploadedEtag,
       }, uploadedRemoteMtime));
       // The remote now equals the uploaded body, so it is the new merge base.
       this.deps.mergeBase.recordBytes(path, data);
@@ -190,13 +195,16 @@ export class TransferService {
     if (localStat && localStat.size === data.byteLength
         && bytesEqual(await this.deps.localAdapter.readBinary(remote.path), data)) {
       const sameHash = await sha256(data);
+      const isConflicted = this.deps.stateDB.getFile(remote.path)?.isConflicted === true
+        && hasCompleteMarkerSet(new TextDecoder().decode(data));
       this.deps.stateDB.setFile({
         path: remote.path, localHash: sameHash, remoteId, idType,
         size: remote.size, mtime: remote.lastModified || localStat.mtime,
-        remoteFileId: remote.fileId, isConflicted: false,
+        remoteFileId: remote.fileId, isConflicted,
+        remoteEtag: remote.etag ?? undefined,
         localSize: localStat.size, localMtime: localStat.mtime, remoteMtime: remote.lastModified,
       });
-      this.deps.mergeBase.recordBytes(remote.path, data);
+      if (!isConflicted) this.deps.mergeBase.recordBytes(remote.path, data);
       void this.deps.logger?.log(`download: body identical to the local file → state converged, no write → ${remote.path}`);
       await this.deps.creationTime?.align(client, remote, localStat);
       return;
@@ -226,6 +234,7 @@ export class TransferService {
       path: remote.path, localHash, remoteId, idType,
       size: remote.size, mtime,
       remoteFileId: remote.fileId, isConflicted: false,
+      remoteEtag: remote.etag ?? undefined,
       remoteMtime: remote.lastModified,
     };
     if (expected) {

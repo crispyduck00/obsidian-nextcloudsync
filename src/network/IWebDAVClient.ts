@@ -33,6 +33,8 @@ export interface UploadOptions {
   ctime?: number;
   /** Called only with an identity from the response to a successful conditional creation. */
   onCreatedFileId?: (fileId: string) => void;
+  /** ETag confirmed by the successful write response. */
+  onUploadedEtag?: (etag: string) => void;
 }
 
 export interface IWebDAVClient {

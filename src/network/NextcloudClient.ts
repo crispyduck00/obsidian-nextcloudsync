@@ -86,7 +86,11 @@ function readCreatedFileId(headers?: Record<string, string>): string | null {
   return /^0*([1-9]\d*)(?:oc[a-z0-9]+)?$/i.exec(header?.trim() ?? '')?.[1] ?? null;
 }
 
-function reportFileCreation(response: RequestUrlResponse, opts?: UploadOptions): void {
+function reportUpload(response: RequestUrlResponse, opts?: UploadOptions): void {
+  if (opts?.onUploadedEtag) {
+    const etag = Object.entries(response.headers ?? {}).find(([name]) => name.toLowerCase() === 'etag')?.[1];
+    if (etag) opts.onUploadedEtag(etag.replace(/"/g, ''));
+  }
   if (response.status !== 201 || !opts?.onlyIfAbsent || !opts.onCreatedFileId) return;
   const fileId = readCreatedFileId(response.headers);
   if (fileId) opts.onCreatedFileId(fileId);
@@ -543,7 +547,7 @@ export class NextcloudClient implements IWebDAVClient {
     }
     // A parent we could not create explains the failure better than the PUT's own status, so it wins, but only after the retry had its chance.
     if (res.status < 200 || res.status >= 300) throw dirError ?? new NetworkError(res.status, res.text, 'PUT');
-    reportFileCreation(res, opts);
+    reportUpload(res, opts);
   }
 
   async recalcChecksum(remotePath: string): Promise<string | null> {
@@ -834,7 +838,7 @@ export class NextcloudClient implements IWebDAVClient {
 
       // Verify the checksum after assembly (FR-012), passing the precomputed hash to avoid hashing the buffer twice.
       await this.verifyRemoteChecksum(remotePath, data, sum);
-      reportFileCreation(move, opts);
+      reportUpload(move, opts);
     } catch (err) {
       // On abort, discard the session so no incomplete file is left at the final path (FR-011).
       await this.req({ url: sessionUrl, method: 'DELETE', headers: { Authorization: this.authHeader, ...NO_CACHE_HEADERS }, throw: false }).catch(() => undefined);

@@ -83,7 +83,7 @@ describe('[SPEC:WSF-5] SyncEngine.deleteSingleFile — C-2 deletion classificati
   });
 
   it('C-2 row 4: server checksum matches base — remote is deleted and tracking is dropped', async () => {
-    const stateDB = makeStateDB(fileState('Notes/synced.md', 'h1'));
+    const stateDB = makeStateDB({ ...fileState('Notes/synced.md', 'h1'), size: 3 });
     const localAdapter = makeLocalAdapter();
     const remote: RemoteFileInfo = {
       path: 'Notes/synced.md', fileId: 'f1', checksum: 'h1', etag: 'e1', size: 3, lastModified: 1,

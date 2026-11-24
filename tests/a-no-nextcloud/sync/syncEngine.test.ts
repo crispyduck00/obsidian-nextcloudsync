@@ -404,7 +404,7 @@ describe('SyncEngine.processRemoteFile — stale conflict-flag clearing', () => 
       }),
       readBinary: jest.fn(async () => new ArrayBuffer(0)),
     };
-    const stateDB = { getFile: jest.fn(() => base), setFile, getLastSyncTime: jest.fn(() => 0) };
+    const stateDB = { getFile: jest.fn(() => ({ remoteEtag: 'etag-1', ...base })), setFile, getLastSyncTime: jest.fn(() => 0) };
     const opts = {
       app: {}, settings: {}, localAdapter, stateDB,
       statusBar: {}, webdavFactory: {}, pluginDir: '', configDir: '.obsidian',
