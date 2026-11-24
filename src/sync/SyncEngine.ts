@@ -527,6 +527,8 @@ export class SyncEngine {
 
   retargetLocalCreation(source: string, destination: string, folder: boolean): boolean {
     if (!this.localCreations.rename(source, destination, folder) || this.isRenameHeld(source)) return false;
+    // New parents can already contain destinations of pending moves for tracked items.
+    if (folder && this.hasRenameInFolder(source)) return false;
     return !(folder ? this.opts.stateDB.getDir(source) : this.opts.stateDB.getFile(source));
   }
 
