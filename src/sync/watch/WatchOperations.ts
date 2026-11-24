@@ -39,6 +39,7 @@ export interface Connection {
 }
 
 export interface WatchDeps {
+  assertLocalVaultAvailable?(): Promise<void>;
   localAdapter: Pick<LocalAdapter, 'stat' | 'readBinary'>;
   stateDB: Pick<StateDB, 'getFile' | 'deleteFile' | 'getDir' | 'setDir' | 'deleteDir' | 'requestSave' | 'getLastSyncTime'>;
   historyStore?: Pick<SyncHistoryStore, 'save'>;
@@ -282,6 +283,7 @@ export class WatchOperations {
     this.begin();
     let succeeded = false;
     try {
+      await this.deps.assertLocalVaultAvailable?.();
       await conn.client.deleteCollection(path); // 404 is handled inside as success
       void this.deps.logger?.log(`watch: folder deleted → remote collection removed ${path}`);
       succeeded = true;
