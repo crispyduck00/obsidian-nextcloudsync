@@ -62,7 +62,10 @@ describe('SyncEngine first upload creation time (executePlan, C4)', () => {
     const args = upload.mock.calls[0] as unknown as unknown[];
     expect(args[1]).toBe(PATH);
     expect(args[3]).toBe(MTIME);
-    expect(args[4]).toEqual({ precomputedSha256: expect.any(String), ctime: LOCAL_CTIME, onlyIfAbsent: true });
+    expect(args[4]).toEqual({
+      precomputedSha256: expect.any(String), ctime: LOCAL_CTIME, onlyIfAbsent: true,
+      onCreatedFileId: expect.any(Function),
+    });
   });
 
   it(`${spec('CT-4')} sends the ctime on a readOnly platform as well`, async () => {

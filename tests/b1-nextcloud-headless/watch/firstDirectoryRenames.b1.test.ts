@@ -10,10 +10,12 @@ function holdMkdirResponse(remoteBase: string, folder: string, loseResponse = fa
   const received = new Promise<number>(resolve => { report = resolve; });
   const waiting = new Promise<void>(resolve => { release = resolve; });
   const send = globalThis.fetch;
+  let held = false;
   const mock = jest.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
     const response = await send(input, init);
     const wantedPath = `/${remoteBase}/${folder}`;
-    if (init?.method === 'MKCOL' && decodeURIComponent(new URL(String(input)).pathname).endsWith(wantedPath)) {
+    if (!held && init?.method === 'MKCOL' && decodeURIComponent(new URL(String(input)).pathname).endsWith(wantedPath)) {
+      held = true;
       report(response.status);
       await waiting;
       if (loseResponse) throw new Error('MKCOL response was lost after creation');

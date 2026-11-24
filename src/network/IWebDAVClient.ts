@@ -21,6 +21,20 @@ export interface TrackedDirectories {
 /** Brackets an actual MKCOL attempt. An ID is supplied only by an acknowledged creation. */
 export type DirectoryCreationObserver = (path: string) => ((fileId: string | null) => void) | undefined;
 
+export interface UploadOptions {
+  /** Hash of the body already computed by the caller. */
+  precomputedSha256?: string;
+  /** Guard an existing revision by ETag and, for Nextcloud, by its checksum when available. */
+  ifMatchEtag?: string | null;
+  expectedRemoteChecksum?: string;
+  /** Refuse to overwrite a path that came into existence concurrently. */
+  onlyIfAbsent?: boolean;
+  /** Creation time in milliseconds. An omitted value leaves the server default. */
+  ctime?: number;
+  /** Called only with an identity from the response to a successful conditional creation. */
+  onCreatedFileId?: (fileId: string) => void;
+}
+
 export interface IWebDAVClient {
   connect(): Promise<NextcloudFeatures>;
   /**
@@ -70,8 +84,7 @@ export interface IWebDAVClient {
   /** Restrict automatic MKCOLs to children of an established vault root. */
   requireExistingVaultRoot?(required: boolean): void;
   /** Filesystem writes must never provision the path of a previously tracked collection. */
-  trackKnownDirectories?(state: TrackedDirectories): void;
-  observeDirectoryCreations?(observer: DirectoryCreationObserver): void;
+  trackKnownDirectories?(state: TrackedDirectories, observeCreation?: DirectoryCreationObserver): void;
   /**
    * Creates the vault folder (sync root) and reports whether it had to be created. Missing ancestors
    * are created best-effort; only the vault folder itself is judged (docs/spec.md §5.2).
@@ -97,7 +110,7 @@ export interface IWebDAVClient {
    */
   uploadFile(
     remotePath: string, data: ArrayBuffer, mtime?: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; expectedRemoteChecksum?: string; onlyIfAbsent?: boolean; ctime?: number },
+    opts?: UploadOptions,
   ): Promise<void>;
   /** MOVE with Overwrite:F, optionally conditioned on the source revision. */
   moveFile(oldPath: string, newPath: string, ifMatchEtag?: string): Promise<void>;
@@ -131,7 +144,7 @@ export interface IWebDAVClient {
    */
   uploadChunked(
     remotePath: string, data: ArrayBuffer, chunkSizeBytes: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; expectedRemoteChecksum?: string; onlyIfAbsent?: boolean; mtime?: number; ctime?: number },
+    opts?: UploadOptions & { mtime?: number },
   ): Promise<void>;
 
   /**
