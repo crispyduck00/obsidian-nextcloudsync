@@ -250,12 +250,12 @@ export class WatchOperations {
     const localHash = await sha256(data);
     if (base && localHash === base.localHash) return; // content unchanged (e.g. mtime-only touch)
 
-    const conn = await this.deps.connect();
     // A real summary: its counters decide whether to notify the user, and processFile maintains them as in a full sync.
     const summary = this.deps.journal.newSummary();
     const conflictsBefore = this.deps.conflictEncounters();
     this.begin();
     try {
+      const conn = await this.deps.connect();
       if (conn.client.inspectDirectory) await assertTrackedParentReadable(conn.client, this.deps.stateDB, path);
       const remote = await conn.client.statFile(path);
       if (remote) {
@@ -316,11 +316,11 @@ export class WatchOperations {
   private async deleteSingleFileActive(path: string): Promise<void> {
     const base = this.deps.stateDB.getFile(path);
     if (!base) return; // not tracked — nothing to do on remote
-    const conn = await this.deps.connect();
     const summary = this.deps.journal.newSummary();
     const conflictsBefore = this.deps.conflictEncounters();
     this.begin();
     try {
+      const conn = await this.deps.connect();
       if (conn.client.inspectDirectory) await assertTrackedParentReadable(conn.client, this.deps.stateDB, path);
       // The same decision the full scan makes for a path missing from its listing (ask the server, forget on 404,
       // else demand a checksum match). It owns the StateDB cleanup, keeping the entry when the DELETE fails so
@@ -368,9 +368,9 @@ export class WatchOperations {
     if (this.deps.isSystemExcluded(path) || this.deps.isPluginPath(path)) return;
     if (this.skippedOnCellular('folder-create', path)) return;
     return this.deps.runNonFullSyncOperation(async () => {
-      const conn = await this.deps.connect();
       this.begin();
       try {
+        const conn = await this.deps.connect();
         await assertTrackedParentReadable(conn.client, this.deps.stateDB, path, true);
         if (this.deps.isRenameHeld?.(path)) return;
         await conn.client.createDirectory(path); // idempotent: existing folder → harmless
