@@ -17,6 +17,7 @@ import { sha256 } from '../../util/hash';
 import { remoteIdOf } from '../remoteIdentity';
 import { uploadCreationTimeMs, writeCreationTimeMs } from '../../util/creationTime';
 import { bytesEqual } from '../identity/contentIdentity';
+import { hasCompleteMarkerSet } from '../ConflictResolver';
 import type { LocalWritePort } from '../plugins/PluginSyncCoordinator';
 import type { CreationTimePort } from '../ctime/CreationTimeAligner';
 
@@ -73,11 +74,13 @@ export class TransferService {
     }
 
     let outcome: 'uploaded' | 'skipped';
+    let uploadedEtag: string | undefined;
     try {
       // If-Match with the known remote etag makes a remote changed since our baseline return 412
       // (PreconditionFailedError, a conflict). New local files carry a null etag, so no precondition.
       outcome = await uploadStrategy.upload(client, path, data, stat.mtime, {
         ifMatchEtag: remote.etag,
+        onUploadedEtag: etag => { uploadedEtag = etag; },
         ctime: uploadCreationTimeMs(stat.ctime, remote.creationTime),
       });
     } finally {
@@ -98,13 +101,18 @@ export class TransferService {
     // plain WebDAV the next PROPFIND yields an ETag, so ask the server and record that instead.
     let uploadedRemoteId = localHash;
     let uploadedIdType: FileState['idType'] = 'sha256';
+    let uploadedRemoteMtime = uploadedEtag ? Math.floor(stat.mtime / 1000) * 1000 : remote.lastModified;
     if (!this.deps.clientReportsChecksums()) {
       // A failed or empty stat keeps the sha256 values on purpose: recording nothing would strand the baseline
       // and the next sync would see BOTH sides changed (a conflict over the user's file). The cost is one
       // redundant download, after which the real remote id is recorded.
       try {
         const fresh = await client.statFile(path);
-        if (fresh) ({ remoteId: uploadedRemoteId, idType: uploadedIdType } = remoteIdOf(fresh));
+        if (fresh) {
+          ({ remoteId: uploadedRemoteId, idType: uploadedIdType } = remoteIdOf(fresh));
+          uploadedEtag ??= fresh.etag ?? undefined;
+          uploadedRemoteMtime = fresh.lastModified;
+        }
       } catch (err) {
         void this.deps.logger?.log(`upload: could not re-read ${path} after upload — ${(err as Error).message}`);
       }
@@ -118,7 +126,8 @@ export class TransferService {
       path, localHash, remoteId: uploadedRemoteId, idType: uploadedIdType,
       size: stat.size, mtime: stat.mtime,
       remoteFileId: remote.fileId, isConflicted: false,
-    }, remote.lastModified));
+      remoteEtag: uploadedEtag,
+    }, uploadedRemoteMtime));
     // The remote now equals the uploaded body, so it is the new merge base.
     this.deps.mergeBase.recordBytes(path, data);
   }
@@ -138,7 +147,7 @@ export class TransferService {
       });
       return;
     }
-    const data = await client.downloadFile(remote.path);
+    const data = await client.downloadFile(remote.path, remote.etag ?? undefined);
     // Refuse to overwrite local with a body whose length differs from the advertised size (0-byte or truncated
     // body from a buggy server). Local and Base stay untouched and the file is retried; an advertised size 0
     // is not flagged.
@@ -155,12 +164,15 @@ export class TransferService {
     if (localStat && localStat.size === data.byteLength
         && bytesEqual(await this.deps.localAdapter.readBinary(remote.path), data)) {
       const sameHash = await sha256(data);
-      this.deps.stateDB.setFile(await withLocalSignature(this.deps.localAdapter, {
+      const isConflicted = this.deps.stateDB.getFile(remote.path)?.isConflicted === true
+        && hasCompleteMarkerSet(new TextDecoder().decode(data));
+      this.deps.stateDB.setFile({
         path: remote.path, localHash: sameHash, remoteId, idType,
         size: remote.size, mtime: remote.lastModified || localStat.mtime,
-        remoteFileId: remote.fileId, isConflicted: false,
-      }, remote.lastModified));
-      this.deps.mergeBase.recordBytes(remote.path, data);
+        remoteFileId: remote.fileId, isConflicted, remoteEtag: remote.etag ?? undefined,
+        localSize: localStat.size, localMtime: localStat.mtime, remoteMtime: remote.lastModified,
+      });
+      if (!isConflicted) this.deps.mergeBase.recordBytes(remote.path, data);
       void this.deps.logger?.log(`download: body identical to the local file → state converged, no write → ${remote.path}`);
       await this.deps.creationTime?.align(client, remote, localStat);
       return;
@@ -180,6 +192,7 @@ export class TransferService {
       path: remote.path, localHash, remoteId, idType,
       size: remote.size, mtime,
       remoteFileId: remote.fileId, isConflicted: false,
+      remoteEtag: remote.etag ?? undefined,
     }, remote.lastModified));
     // Local now equals the remote body, so it is the new merge base.
     this.deps.mergeBase.recordBytes(remote.path, data);

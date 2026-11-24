@@ -171,6 +171,8 @@ export interface FileState {
   localSize?: number;
   /** Server `lastModified` at the last converged state, separate from `localMtime`. */
   remoteMtime?: number;
+  /** ETag of the converged remote revision, including checksum-based identities. */
+  remoteEtag?: string;
   /**
    * Target creation time (Unix seconds) of the last local creation-time fix that the platform did not apply
    * (docs/spec.md §9.7). A planned local fix to the same target is skipped; any other target is tried.

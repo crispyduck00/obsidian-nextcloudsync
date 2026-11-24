@@ -36,12 +36,14 @@ export class VersionService {
     // hash with another version's ETag. Read a stable identity around GET, retry once, then fail
     // without replacing the local file. The next full scan recovers the changed remote tree.
     const { data, remote } = await this.readRestoredFile(client, path, fileId);
+    const localHash = await sha256(data);
+    const checksum = remote.size === data.byteLength && remote.checksum !== localHash ? null : remote.checksum;
+    if (!checksum && !remote.etag) throw new Error('Nextcloud did not confirm the restored revision. Run Sync now.');
 
     await this.deps.localAdapter.atomicWriteBinary(path, data);
 
     // 3. Converge StateDB to the same identity model used by normal sync classification.
-    const localHash = await sha256(data);
-    const { remoteId, idType } = remoteIdOf(remote);
+    const { remoteId, idType } = remoteIdOf({ ...remote, checksum });
     const stat = await this.deps.localAdapter.stat(path);
     this.deps.stateDB.setFile(await withLocalSignature(this.deps.localAdapter, {
       path,
@@ -51,6 +53,7 @@ export class VersionService {
       size: remote.size || stat?.size || data.byteLength,
       mtime: remote.lastModified || stat?.mtime || Date.now(),
       remoteFileId: remote.fileId ?? fileId,
+      remoteEtag: remote.etag ?? undefined,
       isConflicted: false,
     }, remote.lastModified));
     this.deps.mergeBase?.recordBytes(path, data);

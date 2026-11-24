@@ -39,7 +39,7 @@ import { MergeBaseRecorder } from './session/MergeBaseRecorder';
 import { withLocalSignature } from '../data/localSignature';
 import { TransferService } from './transfer/TransferService';
 import { VersionService } from './versions/VersionService';
-import { remoteIdOf } from './remoteIdentity';
+import { remoteIdOf, withTrustedChecksum } from './remoteIdentity';
 import { checksumProvesIdentical, convergedState } from './identity/contentIdentity';
 import { DeletionService } from './deletion/DeletionService';
 import { ResolutionService } from './resolution/ResolutionService';
@@ -814,7 +814,9 @@ export class SyncEngine {
     const localFiles = await this.scanLocalFiles();
 
     // Server-computed checksums (no download) let identical files count as unchanged rather than conflicts.
-    await this.remoteListing.resolveRemoteChecksums(client, remoteFiles, localFiles);
+    if (this.features?.isNextcloud) remoteFiles = remoteFiles.map(file => withTrustedChecksum(file, undefined, true));
+    await this.remoteListing.resolveRemoteChecksums(client,
+      remoteFiles.filter(file => localFiles.get(file.path)?.size === file.size && file.size <= MAX_HASH_SIZE), localFiles);
 
     const plan = await this.buildInitialPlan(localFiles, remoteFiles);
     // With no recorded state, every local file the server lacks is an UPLOAD, including files deleted on another device
@@ -998,8 +1000,9 @@ export class SyncEngine {
     await Promise.all(tasks);
   }
 
-  private async processRemoteFile(remote: RemoteFileInfo, summary: SyncSessionSummary): Promise<void> {
-    const base = this.opts.stateDB.getFile(remote.path);
+  private async processRemoteFile(info: RemoteFileInfo, summary: SyncSessionSummary): Promise<void> {
+    const base = this.opts.stateDB.getFile(info.path);
+    const remote = withTrustedChecksum(info, base, this.features?.isNextcloud);
     const localStat = await this.opts.localAdapter.stat(remote.path);
     const { remoteId, idType } = remoteIdOf(remote);
 
@@ -1038,7 +1041,8 @@ export class SyncEngine {
     if (localStat && (remoteChanged || localChanged)
         && localStat.size === remote.size && checksumProvesIdentical(remote, localHash)) {
       void this.opts.logger?.log(`sync: content identical to the remote (checksum) → state converged, no transfer → ${remote.path}`);
-      this.opts.stateDB.setFile(await this.withLocalSignature(convergedState(remote, localHash, localStat), remote.lastModified));
+      this.opts.stateDB.setFile({ ...convergedState(remote, localHash, localStat),
+        localMtime: localStat.mtime, localSize: localStat.size, remoteMtime: remote.lastModified });
       await this.creationTime.align(this.client!, remote, localStat);
       return;
     }
@@ -1054,8 +1058,8 @@ export class SyncEngine {
         return;
       }
       // Converged: clear a stale conflict flag so the conflict count does not stay stuck.
-      if (base?.isConflicted) {
-        this.opts.stateDB.setFile({ ...base, isConflicted: false });
+      if (base && (base.isConflicted || (remote.etag && base.remoteEtag !== remote.etag))) {
+        this.opts.stateDB.setFile({ ...base, isConflicted: false, remoteEtag: remote.etag ?? base.remoteEtag });
       }
       await this.creationTime.align(this.client!, remote, localStat);
       return;
@@ -1081,8 +1085,11 @@ export class SyncEngine {
       await this.uploadFile(remote.path, localHash, remoteId, idType, remote, summary);
     } catch (err) {
       if (!(err instanceof PreconditionFailedError)) throw err;
-      void this.opts.logger?.log(`upload: If-Match 412 (remote changed during sync) → conflict → ${remote.path}`);
-      await this.handleConflict(remote.path, base, remote, remoteId, idType, summary);
+      const live = await this.client!.statFile(remote.path);
+      if (!live?.etag) throw err;
+      const current = withTrustedChecksum(live, base, this.features?.isNextcloud);
+      const identity = remoteIdOf(current);
+      await this.handleConflict(remote.path, base, current, identity.remoteId, identity.idType, summary);
     }
   }
 
@@ -1418,7 +1425,10 @@ export class SyncEngine {
           // The local creation time is read before the upload; a server value for the same path is honoured (docs/spec.md §9.7).
           const before = await this.opts.localAdapter.stat(path);
           const ctime = uploadCreationTimeMs(before?.ctime, remoteMap.get(path)?.creationTime ?? 0);
-          const outcome = await this.uploadStrategy!.upload(this.client!, path, data, lf.mtime, { precomputedSha256: localHash, ctime });
+          let uploadedEtag: string | undefined;
+          const outcome = await this.uploadStrategy!.upload(this.client!, path, data, lf.mtime, {
+            precomputedSha256: localHash, ctime, onUploadedEtag: etag => { uploadedEtag = etag; },
+          });
           if (outcome === 'skipped') {
             // Over the size limit: counted for the end-of-sync notice (docs/spec.md §9.4a). This batch bypasses uploadFile.
             this.journal.recordOversizeSkip(summary, {
@@ -1430,7 +1440,10 @@ export class SyncEngine {
           summary.uploadedCount++;
           this.recordHistory(path, 'uploaded');
           const stat = await this.opts.localAdapter.stat(path);
-          this.opts.stateDB.setFile(await this.withLocalSignature({ path, localHash, remoteId: localHash, idType: 'sha256', size: lf.size, mtime: stat?.mtime ?? 0, remoteFileId: null, isConflicted: false }));
+          this.opts.stateDB.setFile(await this.withLocalSignature({
+            path, localHash, remoteId: localHash, idType: 'sha256', size: lf.size, mtime: stat?.mtime ?? 0,
+            remoteFileId: null, isConflicted: false, remoteEtag: uploadedEtag,
+          }));
           // This batch bypasses uploadFile, so it seeds its own merge base; without it a later concurrent edit duplicates shared blocks.
           this.recordMergeBase(path, data);
         } catch (err) { this.recordError(summary, path, err); this.retryQueue.push(path); }
@@ -1455,6 +1468,7 @@ export class SyncEngine {
       this.opts.stateDB.setFile(await this.withLocalSignature({
         path, localHash: remote.checksum!, remoteId: remote.checksum!, idType: 'sha256',
         size: lf.size, mtime, remoteFileId: remote.fileId, isConflicted: false,
+        remoteEtag: remote.etag ?? undefined,
       }, remote.lastModified));
       await this.creationTime.align(this.client!, remote);
     }
@@ -1520,7 +1534,7 @@ export class SyncEngine {
   }
 
   private rebuildRemoteFilesFromState(): RemoteFileInfo[] {
-    return this.remoteListing.rebuildRemoteFilesFromState();
+    return this.remoteListing.rebuildRemoteFilesFromState(true);
   }
 
   private rebuildRemoteDirsFromState(): RemoteDirInfo[] {

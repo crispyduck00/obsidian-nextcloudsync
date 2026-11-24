@@ -116,10 +116,10 @@ const notices = (): { message: string }[] =>
   (Notice as unknown as { instances: { message: string }[] }).instances;
 
 // Record `path` as tracked (previously converged) with `body` on both sides.
-function seedTracked(stateDB: StateDB, path: string, body: string, hash: string): void {
+function seedTracked(stateDB: StateDB, path: string, body: string, hash: string, remoteEtag = 'base-etag'): void {
   const fs: FileState = {
     path, localHash: hash, remoteId: hash, idType: 'sha256',
-    size: enc.encode(body).length, mtime: 1_000, remoteFileId: 'f1', isConflicted: false,
+    size: enc.encode(body).length, mtime: 1_000, remoteFileId: 'f1', remoteEtag, isConflicted: false,
   };
   stateDB.setFile(fs);
 }
@@ -197,7 +197,7 @@ describe('[SPEC:WSF-3] C-1 row 5 — local-only change, remote unchanged: upload
       _opts?: { ifMatchEtag?: string | null },
     ) => 'uploaded' as const);
     const { engine, stateDB } = await buildEngine(local, client, {}, { upload });
-    seedTracked(stateDB, 'tracked.md', SYNCED, syncedHash);
+    seedTracked(stateDB, 'tracked.md', SYNCED, syncedHash, remoteEtag);
 
     await engine.syncSingleFile('tracked.md');
 
@@ -227,7 +227,7 @@ describe('[SPEC:WSF-4] C-1 row 6 — local reverted to base after the initial ha
 
     await engine.syncSingleFile('note.md');
 
-    expect(client.downloadFile).toHaveBeenCalledWith('note.md');
+    expect(client.downloadFile).toHaveBeenCalledWith('note.md', 'remote-etag');
     expect(local.files['note.md']).toBe(REMOTE_BODY);
     expect(upload).not.toHaveBeenCalled();
     expect(notices().length).toBe(0); // plain download: silent
@@ -270,10 +270,10 @@ describe('[SPEC:WSF-4] C-1 row 8 — upload race (412 If-Match failure): falls b
     const REMOTE_NOW = 'shared line\n\nremote addition that landed mid-sync\n';
     const oldHash = await hashOf(OLD);
     const local = makeLocalAdapter({ 'note.md': LOCAL });
-    // statFile still reports the OLD (base-matching) remote state — the change on the server landed
-    // AFTER the PROPFIND but BEFORE the PUT, which is exactly what turns the PUT into a 412.
+    // The first PROPFIND sees the base. The competing PUT changes the revision before our write.
     const client = {
-      statFile: jest.fn(async () => remoteOf('note.md', OLD, { checksum: oldHash, etag: 'e-old' })),
+      statFile: jest.fn(async () => remoteOf('note.md', REMOTE_NOW, { checksum: await hashOf(REMOTE_NOW), etag: 'e-new' }))
+        .mockResolvedValueOnce(remoteOf('note.md', OLD, { checksum: oldHash, etag: 'e-old' })),
       downloadFile: jest.fn(async () => toBuf(REMOTE_NOW)),
     };
     let uploadCalls = 0;
@@ -283,12 +283,12 @@ describe('[SPEC:WSF-4] C-1 row 8 — upload race (412 If-Match failure): falls b
       return 'uploaded' as const;
     });
     const { engine, stateDB } = await buildEngine(local, client, {}, { upload });
-    seedTracked(stateDB, 'note.md', OLD, oldHash);
+    seedTracked(stateDB, 'note.md', OLD, oldHash, 'e-old');
 
     await expect(engine.syncSingleFile('note.md')).resolves.toBeUndefined(); // must not throw
 
     expect(upload).toHaveBeenCalledTimes(2); // failed direct PUT, then the merge push
-    expect(client.downloadFile).toHaveBeenCalledWith('note.md'); // fetched to resolve, not skipped
+    expect(client.downloadFile).toHaveBeenCalledWith('note.md', 'e-new'); // fetched to resolve, not skipped
     expect(local.files['note.md']).toContain('local addition'); // local edit not overwritten
     expect(local.files['note.md']).toContain('remote addition that landed mid-sync'); // remote edit not lost
 
@@ -319,7 +319,7 @@ describe('[SPEC:WSF-4] C-1 row 9 — statFile fails with a NetworkError: local k
 });
 
 describe('[SPEC:WSF-4] C-1 row 10 — untracked file present on both sides (feature 063 rule, driven via watch mode)', () => {
-  it('[SPEC:WSF-4] seeds state without transferring when the content already matches (no base, same bytes)', async () => {
+  it('[SPEC:WSF-4] verifies the first shared revision once without uploading when the bytes match', async () => {
     const BODY = 'already identical on both sides\n';
     const checksum = await hashOf(BODY);
     const local = makeLocalAdapter({ 'same.md': BODY });
@@ -332,10 +332,11 @@ describe('[SPEC:WSF-4] C-1 row 10 — untracked file present on both sides (feat
 
     await engine.syncSingleFile('same.md');
 
-    expect(client.downloadFile).not.toHaveBeenCalled();
+    expect(client.downloadFile).toHaveBeenCalledTimes(1);
+    expect(client.downloadFile).toHaveBeenCalledWith('same.md', 'remote-etag');
     expect(upload).not.toHaveBeenCalled();
     const seeded = stateDB.getFile('same.md');
-    expect(seeded?.remoteId).toBe(checksum);
+    expect(seeded).toMatchObject({ localHash: checksum, idType: 'etag', remoteId: 'remote-etag' });
     expect(seeded?.isConflicted).toBe(false);
     expect(notices().length).toBe(0); // no transfer, no conflict: silent
   });
@@ -395,11 +396,12 @@ describe('[SPEC:WSF-8] C-6: a conflict settled by a deterministic strategy still
     };
     const upload = jest.fn(async () => 'uploaded' as const);
     const { engine, stateDB } = await buildEngine(local, client, {}, { upload });
-    seedTracked(stateDB, 'plain.bin', 'base body', baseHash);
+    seedTracked(stateDB, 'plain.bin', 'base body', baseHash, 'remote-etag');
 
     await engine.syncSingleFile('plain.bin');
 
     expect(upload).toHaveBeenCalled();
+    expect(client.downloadFile).not.toHaveBeenCalled();
     expect(notices().length).toBe(0);
   });
 });

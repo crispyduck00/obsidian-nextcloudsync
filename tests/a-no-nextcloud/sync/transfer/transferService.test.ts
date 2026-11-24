@@ -430,14 +430,14 @@ describe('[SPEC:CT-4] uploadFile sends the creation time with the PUT', () => {
     return calls.uploadOpts[0];
   }
 
-  it('passes exactly { ifMatchEtag, ctime } as the fifth argument', async () => {
+  it('passes the conditional ETag, ctime and revision callback', async () => {
     const opts = await optsOf(T_OLD, { etag: '"r9"', creationTime: T_NEW });
-    expect(opts).toEqual({ ifMatchEtag: '"r9"', ctime: T_OLD });
+    expect(opts).toEqual({ ifMatchEtag: '"r9"', ctime: T_OLD, onUploadedEtag: expect.any(Function) });
   });
 
   it('sends ctime undefined when the server value is unknown', async () => {
     const opts = await optsOf(T_OLD, { creationTime: undefined });
-    expect(opts).toEqual({ ifMatchEtag: '"e1"', ctime: undefined });
+    expect(opts).toEqual({ ifMatchEtag: '"e1"', ctime: undefined, onUploadedEtag: expect.any(Function) });
   });
 
   it('sends the local value when the server holds 0 and the local value is valid', async () => {

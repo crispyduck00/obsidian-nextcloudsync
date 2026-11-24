@@ -83,6 +83,12 @@ function readJsonObject(res: RequestUrlResponse): Record<string, unknown> | null
   }
 }
 
+function reportUploadedEtag(response: RequestUrlResponse, callback?: (etag: string) => void): void {
+  if (!callback) return;
+  const etag = Object.entries(response.headers ?? {}).find(([name]) => name.toLowerCase() === 'etag')?.[1];
+  if (etag) callback(etag.replace(/"/g, ''));
+}
+
 export class NextcloudClient implements IWebDAVClient {
   private features: NextcloudFeatures | null = null;
   private readonly createdDirs = new RemoteDirCache();
@@ -382,8 +388,10 @@ export class NextcloudClient implements IWebDAVClient {
     return await this.parseSyncChanges(res.text, { op: 'getChanges', path: '', status: res.status, method: 'REPORT' });
   }
 
-  async downloadFile(remotePath: string): Promise<ArrayBuffer> {
-    const res = await this.reqReadonly({ url: this.remoteUrl(remotePath), method: 'GET', headers: { Authorization: this.authHeader, ...NO_CACHE_HEADERS }, throw: false });
+  async downloadFile(remotePath: string, ifMatchEtag?: string): Promise<ArrayBuffer> {
+    const headers = { Authorization: this.authHeader, ...NO_CACHE_HEADERS,
+      ...(ifMatchEtag ? { 'If-Match': `"${ifMatchEtag.replace(/^"|"$/g, '')}"` } : {}) };
+    const res = await this.reqReadonly({ url: this.remoteUrl(remotePath), method: 'GET', headers, throw: false });
     if (res.status !== 200) throw new NetworkError(res.status, '', 'GET');
     // Return the bytes directly (no shared field) so concurrent downloads cannot race each other.
     return res.arrayBuffer;
@@ -414,7 +422,7 @@ export class NextcloudClient implements IWebDAVClient {
 
   async uploadFile(
     remotePath: string, data: ArrayBuffer, mtime?: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; ctime?: number },
+    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; ctime?: number; onUploadedEtag?: (etag: string) => void },
   ): Promise<void> {
     // PUT first and MKCOL the parents only on a missing parent, then retry once: drops the per-upload directory probe on the common path.
     const checksum = `SHA256:${opts?.precomputedSha256 ?? await sha256(data)}`;
@@ -446,6 +454,7 @@ export class NextcloudClient implements IWebDAVClient {
     }
     // A parent we could not create explains the failure better than the PUT's own status, so it wins, but only after the retry had its chance.
     if (res.status < 200 || res.status >= 300) throw dirError ?? new NetworkError(res.status, res.text, 'PUT');
+    reportUploadedEtag(res, opts?.onUploadedEtag);
   }
 
   async recalcChecksum(remotePath: string): Promise<string | null> {
@@ -604,7 +613,7 @@ export class NextcloudClient implements IWebDAVClient {
 
   async uploadChunked(
     remotePath: string, data: ArrayBuffer, chunkSizeBytes: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; mtime?: number; ctime?: number },
+    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; mtime?: number; ctime?: number; onUploadedEtag?: (etag: string) => void },
   ): Promise<void> {
     const uploadId = `obsidian-${this.settings.deviceId.slice(-8)}-${Date.now()}`;
     const sessionUrl = `${this.davBase('uploads')}/${uploadId}`;
@@ -671,6 +680,7 @@ export class NextcloudClient implements IWebDAVClient {
 
       // Verify the checksum after assembly (FR-012), passing the precomputed hash to avoid hashing the buffer twice.
       await this.verifyRemoteChecksum(remotePath, data, sum);
+      reportUploadedEtag(move, opts?.onUploadedEtag);
     } catch (err) {
       // On abort, discard the session so no incomplete file is left at the final path (FR-011).
       await this.req({ url: sessionUrl, method: 'DELETE', headers: { Authorization: this.authHeader, ...NO_CACHE_HEADERS }, throw: false }).catch(() => undefined);

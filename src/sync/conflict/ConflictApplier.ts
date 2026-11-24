@@ -76,8 +76,16 @@ export class ConflictApplier {
 
     // Must precede any merge write: feeds the size/mtime strategies and the clean-side capture.
     const localStatBefore = await this.deps.localAdapter.stat(path);
-    const identity = await this.convergeIfIdentical(conn, path, remote, localStatBefore);
+    const rule = this.deps.pluginConflictRule(path);
+    const verifyBase = !rule && base && !base.isConflicted && !remote.checksum && !!remote.etag
+      && base.remoteEtag !== remote.etag && base.size === remote.size;
+    const identity = await this.convergeIfIdentical(conn, path, remote, localStatBefore, !!verifyBase);
     if (identity.converged) return;
+    if (verifyBase && identity.remoteData && identity.remoteData.byteLength === base.size
+        && await sha256(identity.remoteData) === base.localHash) {
+      await this.deps.transfer.uploadFile(conn.client, conn.uploadStrategy, path, identity.localHash!, remoteId, idType, remote, summary);
+      return;
+    }
     this.deps.onConflictEncountered();
     const localMtimeBefore = localStatBefore?.mtime ?? 0;
     const localSizeBefore = localStatBefore?.size ?? 0;
@@ -93,7 +101,6 @@ export class ConflictApplier {
     };
 
     // Plugin files never enter text merge: the coordinator's rule decides without reading the local body.
-    const rule = this.deps.pluginConflictRule(path);
     if (rule !== null) {
       const ruled = this.decideByPluginRule(rule, path, ctx);
       await this.applyDecision(conn, path, base, remote, remoteId, idType, summary, ruled, identity.remoteData);
@@ -106,7 +113,7 @@ export class ConflictApplier {
     let decision: ConflictResolution;
     if (resolver.strategyFor(path) === 'merge' || isMarkdown(path)) {
       const localContent = await this.deps.localAdapter.read(path);
-      remoteData = remoteData ?? await conn.client.downloadFile(remote.path);
+      remoteData = remoteData ?? await conn.client.downloadFile(remote.path, remote.etag ?? undefined);
       const remoteContent = new TextDecoder().decode(remoteData);
       // The stored last-synced body is the 3-way base, so shared blocks are not duplicated. Empty when none
       // is known yet; the expansion guard prevents a corrupt write and the next convergence seeds it.
@@ -171,7 +178,7 @@ export class ConflictApplier {
         return;
 
       case 'prefer-remote':
-        if (!remoteData) remoteData = await conn.client.downloadFile(remote.path);
+        if (!remoteData) remoteData = await conn.client.downloadFile(remote.path, remote.etag ?? undefined);
         await this.resolveByPreferRemote(path, remote, remoteData, remoteId, idType, summary, conn.client);
         return;
 
@@ -184,8 +191,8 @@ export class ConflictApplier {
   // Proof of identity is the server checksum, or the fetched body when the server has none and the sizes match.
   private async convergeIfIdentical(
     conn: Connection, path: string, remote: RemoteFileInfo,
-    localStat: LocalStat | null,
-  ): Promise<{ converged: boolean; remoteData?: ArrayBuffer }> {
+    localStat: LocalStat | null, verifyBase: boolean,
+  ): Promise<{ converged: boolean; localHash?: string; remoteData?: ArrayBuffer }> {
     if (!localStat) return { converged: false };
     const localData = await this.deps.localAdapter.readBinary(path);
     const localHash = await sha256(localData);
@@ -193,11 +200,11 @@ export class ConflictApplier {
     let identical = false;
     if (remote.checksum) {
       identical = checksumProvesIdentical(remote, localHash);
-    } else if (localData.byteLength === remote.size) {
-      remoteData = await conn.client.downloadFile(remote.path);
+    } else if (verifyBase || localData.byteLength === remote.size) {
+      remoteData = await conn.client.downloadFile(remote.path, remote.etag ?? undefined);
       identical = bytesEqual(localData, remoteData);
     }
-    if (!identical) return { converged: false, remoteData };
+    if (!identical) return { converged: false, localHash, remoteData };
     this.deps.stateDB.setFile(await withLocalSignature(
       this.deps.localAdapter, convergedState(remote, localHash, localStat), remote.lastModified,
     ));
@@ -224,10 +231,12 @@ export class ConflictApplier {
     const mergedData = await this.deps.localAdapter.readBinary(path);
     const mergedHash = await sha256(mergedData);
     let uploaded = false;
+    let uploadedEtag: string | undefined;
     try {
       const lockToken = await this.deps.transfer.acquireLock(conn.client, path);
       try {
         const outcome = await conn.uploadStrategy.upload(conn.client, path, mergedData, mergeMtime, {
+          onUploadedEtag: etag => { uploadedEtag = etag; },
           ctime: uploadCreationTimeMs(before?.ctime, remote.creationTime),
         });
         if (outcome !== 'skipped') {
@@ -258,6 +267,7 @@ export class ConflictApplier {
       idType: uploaded ? 'sha256' : idType,
       size: stat?.size ?? 0, mtime: mergeMtime,
       remoteFileId: remote.fileId,
+      remoteEtag: uploaded ? uploadedEtag : remote.etag ?? undefined,
       // Stays true after a failed upload even for a clean merge, or the next sync reads the state as converged.
       isConflicted: !clean || !uploaded,
     };
@@ -368,6 +378,7 @@ export class ConflictApplier {
       path, localHash, remoteId, idType,
       size: remote.size, mtime,
       remoteFileId: remote.fileId, isConflicted: false,
+      remoteEtag: remote.etag ?? undefined,
     }, remote.lastModified));
     this.deps.mergeBase.recordBytes(path, remoteData);
     if (client) await this.deps.creationTime?.align(client, remote);
