@@ -15,6 +15,7 @@ import { dropSubtreeTracking } from '../deletion/subtreeTracking';
 import { removeEmptyLocalDirectory } from '../deletion/removeEmptyLocalDirectory';
 import { ancestorMatching } from '../policy';
 import { FileLogger } from '../../util/FileLogger';
+import { assertUnambiguousLocalPaths } from '../scan/localPathIdentity';
 
 export interface DirectoryDeps {
   app: App;
@@ -61,6 +62,10 @@ export class DirectoryReconciler {
     const remoteDirs = new Map(remoteDirInfos.map(d => [norm(d.path), d]));
     const localDirs = this.localDirectories();
     const tracked = new Map(this.deps.stateDB.getAllDirs().map(d => [d.path, d]));
+
+    const included = (paths: Iterable<string>): string[] => [...paths].filter(path =>
+      !this.deps.isSystemExcluded(path) && !isHeld(path, remoteDirs.has(path) || tracked.has(path)) && !this.deps.isRenameHeld?.(path));
+    await assertUnambiguousLocalPaths(this.deps.app.vault.adapter, included(localDirs), included(remoteDirs.keys()), 'folder');
 
     const plan = classifyDirectories(remoteDirs, localDirs, tracked, p =>
       this.deps.isSystemExcluded(p) || isHeld(p, remoteDirs.has(p) || tracked.has(p)) || this.deps.isRenameHeld?.(p) === true);

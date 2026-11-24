@@ -34,6 +34,7 @@ import {
   isSystemExcluded as isSystemExcludedPure,
 } from './policy';
 import { LocalScanner } from './scan/LocalScanner';
+import { assertUnambiguousLocalPaths, hasExactLocalFile, LocalPathIdentityError } from './scan/localPathIdentity';
 import { RemoteListingSource, type FullScanListing } from './scan/RemoteListingSource';
 import { SyncJournal } from './session/SyncJournal';
 import { OversizeSkipNotifier } from './session/OversizeSkipNotifier';
@@ -909,6 +910,7 @@ export class SyncEngine {
     } catch (err) {
       if (err instanceof Error && 'requiresManualResolution' in err && err.requiresManualResolution === true) onManualResolution?.();
       this.opts.stateDB.setRemoteRootEtag(null);
+      if (err instanceof LocalPathIdentityError) this.opts.stateDB.setSyncToken(null);
       console.error('[SyncEngine] Sync failed:', err);
       void this.opts.logger?.log(`sync: FAILED — ${(err as Error).message}`, 'error');
       new Notice(`❌ Sync failed: ${(err as Error).message}`, 6000);
@@ -1488,6 +1490,7 @@ export class SyncEngine {
     for (const path of localFiles.keys()) {
       if (this.isPathHeld(path)) localFiles.delete(path);
     }
+    await this.assertLocalPathIdentity(localFiles.keys(), remoteFiles.map(file => file.path));
 
     // On first contact Nextcloud may still advertise the checksum of a pre-restore version.
     // Recalculate for equal-size overlaps only. Remote-only files already require a download.
@@ -1514,6 +1517,52 @@ export class SyncEngine {
     this.opts.stateDB.setSyncToken(this.retryQueue.length ? null : token);
   }
 
+  private async assertLocalPathIdentity(localPaths: Iterable<string>, remotePaths: Iterable<string>, remoteFiles?: readonly RemoteFileInfo[]): Promise<void> {
+    const included = (paths: Iterable<string>): string[] => [...paths].filter(path => !this.isSystemExcluded(path));
+    try {
+      if (remoteFiles) await this.reconcileCanonicalRemoteNames(remoteFiles);
+      await assertUnambiguousLocalPaths(this.opts.localAdapter, included(localPaths), included(remotePaths));
+    } catch (err) {
+      // The next run must re-read authoritative names, including after an app restart.
+      this.opts.stateDB.setSyncToken(null);
+      this.opts.stateDB.setRemoteRootEtag(null);
+      throw err;
+    }
+  }
+
+  /** A user may already have matched a server-normalized name. Re-key only metadata, never local files. */
+  private async reconcileCanonicalRemoteNames(remoteFiles: readonly RemoteFileInfo[]): Promise<void> {
+    const byId = new Map(remoteFiles.filter(file => file.fileId).map(file => [file.fileId, file]));
+    for (const previous of this.opts.stateDB.getAllFiles()) {
+      const remote = previous.remoteFileId ? byId.get(previous.remoteFileId) : undefined;
+      if (!remote || previous.path === remote.path || previous.path.normalize('NFC') !== remote.path.normalize('NFC')
+          || this.isSystemExcluded(remote.path) || this.isSystemExcluded(previous.path) || this.isRenameHeld(previous.path)) continue;
+      this.assertFileRenameSettled(remote.path);
+      const current = this.opts.stateDB.getFile(remote.path);
+      const sourceBase = this.opts.baseStore?.get(previous.path), targetBase = this.opts.baseStore?.get(remote.path);
+      const sourceClean = this.opts.cleanSideStore?.get(previous.path), targetClean = this.opts.cleanSideStore?.get(remote.path);
+      if (await hasExactLocalFile(this.opts.localAdapter, previous.path) || !await hasExactLocalFile(this.opts.localAdapter, remote.path)
+          || (current && (current.remoteFileId !== previous.remoteFileId || current.localHash !== previous.localHash))
+          || (sourceBase !== undefined && targetBase !== undefined && sourceBase !== targetBase)
+          || (sourceClean && targetClean && JSON.stringify(sourceClean) !== JSON.stringify(targetClean))) {
+        throw new LocalPathIdentityError(`The server uses a different Unicode spelling for ${previous.path}. Sync stopped before changing files. Match the local filename to ${remote.path} and retry.`);
+      }
+      this.opts.stateDB.deleteFile(previous.path);
+      this.opts.stateDB.setFile({ ...(current ?? previous), path: remote.path, localMtime: undefined, localSize: undefined });
+      if (this.opts.baseStore) {
+        this.opts.baseStore.delete(previous.path);
+        if (targetBase === undefined && sourceBase !== undefined) this.opts.baseStore.set(remote.path, sourceBase);
+        this.opts.baseStore.requestSave();
+      }
+      if (this.opts.cleanSideStore) {
+        this.opts.cleanSideStore.delete(previous.path);
+        if (!targetClean && sourceClean) this.opts.cleanSideStore.set(remote.path, sourceClean);
+        this.opts.cleanSideStore.requestSave();
+      }
+      this.opts.stateDB.setRemoteRootEtag(null);
+    }
+  }
+
   private rememberRemoteRoot(client: IWebDAVClient): void {
     if (!client.requireExistingVaultRoot) return;
     this.opts.stateDB.markRemoteRootObserved();
@@ -1527,6 +1576,8 @@ export class SyncEngine {
     let remoteFiles: RemoteFileInfo[];
     // A full scan has a complete listing (absence implies remote deletion). The token path only has a diff.
     let fullScan: FullScanListing | undefined;
+    let tokenDeleted: string[] = [];
+    let tokenPaths: Set<string> | undefined;
 
     const existingToken = refreshRemote ? null : this.opts.stateDB.getSyncToken();
     // A missing vault folder can surface from any listing call below, including the token-expired fallback, hence one guard
@@ -1539,17 +1590,16 @@ export class SyncEngine {
           remoteFiles = changes.modified;
           void this.opts.logger?.log(`sync: incremental via token (modified=${changes.modified.length}, remote-deleted=${changes.deleted.length})`);
 
-          // Apply remote renames (fileId-based) before deletions so a rename is not seen as delete + new upload.
-          const rt = this.getOrCreateRenameTracker();
-          const remoteRenames = rt.detectRemoteRenames(remoteFiles);
-          for (const [oldPath, newPath] of remoteRenames) {
-            if (this.deferRemotePath(oldPath) || this.deferRemotePath(newPath)
-              || this.isRenameHeld(oldPath) || this.isRenameHeld(newPath)) continue;
-            await rt.applyRemoteRename(oldPath, newPath);
-          }
-
-          for (const deletedPath of changes.deleted) {
-            await this.processRemoteDeletion(deletedPath, summary);
+          // State-only renaming would make the unchanged local old name look deleted.
+          if (this.getOrCreateRenameTracker().detectRemoteRenames(remoteFiles).size > 0) {
+            this.opts.stateDB.setRemoteRootEtag(null);
+            fullScan = await this.obtainFullScanListing(client);
+            remoteFiles = fullScan.remoteFiles;
+          } else {
+            tokenPaths = new Set(this.opts.stateDB.getAllFiles().map(file => file.path));
+            for (const path of changes.deleted) tokenPaths.delete(path);
+            for (const remote of remoteFiles) tokenPaths.add(remote.path);
+            tokenDeleted = changes.deleted;
           }
         } catch (err) {
           if (err instanceof SyncTokenExpiredError) {
@@ -1633,6 +1683,12 @@ export class SyncEngine {
 
     const scopeFiles = remoteFiles.filter(f => !isHeld(f.path, true) && !this.isRenameHeld(f.path));
     await this.preparePluginSession(client, scopeFiles);
+    const localNames = await this.scanLocalFiles();
+    for (const path of localNames.keys()) if (isHeld(path) || this.isRenameHeld(path)) localNames.delete(path);
+    const remoteNames = [...(tokenPaths ?? remoteFiles.map(file => file.path))]
+      .filter(path => !isHeld(path, true) && !this.isRenameHeld(path));
+    await this.assertLocalPathIdentity(localNames.keys(), remoteNames, fullScan ? remoteFiles : undefined);
+    for (const path of tokenDeleted) await this.processRemoteDeletion(path, summary);
     const eligible = scopeFiles.filter(f => !this.isSystemExcluded(f.path));
     this.syncProgress = { processed: 0, total: eligible.length };
     if (eligible.length > 0) this.opts.statusBar.setProgress(0, eligible.length);

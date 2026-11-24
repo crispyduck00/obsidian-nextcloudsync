@@ -9,6 +9,7 @@ import { SyncJournal } from '../../../../src/sync/session/SyncJournal';
 import { SyncSessionSummary, DirState } from '../../../../src/types';
 import { IWebDAVClient } from '../../../../src/network/IWebDAVClient';
 import { TFolder } from '../../support/obsidian';
+import { localListing } from '../../support/localListing';
 
 const summary = (): SyncSessionSummary => ({
   startedAt: 0, completedAt: null, uploadedCount: 0, downloadedCount: 0, deletedCount: 0,
@@ -33,7 +34,11 @@ function build(exists: boolean | (() => Promise<boolean>)) {
   const deps: DirectoryDeps = {
     app: {
       vault: {
-        adapter: { list: async () => ({ files: [], folders: [] }), rmdir: async (p: string) => { calls.trash.push(p); } },
+        adapter: {
+          stat: async (p: string) => ['Projects', 'Projects/New'].includes(p) ? { size: 0, mtime: 1 } : null,
+          list: async (p: string) => localListing(p, [], ['Projects', 'Projects/New']),
+          rmdir: async (p: string) => { calls.trash.push(p); },
+        },
         getAllFolders: () => [new TFolder('Projects/New')],
         getAbstractFileByPath: (p: string) => (p === 'Projects/New' ? new TFolder(p) : null),
       },

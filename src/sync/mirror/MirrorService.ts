@@ -24,6 +24,7 @@ import { FileLogger } from '../../util/FileLogger';
 import { sha256 } from '../../util/hash';
 import { assertTrackedParentReadable, replacedRemoteFolders } from '../directory/RemoteFolderGuard';
 import { partitionPluginManifestsLast } from '../plugins/pluginPaths';
+import { assertUnambiguousLocalPaths } from '../scan/localPathIdentity';
 
 // A port because the counters are shared with an ordinary sync; the status bar must show one notion of progress.
 export interface MirrorProgress {
@@ -33,7 +34,7 @@ export interface MirrorProgress {
 
 export interface MirrorDeps {
   app: App;
-  localAdapter: Pick<LocalAdapter, 'stat' | 'readBinary'>;
+  localAdapter: Pick<LocalAdapter, 'stat' | 'readBinary' | 'list'>;
   stateDB: Pick<StateDB,
     'getFile' | 'setFile' | 'getAllFiles' | 'deleteFile' | 'deleteDir'
     | 'getAllDirs' | 'getDir' | 'setDir' | 'setRemoteRootEtag' | 'setSyncToken'>
@@ -95,7 +96,11 @@ export class MirrorService {
       if (replaced.size > 0) {
         return buildMirrorPlan([], [], [], () => false, false, `A different Nextcloud folder is now at ${[...replaced][0]}. Check the remote path and permissions.`);
       }
-      return await this.planFromListing(client, remoteFiles, remoteDirs, onPhase);
+      try {
+        return await this.planFromListing(client, remoteFiles, remoteDirs, onPhase);
+      } catch (err) {
+        return buildMirrorPlan([], [], [], () => false, false, `Could not safely compare local paths: ${(err as Error).message}`);
+      }
     } finally {
       this.deps.plugins.discard();
     }
@@ -112,6 +117,10 @@ export class MirrorService {
       const st = await this.deps.localAdapter.stat(p);
       if (st) localStats.set(p, { size: st.size, mtime: st.mtime });
     }
+
+    await this.assertLocalPathIdentity(localStats.keys(), remoteFiles.map(file => file.path));
+    const localDirs = this.readLocalDirs();
+    await this.assertLocalPathIdentity(localDirs, remoteDirs.map(dir => dir.path), 'folder');
 
     // An unobserved revision may advertise a previous version's checksum, including on a fresh device.
     // Resolve only same-size candidates. A missing or different-sized local file needs the body anyway.
@@ -145,9 +154,6 @@ export class MirrorService {
       }
       localFiles.push({ path, hash, knownRemoteHash: knownHashes.get(path), size: st.size, mtime: st.mtime });
     }
-
-    // Empty folders included, for local-only folder deletion.
-    const localDirs = this.readLocalDirs();
 
     return buildMirrorPlan(remoteFiles, localFiles, localDirs, (p) => this.deps.isSystemExcluded(p), true, null, remoteDirs);
   }
@@ -192,6 +198,19 @@ export class MirrorService {
       this.deps.plugins.begin('manual');
       try {
         await this.deps.plugins.prepare(client, plan.remoteFiles);
+        try {
+          const localStats = new Map<string, { size: number; mtime: number }>();
+          await this.deps.localScanner.collectLocalStats(localStats);
+          const configPaths = await this.deps.enumerateIncludedConfigPaths();
+          await this.assertLocalPathIdentity([...localStats.keys(), ...configPaths, ...plan.deleteFiles], plan.remoteFiles.map(file => file.path));
+          await this.assertLocalPathIdentity([...this.readLocalDirs(), ...plan.deleteDirs], plan.remoteDirs.map(dir => dir.path), 'folder');
+        } catch (err) {
+          result.errors.push({ path: '', message: `The mirror was stopped before any changes: ${(err as Error).message}` });
+          summary.errorCount = result.errors.length;
+          this.deps.statusBar.setSyncComplete(0, 0, 0, result.errors.length);
+          this.deps.oversizeSkips.sessionFinished(summary, 'manual');
+          return result;
+        }
         await this.runDownloads(client, plan, summary, result, tick);
 
         // Failures are judged after every deletion ran: a path can still disappear with its parent folder.
@@ -312,6 +331,11 @@ export class MirrorService {
       `mirror: applied — downloaded=${result.downloaded}, deleted=${result.deleted}, skipped=${result.skipped}, createdDirs=${result.createdDirs}, errors=${result.errors.length}`,
     );
     return result;
+  }
+
+  private async assertLocalPathIdentity(localPaths: Iterable<string>, remotePaths: Iterable<string>, kind: 'file' | 'folder' = 'file'): Promise<void> {
+    const included = (paths: Iterable<string>): string[] => [...paths].filter(path => !this.deps.isSystemExcluded(path));
+    await assertUnambiguousLocalPaths(this.deps.localAdapter, included(localPaths), included(remotePaths), kind);
   }
 
   // Remote wins: forced overwrite, not a 3-way merge. Excluded paths (unlisted plugins, data.json of a plugin

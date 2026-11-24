@@ -16,6 +16,7 @@ import { sha256 } from '../../util/hash';
 import type { LocalAdapter } from '../../data/LocalAdapter';
 import type { RemoteFolderGuard } from '../directory/RemoteFolderGuard';
 import { withTrustedChecksum } from '../remoteIdentity';
+import { LocalPathIdentityError } from '../scan/localPathIdentity';
 
 // What a local deletion did; a caller that must report failures (the mirror) reads it, an ordinary sync ignores it.
 export type RemoteDeletionOutcome =
@@ -31,7 +32,7 @@ export interface DeletionDeps {
   localAdapter: Pick<LocalAdapter, 'readBinary' | 'stat'>;
   isBeingEdited?(path: string): boolean;
   remoteFolders?: RemoteFolderGuard;
-  stateDB: Pick<StateDB, 'deleteFile' | 'getFile' | 'getAllFiles' | 'getAllDirs' | 'deleteDir'>;
+  stateDB: Pick<StateDB, 'deleteFile' | 'getFile' | 'getAllFiles' | 'getAllDirs' | 'deleteDir'> & Partial<Pick<StateDB, 'getFileIdentityGeneration'>>;
   journal: SyncJournal;
   mergeBase: MergeBaseRecorder;
   transfer: TransferService;
@@ -46,7 +47,34 @@ export interface DeletionDeps {
 }
 
 export class DeletionService {
+  private readonly aliasesByRun = new WeakMap<SyncSessionSummary, { generation: number | undefined; aliases: Map<string, FileState[]> }>();
+
   constructor(private readonly deps: DeletionDeps) {}
+
+  private async assertNoLocalAlias(base: FileState, summary: SyncSessionSummary): Promise<number | undefined> {
+    if (!base.remoteFileId) return;
+    const generation = this.deps.stateDB.getFileIdentityGeneration?.();
+    let cached = this.aliasesByRun.get(summary);
+    if (!cached || generation === undefined || cached.generation !== generation) {
+      const aliases = new Map<string, FileState[]>();
+      for (const file of this.deps.stateDB.getAllFiles()) {
+        if (!file.remoteFileId) continue;
+        const group = aliases.get(file.remoteFileId) ?? [];
+        group.push(file); aliases.set(file.remoteFileId, group);
+      }
+      for (const [id, group] of aliases) if (group.length < 2) aliases.delete(id);
+      cached = { generation, aliases }; this.aliasesByRun.set(summary, cached);
+    }
+    for (const file of cached.aliases.get(base.remoteFileId) ?? []) {
+      if (file.path === base.path || file.path.normalize('NFC') !== base.path.normalize('NFC')
+          || this.deps.stateDB.getFile(file.path)?.remoteFileId !== base.remoteFileId) continue;
+      if (await this.deps.app.vault.adapter.stat(file.path)) {
+        throw new LocalPathIdentityError(`Another local spelling of ${base.path} still refers to the same server file. Match the local filename to the server and retry sync.`);
+      }
+    }
+    return generation;
+  }
+
 
 
   async applyLocalDeletion(
@@ -55,6 +83,7 @@ export class DeletionService {
     summary: SyncSessionSummary,
   ): Promise<'deleted' | 'restored' | 'kept'> {
     if (this.deps.isRenameHeld?.(remote.path)) return 'kept';
+    await this.assertNoLocalAlias(base, summary);
     if (client.statFolderMovePath && this.deps.canDeleteMissingChild && !await this.deps.canDeleteMissingChild(remote.path, summary)) return 'kept';
     if (base.checkAfterFolderMove) {
       await this.deps.assertLocalVaultAvailable?.();
@@ -83,6 +112,9 @@ export class DeletionService {
       await this.deps.assertLocalVaultAvailable?.();
       if (client.statFolderMovePath && this.deps.canDeleteMissingChild && !await this.deps.canDeleteMissingChild(remote.path, summary)) return 'kept';
       if (this.deps.isRenameHeld?.(remote.path)) return 'kept';
+      let checkedGeneration: number | undefined;
+      do { checkedGeneration = await this.assertNoLocalAlias(base, summary); }
+      while (checkedGeneration !== undefined && checkedGeneration !== this.deps.stateDB.getFileIdentityGeneration?.());
       void this.deps.logger?.log(`delete-remote: local deletion (server checksum matches base) → ${remote.path}`);
       try {
         if (remote.etag) await client.deleteFile(remote.path, serverHash, remote.etag);

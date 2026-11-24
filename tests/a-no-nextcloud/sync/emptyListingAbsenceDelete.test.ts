@@ -1,3 +1,4 @@
+import { localListing } from '../support/localListing';
 // [SPEC:EAD-1] [SPEC:EAD-2] [SPEC:EAD-3] [SPEC:EAD-4] An empty remote listing is a listing, not a
 // reason to stop reconciling (GitHub issue #50): a note deleted on another device must still be trashed
 // here when the remote listing is empty, otherwise a small vault never converges.
@@ -46,7 +47,7 @@ function makeLocalAdapter(files: Record<string, string>) {
     files,
     listVaultFiles: jest.fn(() =>
       Object.keys(files).map(p => ({ path: p, size: sizeOf(p), mtime: BASE_MTIME }))),
-    list: jest.fn(async () => ({ files: [], folders: [] })), // no dot paths in these vaults
+    list: jest.fn(async (parent: string) => localListing(parent, Object.keys(files))),
     stat: jest.fn(async (p: string) => (p in files ? { size: sizeOf(p), mtime: BASE_MTIME } : null)),
     exists: jest.fn(async (p: string) => p in files),
     read: jest.fn(async (p: string) => files[p] ?? ''),

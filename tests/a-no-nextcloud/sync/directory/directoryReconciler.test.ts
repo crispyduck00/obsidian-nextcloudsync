@@ -11,6 +11,7 @@ import { SyncJournal } from '../../../../src/sync/session/SyncJournal';
 import { SyncSessionSummary, RemoteDirInfo, DirState } from '../../../../src/types';
 import { IWebDAVClient } from '../../../../src/network/IWebDAVClient';
 import { TFolder } from '../../support/obsidian';
+import { localListing } from '../../support/localListing';
 
 function summary(): SyncSessionSummary {
   return {
@@ -74,11 +75,13 @@ function build(world: Partial<World> = {}, over: Partial<DirectoryDeps> = {}) {
         adapter: {
           exists: async (p: string) => w.local.includes(p),
           mkdir: async (p: string) => { calls.mkdir.push(p); },
-          list: async () => ({ files: [], folders: [] }),
+          stat: async (p: string) => w.local.includes(p) ? { size: 0, mtime: 1 } : null,
+          list: async (p: string) => localListing(p, [], w.local),
           rmdir: async (p: string, recursive: boolean) => {
             if (recursive) throw new Error('Recursive removal');
             calls.trash.push(p);
             calls.order.push(`trash:${p}`);
+            w.local = w.local.filter(path => path !== p);
           },
         },
         getAllFolders: () => w.local.map((p) => new TFolder(p)),
@@ -432,7 +435,8 @@ describe('[SPEC:DTV-3] DirectoryReconciler.reconcileDirectories — a plugin tra
       app: {
         vault: {
           adapter: {
-            list: async () => ({ files: [], folders: [] }),
+            stat: async (p: string) => p === 'F' ? { size: 0, mtime: 1 } : null,
+            list: async (p: string) => localListing(p, [], ['F']),
             rmdir: async () => { throw new Error('EACCES'); },
           },
           getAllFolders: () => [new TFolder('F')],

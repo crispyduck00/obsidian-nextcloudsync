@@ -13,6 +13,7 @@ export class StateDB {
   private readonly saveMutex = new AsyncMutex();
   // remoteFileId -> path reverse index (O(1) rename detection); kept in sync by setFile/deleteFile, rebuilt on load.
   private fileIdIndex = new Map<string, string>();
+  private fileIdentityGeneration = 0;
   private saveTimer: number | null = null;
   private rootListingGeneration = 0;
 
@@ -58,6 +59,7 @@ export class StateDB {
   }
 
   private rebuildIndex(): void {
+    this.fileIdentityGeneration++;
     this.fileIdIndex.clear();
     for (const [path, fs] of Object.entries(this.state.files)) {
       if (fs.remoteFileId) this.fileIdIndex.set(fs.remoteFileId, path);
@@ -112,6 +114,7 @@ export class StateDB {
 
   setFile(fileState: FileState): void {
     const prev = this.state.files[fileState.path];
+    if (!prev || prev.remoteFileId !== fileState.remoteFileId) this.fileIdentityGeneration++;
     // Drop a stale index entry if this path's remoteFileId changed (e.g. re-create on the server).
     if (
       prev?.remoteFileId &&
@@ -131,6 +134,9 @@ export class StateDB {
     }
     delete this.state.files[path];
   }
+
+  /** Changes that can introduce a second path for a remote ID; removals cannot add aliases. */
+  getFileIdentityGeneration(): number { return this.fileIdentityGeneration; }
 
   getAllFiles(): FileState[] {
     return Object.values(this.state.files);
@@ -257,6 +263,7 @@ export class StateDB {
 
   // Keeps deviceId; cancels any pending debounced save first so it cannot resurrect the old state.
   async reset(): Promise<void> {
+    this.fileIdentityGeneration++;
     if (this.saveTimer !== null) {
       window.clearTimeout(this.saveTimer);
       this.saveTimer = null;

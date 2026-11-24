@@ -58,10 +58,6 @@ function makeEngine(opts: {
     mkdir: opts.mkdir ?? jest.fn(async () => undefined),
     exists: jest.fn(async (p: string) => present.has(p)),
     remove: jest.fn(async () => undefined),
-    list: async (folder: string) => ({
-      files: [...present].filter(p => p.startsWith(`${folder}/`) && opts.localFiles.includes(p)),
-      folders: [...present].filter(p => p.startsWith(`${folder}/`) && !opts.localFiles.includes(p)),
-    }),
     rmdir: async (path: string, recursive: boolean) => {
       if (failTrash.includes(path)) throw new Error('trash failed');
       if (recursive || [...present].some(p => p.startsWith(`${path}/`))) throw new Error('ENOTEMPTY');
@@ -69,6 +65,11 @@ function makeEngine(opts: {
     },
     // Trashing a folder registers its paths as the plugin's own events before the trash runs.
     ignore: jest.fn(),
+    list: async (folder: string) => ({
+      files: [...present].filter(p => p.slice(0, p.lastIndexOf('/') < 0 ? 0 : p.lastIndexOf('/')) === folder && opts.localFiles.includes(p)),
+      folders: [...present].filter(p => p.slice(0, p.lastIndexOf('/') < 0 ? 0 : p.lastIndexOf('/')) === folder && !opts.localFiles.includes(p)),
+    }),
+    listVaultFiles: () => opts.localFiles.filter(p => present.has(p)).map(path => ({ path, size: 1, mtime: 0 })),
     readBinary: jest.fn(async () => new ArrayBuffer(0)),
   };
   const vault = {

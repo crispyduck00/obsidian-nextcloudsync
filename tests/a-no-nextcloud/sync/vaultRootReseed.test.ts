@@ -1,3 +1,4 @@
+import { localListing } from '../support/localListing';
 // [SPEC:VRR-1] [SPEC:VRR-2] [SPEC:VRR-3] [SPEC:VRR-4] [SPEC:VRR-5]
 // A missing vault folder is NOT the same event as a folder that is there and holds nothing (docs/spec.md §8).
 // An empty listing is the server's statement that every tracked file is genuinely gone, so absence-based
@@ -106,7 +107,7 @@ function makeLocalAdapter(files: Record<string, string>) {
   return {
     files,
     listVaultFiles: jest.fn(() => Object.keys(files).map((p) => ({ path: p, size: sizeOf(p), mtime: MTIME }))),
-    list: jest.fn(async () => ({ files: [] as string[], folders: [] as string[] })),
+    list: jest.fn(async (parent: string) => localListing(parent, Object.keys(files))),
     stat: jest.fn(async (p: string) => (p in files ? { size: sizeOf(p), mtime: MTIME } : null)),
     exists: jest.fn(async (p: string) => p in files),
     read: jest.fn(async (p: string) => files[p] ?? ''),
@@ -160,6 +161,8 @@ async function buildHarness(o: HarnessOptions) {
   const app = {
     vault: {
       adapter: {
+        stat: async (p: string) => o.localFolders.includes(p) ? { size: 0, mtime: MTIME } : local.stat(p),
+        list: async (p: string) => localListing(p, Object.keys(local.files), o.localFolders),
         mkdir: jest.fn(async () => undefined),
         exists: jest.fn(async (p: string) => p in local.files),
         remove: jest.fn(async (p: string) => { delete local.files[p]; }),
