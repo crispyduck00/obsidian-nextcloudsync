@@ -1,4 +1,4 @@
-import { PushSyncScheduler } from '../../../../src/sync/push/PushSyncScheduler';
+import { PUSH_SYNC_TIMING, PushSyncScheduler } from '../../../../src/sync/push/PushSyncScheduler';
 
 const GENERIC_NOTIFICATION = { fileIds: null, raw: 'notify_file' } as const;
 const targetedScope = (rootFileId: string | null = 'root-id', rootEtag = 'etag-1') => ({
@@ -802,11 +802,59 @@ describe('PushSyncScheduler', () => {
     expect(sync).toHaveBeenCalledTimes(1);
     expect(scheduler.getStatus().pending).toBe(true);
 
-    jest.advanceTimersByTime(0);
+    jest.advanceTimersByTime(PUSH_SYNC_TIMING.fullSyncRetryMs);
     await flush();
 
     expect(sync).toHaveBeenCalledTimes(2);
     expect(scheduler.getStatus().pending).toBe(false);
+  });
+
+  it('classifies a batch even while notifications continuously reset the quiet period', async () => {
+    const check = jest.fn(async () => ignoreScope);
+    const scheduler = new PushSyncScheduler({ isSyncRunning: () => false, shouldSync: check, sync: async () => {} });
+    for (let elapsed = 0; elapsed < PUSH_SYNC_TIMING.batchMaxDelayMs; elapsed += 200) {
+      scheduler.notify(GENERIC_NOTIFICATION);
+      await jest.advanceTimersByTimeAsync(200);
+    }
+    expect(check).toHaveBeenCalledTimes(1);
+  });
+
+  it('parks pending hints while the network is blocked and reconciles once it is allowed again', async () => {
+    let allowed = false;
+    const check = jest.fn(async () => fullSyncScope);
+    const sync = jest.fn(async () => {});
+    const scheduler = new PushSyncScheduler({
+      ...immediateFullSync, canSync: () => allowed, isSyncRunning: () => false, shouldSync: check, sync,
+    });
+    scheduler.notify(GENERIC_NOTIFICATION);
+    scheduler.requestRemoteCatchUp();
+    await jest.advanceTimersByTimeAsync(60_000);
+    expect(check).not.toHaveBeenCalled();
+    expect(sync).not.toHaveBeenCalled();
+    expect(scheduler.getStatus().pending).toBe(true);
+
+    allowed = true;
+    scheduler.onNetworkChanged();
+    await jest.advanceTimersByTimeAsync(0);
+    expect(check).toHaveBeenCalledTimes(1);
+    expect(sync).toHaveBeenCalledTimes(1);
+  });
+
+  it('backs off failed fallbacks without restarting every time a hint or catch-up arrives', async () => {
+    const sync = jest.fn(async () => 'retry' as const);
+    const scheduler = new PushSyncScheduler({ ...immediateFullSync, isSyncRunning: () => false, sync });
+    scheduler.requestRemoteCatchUp();
+    await jest.advanceTimersByTimeAsync(0);
+    expect(sync).toHaveBeenCalledTimes(1);
+    for (const [index, delay] of [5000, 10000, 20000, 40000, 60000, 60000].entries()) {
+      scheduler.notify(GENERIC_NOTIFICATION);
+      scheduler.requestRemoteCatchUp();
+      await jest.advanceTimersByTimeAsync(delay - 1);
+      expect(sync).toHaveBeenCalledTimes(index + 1);
+      await jest.advanceTimersByTimeAsync(1);
+      expect(sync).toHaveBeenCalledTimes(index + 2);
+    }
+    scheduler.stop();
   });
 
   it('coalesces repeated remote catch-up requests into one root probe', async () => {
@@ -894,7 +942,7 @@ describe('PushSyncScheduler', () => {
     expect(sync).not.toHaveBeenCalled();
     await jest.advanceTimersByTimeAsync(100);
     expect(sync).toHaveBeenCalledTimes(1);
-    await jest.advanceTimersByTimeAsync(100);
+    await jest.advanceTimersByTimeAsync(PUSH_SYNC_TIMING.fullSyncRetryMs);
     expect(sync).toHaveBeenCalledTimes(2);
     expect(scheduler.getStatus().pending).toBe(false);
   });

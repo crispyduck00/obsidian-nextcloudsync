@@ -4,9 +4,12 @@ import type { RemoteBatchReconcileResult, RemotePushBatch } from './RemotePushRe
 /** Central defaults so push timing can be tuned without spreading magic numbers through the code. */
 export const PUSH_SYNC_TIMING = {
   batchDebounceMs: 350,
+  batchMaxDelayMs: 2000,
   busyRetryMs: 500,
   fullSyncQuietMs: 3000,
   fullSyncMaxDelayMs: 8000,
+  fullSyncRetryMs: 5000,
+  fullSyncMaxRetryMs: 60000,
 } as const;
 
 export type PushFullSyncResult = 'completed' | 'retry';
@@ -20,6 +23,7 @@ type ChangedPushRoot = Extract<ClientPushScopeResult, { kind: 'targeted' }>;
 
 export interface PushSyncSchedulerOptions {
   isSyncRunning(): boolean;
+  canSync?(): boolean;
   /**
    * Optional vault-scope check. The boolean form is retained for the standalone Client Push layer:
    * false means proven irrelevant, true means conservatively use the ordinary full sync. P2 returns
@@ -64,6 +68,9 @@ export class PushSyncScheduler {
   private fullSyncFirstRequestedAt: number | null = null;
   private fullSyncLastActivityAt: number | null = null;
   private retryOnUnchanged = false;
+  private firstPendingNotificationAt: number | null = null;
+  private retryAt = 0;
+  private failureCount = 0;
   private timer: number | null = null;
   private stopped = false;
   private syncing = false;
@@ -90,6 +97,7 @@ export class PushSyncScheduler {
   notify(notification: PushFileNotification): void {
     if (this.stopped) return;
     this.lastNotificationAt = Date.now();
+    this.firstPendingNotificationAt ??= this.lastNotificationAt;
 
     if (!notification.fileIds || notification.fileIds.length === 0) {
       this.needsFullSync = true;
@@ -112,11 +120,19 @@ export class PushSyncScheduler {
     if (this.fullSyncPending) {
       // Once a structural burst is known, do not start new targeted work. Every additional push merely
       // extends the quiet window; the max deadline remains anchored to the first structural event.
-      this.fullSyncLastActivityAt = Date.now();
+      this.fullSyncLastActivityAt = this.lastNotificationAt;
       if (!this.syncing) this.scheduleNext();
       return;
     }
-    this.schedule(this.opts.debounceMs ?? PUSH_SYNC_TIMING.batchDebounceMs);
+    const quiet = this.catchUpRequested ? 0 : this.opts.debounceMs ?? PUSH_SYNC_TIMING.batchDebounceMs;
+    const remaining = this.firstPendingNotificationAt + PUSH_SYNC_TIMING.batchMaxDelayMs - this.lastNotificationAt;
+    this.schedule(Math.min(quiet, remaining));
+  }
+
+  /** Keep the batch queued while the network policy blocks work. */
+  onNetworkChanged(): void {
+    if (!this.canSync()) this.clearTimer();
+    else if (!this.syncing) this.scheduleNext();
   }
 
   stop(): void {
@@ -124,7 +140,13 @@ export class PushSyncScheduler {
     this.pendingFileIds.clear();
     this.needsFullSync = false;
     this.catchUpRequested = false;
+    this.firstPendingNotificationAt = null;
     this.clearFullSyncPending();
+    this.clearFailureBackoff();
+    this.clearTimer();
+  }
+
+  private clearTimer(): void {
     if (this.timer !== null) window.clearTimeout(this.timer);
     this.timer = null;
   }
@@ -143,11 +165,16 @@ export class PushSyncScheduler {
 
   private schedule(delayMs: number): void {
     if (this.stopped) return;
-    if (this.timer !== null) window.clearTimeout(this.timer);
+    this.clearTimer();
+    if (!this.canSync()) return;
     this.timer = window.setTimeout(() => {
       this.timer = null;
       void this.drain();
-    }, Math.max(0, delayMs));
+    }, Math.max(0, delayMs, this.retryAt - Date.now()));
+  }
+
+  private canSync(): boolean {
+    return this.opts.canSync?.() !== false;
   }
 
   private scheduleNext(minDelayMs = 0): void {
@@ -190,6 +217,11 @@ export class PushSyncScheduler {
     this.retryOnUnchanged = false;
   }
 
+  private clearFailureBackoff(): void {
+    this.failureCount = 0;
+    this.retryAt = 0;
+  }
+
   private fullSyncQuietMs(): number {
     return Math.max(0, this.opts.fullSyncQuietMs ?? PUSH_SYNC_TIMING.fullSyncQuietMs);
   }
@@ -209,7 +241,8 @@ export class PushSyncScheduler {
   }
 
   private async runPendingFullSync(): Promise<void> {
-    if (!this.fullSyncPending || this.fullSyncDelayMs() > 0 || this.stopped) return;
+    if (!this.fullSyncPending || this.fullSyncDelayMs() > 0 || this.stopped || !this.canSync()
+      || Date.now() < this.retryAt) return;
 
     // Consume the pending request BEFORE awaiting. A push arriving during this full sync forms a new
     // batch and is scope-checked afterwards instead of being silently swallowed by this run.
@@ -228,19 +261,23 @@ export class PushSyncScheduler {
 
     if (this.stopped) return;
     if (outcome === 'retry') {
-      // The request was skipped (busy / Wi-Fi-only) or the authoritative run itself failed. Keep one
-      // debounced request alive instead of silently consuming the only hint. `requestFullSync` starts
-      // a fresh quiet window, which also avoids a tight retry loop while the server/network is down.
+      if (this.canSync()) {
+        const delay = Math.min(PUSH_SYNC_TIMING.fullSyncMaxRetryMs,
+          PUSH_SYNC_TIMING.fullSyncRetryMs * 2 ** this.failureCount);
+        this.failureCount += 1;
+        this.retryAt = Date.now() + delay;
+      }
       this.requestFullSync('full reconciliation did not complete', retryOnUnchanged);
       return;
     }
 
+    this.clearFailureBackoff();
     // `undefined` is kept as a backwards-compatible success result for the standalone push layer.
     this.lastTriggeredSyncAt = Date.now();
   }
 
   private async drain(): Promise<void> {
-    if (this.stopped || !this.hasPending() || this.syncing) return;
+    if (this.stopped || !this.hasPending() || this.syncing || !this.canSync()) return;
     if (this.opts.isSyncRunning()) {
       // Keep the hints until the running sync finishes, then check whether it covered them.
       this.scheduleNext(PUSH_SYNC_TIMING.busyRetryMs);
@@ -255,6 +292,7 @@ export class PushSyncScheduler {
     this.needsFullSync = false;
     this.catchUpRequested = false;
     this.pendingFileIds.clear();
+    this.firstPendingNotificationAt = null;
     this.syncing = true;
 
     let retryDelayMs = 0;
@@ -270,7 +308,7 @@ export class PushSyncScheduler {
       }
 
       if (this.stopped) return;
-      if (this.opts.isSyncRunning()) {
+      if (this.opts.isSyncRunning() || !this.canSync()) {
         this.restoreBatch(fullSyncRequested, fileIds, catchUpRequested);
         retryDelayMs = PUSH_SYNC_TIMING.busyRetryMs;
         return;
@@ -283,6 +321,7 @@ export class PushSyncScheduler {
         }
         if (this.fullSyncPending) this.opts.log?.('push: authoritative vault root caught up → cancelling pending full reconciliation');
         this.clearFullSyncPending();
+        this.clearFailureBackoff();
         this.opts.log?.('push: vault root unchanged → no vault reconciliation needed');
         return;
       }
@@ -319,6 +358,10 @@ export class PushSyncScheduler {
         await this.runPendingFullSync();
         return;
       }
+      if (!this.canSync()) {
+        this.restoreBatch(fullSyncRequested, fileIds, catchUpRequested);
+        return;
+      }
 
       this.opts.log?.(`push: reconciling ${fileIds.length} remote file id(s)`);
       let result: RemoteBatchReconcileResult;
@@ -334,7 +377,7 @@ export class PushSyncScheduler {
       }
 
       if (this.stopped) return;
-      if (result === 'busy') {
+      if (result === 'busy' || !this.canSync()) {
         this.restoreBatch(fullSyncRequested, fileIds, catchUpRequested);
         retryDelayMs = PUSH_SYNC_TIMING.busyRetryMs;
         return;

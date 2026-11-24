@@ -154,6 +154,7 @@ export default class ObsidianNextcloudsync extends Plugin {
       const online = typeof navigator === 'undefined' || navigator.onLine !== false;
       const hadPushSession = (this.pushClient?.getStatus().lastConnectedAt ?? null) !== null;
       this.pushClient?.setNetworkOnline(online);
+      this.pushSyncScheduler?.onNetworkChanged();
       if (online) {
         // The socket can remain logically OPEN while the WebView was actually suspended, so catch-up
         // must not depend on seeing a reconnect transition. Only do this after at least one real push
@@ -164,12 +165,20 @@ export default class ObsidianNextcloudsync extends Plugin {
     });
     this.registerDomEvent(window, 'offline', () => {
       this.pushClient?.setNetworkOnline(false);
+      this.pushSyncScheduler?.onNetworkChanged();
     });
     this.registerDomEvent(window, 'online', () => {
       const hadPushSession = (this.pushClient?.getStatus().lastConnectedAt ?? null) !== null;
       this.pushClient?.setNetworkOnline(true);
+      this.pushSyncScheduler?.onNetworkChanged();
       if (hadPushSession) this.pushSyncScheduler?.requestRemoteCatchUp('network returned');
     });
+    const connection = (navigator as Navigator & { connection?: EventTarget }).connection;
+    if (connection) {
+      const onConnectionChange = (): void => this.reevaluateMobileWatchPolicy();
+      connection.addEventListener('change', onConnectionChange);
+      this.register(() => connection.removeEventListener('change', onConnectionChange));
+    }
 
     // Ribbon entry point for the same manual sync (upstream change / issue #19). One click on desktop,
     // two taps on mobile: the ribbon BAR is hidden there, but Obsidian republishes ribbon actions in
@@ -440,12 +449,6 @@ export default class ObsidianNextcloudsync extends Plugin {
         });
         this.registerDomEvent(window, 'online', () => mobileWatch.onNetworkChanged());
         this.registerDomEvent(window, 'offline', () => mobileWatch.onNetworkChanged());
-        const connection = (navigator as Navigator & { connection?: EventTarget }).connection;
-        if (connection) {
-          const onConnectionChange = (): void => mobileWatch.onNetworkChanged();
-          connection.addEventListener('change', onConnectionChange);
-          this.register(() => connection.removeEventListener('change', onConnectionChange));
-        }
       }
 
       // Sync on foreground resume, on every platform (docs/spec.md §5.8). The cooldown inside the
@@ -463,6 +466,7 @@ export default class ObsidianNextcloudsync extends Plugin {
   /** Re-evaluate Android Watch after a live Watch/Wi-Fi-only setting change. */
   reevaluateMobileWatchPolicy(): void {
     this.mobileWatch?.onNetworkChanged();
+    this.pushSyncScheduler?.onNetworkChanged();
   }
 
   /**
@@ -954,6 +958,7 @@ export default class ObsidianNextcloudsync extends Plugin {
 
     const scheduler = new PushSyncScheduler({
       isSyncRunning: () => this.syncEngine?.isSyncRunning() ?? false,
+      canSync: () => this.syncEngine?.canRunWatchSync() ?? false,
       shouldSync: async (fileIds) => this.syncEngine?.shouldReconcileClientPush(fileIds) ?? true,
       verifyRoot: async (root) => this.syncEngine?.verifyClientPushRoot(root) ?? false,
       onReconciliationTriggered: () => {
