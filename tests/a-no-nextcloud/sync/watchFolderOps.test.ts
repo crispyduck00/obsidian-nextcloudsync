@@ -60,6 +60,19 @@ describe('[SPEC:WF-1] SyncEngine.createSingleFolder', () => {
     expect(dirs.has('Notes/2026')).toBe(true);
   });
 
+  it('retains the confirmed collection ID without a later path lookup', async () => {
+    const { engine, client, dirs } = makeEngine();
+    const stat = jest.fn(async () => ({ directoryId: 'peer-replacement' }));
+    Object.assign(client, { statFolderMovePath: stat });
+    client.createDirectory.mockImplementationOnce(async (...args: unknown[]) => {
+      const path = args[0] as string;
+      dirs.set(path, { path, remoteFileId: 'created-id' });
+    });
+    await engine.createSingleFolder('New');
+    expect(dirs.get('New')?.remoteFileId).toBe('created-id');
+    expect(stat).not.toHaveBeenCalled();
+  });
+
   it('is idempotent: a failing MKCOL (already exists) is swallowed, not thrown', async () => {
     const { engine, client } = makeEngine();
     client.createDirectory.mockRejectedValueOnce(new Error('405 Method Not Allowed'));
