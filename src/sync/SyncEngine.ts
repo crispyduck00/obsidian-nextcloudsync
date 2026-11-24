@@ -1,3 +1,4 @@
+import { LocalCreationGrace } from './watch/LocalCreationGrace';
 import { App, Notice, Platform, apiVersion } from 'obsidian';
 import { CreationTimeAligner } from './ctime/CreationTimeAligner';
 import { uploadCreationTimeMs } from '../util/creationTime';
@@ -95,6 +96,7 @@ interface SyncEngineOptions {
   readAppPassword?: AppPasswordReader;
   pluginDir: string;
   configDir: string;
+  localCreationGrace?: LocalCreationGrace;
   // Host-owned predicate for this device's active log files, which must stay out of sync (docs/spec.md §9.1).
   isActiveLogFile?: (path: string) => boolean;
   // True while the user is typing into `path`. Consulted before any REMOTE -> LOCAL write, because writing under the cursor
@@ -120,6 +122,8 @@ export class SyncEngine {
   private uploadStrategy: IUploadStrategy | null = null;
   // Balking flag: a second syncManual() call returns immediately.
   private running = false;
+  private readonly localCreations: LocalCreationGrace;
+  private deferredRemoteThisRun = false;
   // Set by requestStop(): workers stop pulling new work, while the run's finally block still saves state.
   private cancelled = false;
   // Lets abortAndWait() await a running sync's wind-down (including its final state save) before a reset.
@@ -166,6 +170,8 @@ export class SyncEngine {
   private readonly remoteListing: RemoteListingSource;
 
   constructor(private readonly opts: SyncEngineOptions) {
+    this.localCreations = opts.localCreationGrace
+      ?? new LocalCreationGrace(() => (opts.settings.newItemDelaySeconds ?? 0) * 1000);
     this.pluginsAwaitingRestart = opts.pluginsAwaitingRestart ?? new Set();
     // Tolerates a bare engine built without a plugin folder (some suites construct one with only the fields they use).
     const pluginDir: string = opts.pluginDir ?? '';
@@ -347,6 +353,27 @@ export class SyncEngine {
     });
   }
 
+  private isCreationDeferred(path: string): boolean {
+    return this.localCreations.readyAt(path) !== undefined;
+  }
+
+  private deferRemotePath(path: string): boolean {
+    if (!this.isCreationDeferred(path)) return false;
+    if (this.running) this.deferredRemoteThisRun = true;
+    return true;
+  }
+
+  rememberLocalCreation(path: string, folder: boolean): void {
+    if (!this.opts.settings.newItemDelaySeconds || this.isSystemExcluded(path) || this.plugins.isPluginPath(path)) return;
+    if (folder ? this.opts.stateDB.getDir(path) : this.opts.stateDB.getFile(path)) return;
+    this.localCreations.add(path, folder);
+  }
+
+  retargetLocalCreation(source: string, destination: string, folder: boolean): boolean {
+    if (!this.localCreations.rename(source, destination, folder)) return false;
+    return !(folder ? this.opts.stateDB.getDir(source) : this.opts.stateDB.getFile(source));
+  }
+
   private getOrCreateRenameTracker(): RenameTracker {
     if (!this.renameTracker) {
       this.renameTracker = new RenameTracker(this.opts.stateDB, this.client!);
@@ -445,6 +472,8 @@ export class SyncEngine {
 
     const cancelled = false;
     try {
+      this.deferredRemoteThisRun = false;
+      if (manual) this.localCreations.clear();
       // Connect INSIDE the try: if ensureClient() threw or hung outside it, the finally that clears `running` would be
       // skipped and the engine would balk forever as "already running".
       void this.opts.logger?.log('sync: connecting (ensureClient)');
@@ -460,6 +489,10 @@ export class SyncEngine {
         await this.initialSync(summary);
       } else {
         await this.incrementalSync(summary);
+      }
+      if (this.deferredRemoteThisRun) {
+        this.opts.stateDB.setSyncToken(null);
+        this.opts.stateDB.setRemoteRootEtag(null);
       }
     } catch (err) {
       console.error('[SyncEngine] Sync failed:', err);
@@ -550,6 +583,7 @@ export class SyncEngine {
 
 
   syncSingleFile(path: string): Promise<void> {
+    if (this.isCreationDeferred(path)) return Promise.resolve();
     return this.watch.syncSingleFile(path);
   }
 
@@ -566,6 +600,7 @@ export class SyncEngine {
   }
 
   createSingleFolder(path: string): Promise<void> {
+    if (this.isCreationDeferred(path)) return Promise.resolve();
     return this.watch.createSingleFolder(path);
   }
 
@@ -688,6 +723,7 @@ export class SyncEngine {
   applyRemoteMirror(
     plan: MirrorPlan, onProgress?: (done: number, total: number) => void,
   ): Promise<MirrorResult> {
+    this.localCreations.clear();
     return this.mirror.applyRemoteMirror(this.client!, plan, onProgress);
   }
 
@@ -805,6 +841,7 @@ export class SyncEngine {
       void this.opts.logger?.log('sync: INITIAL — no vault folder on the server yet; the first upload will create it');
       remoteFiles = [];
     }
+    remoteFiles = remoteFiles.filter(file => !this.deferRemotePath(file.path));
     await this.preparePluginSession(client, remoteFiles);
     const localFiles = await this.scanLocalFiles();
 
@@ -853,6 +890,7 @@ export class SyncEngine {
           const rt = this.getOrCreateRenameTracker();
           const remoteRenames = rt.detectRemoteRenames(remoteFiles);
           for (const [oldPath, newPath] of remoteRenames) {
+            if (this.deferRemotePath(oldPath) || this.deferRemotePath(newPath)) continue;
             await rt.applyRemoteRename(oldPath, newPath);
           }
 
@@ -891,8 +929,9 @@ export class SyncEngine {
 
     summary.retriedFiles = this.retryQueue.splice(0);
 
-    await this.preparePluginSession(client, remoteFiles);
-    const eligible = remoteFiles.filter(f => !this.isSystemExcluded(f.path));
+    const scopeFiles = remoteFiles.filter(file => !this.deferRemotePath(file.path));
+    await this.preparePluginSession(client, scopeFiles);
+    const eligible = scopeFiles.filter(f => !this.isSystemExcluded(f.path));
     this.syncProgress = { processed: 0, total: eligible.length };
     if (eligible.length > 0) this.opts.statusBar.setProgress(0, eligible.length);
     // Bounded parallel; uploads to the same directory are serialized to avoid 423s. A plugin's manifest.json goes last so a
@@ -923,6 +962,7 @@ export class SyncEngine {
   }
 
   private async processFileWithRetry(remote: RemoteFileInfo, summary: SyncSessionSummary): Promise<void> {
+    if (this.deferRemotePath(remote.path)) return;
     try {
       await this.processRemoteFile(remote, summary);
     } catch (err) {
@@ -994,6 +1034,7 @@ export class SyncEngine {
   }
 
   private async processRemoteFile(remote: RemoteFileInfo, summary: SyncSessionSummary): Promise<void> {
+    if (this.deferRemotePath(remote.path)) return;
     const base = this.opts.stateDB.getFile(remote.path);
     const localStat = await this.opts.localAdapter.stat(remote.path);
     const { remoteId, idType } = remoteIdOf(remote);
@@ -1210,6 +1251,7 @@ export class SyncEngine {
 
 
   private async processRemoteDeletion(path: string, summary: SyncSessionSummary): Promise<void> {
+    if (this.deferRemotePath(path)) return;
     const outcome = await this.deletion.processRemoteDeletion(path, summary);
     // The entry kept for the retry describes a file the server no longer has. A short-circuit would rebuild the
     // listing from State, report it as still on the server, and never retry (docs/spec.md §8a.5).
@@ -1231,6 +1273,7 @@ export class SyncEngine {
 
     // Cheap synchronous pre-filter, then bounded-parallel upload; the content-hash check stays in the worker because it needs a read.
     const uploadCandidates = [...localStats.entries()].filter(([path, st]) => {
+      if (this.isCreationDeferred(path)) return false;
       if (remotePathSet.has(path) || this.pluginSkips(path, 'local-only')) return false;
       const base = this.opts.stateDB.getFile(path);
       // Skip files whose post-write stat signature is unchanged (no read, no hash); an mtime filter is always false on mobile.
@@ -1241,6 +1284,7 @@ export class SyncEngine {
       ([path]) => path,
       ([, st]) => st.size,
       async ([path, st]) => {
+        if (this.isCreationDeferred(path)) return;
         const base = this.opts.stateDB.getFile(path);
         const data = await this.opts.localAdapter.readBinary(path);
         const localHash = await sha256(data);
@@ -1270,7 +1314,7 @@ export class SyncEngine {
     // New (unsynced) local files, for hash-based rename detection.
     const newLocalFiles = new Map<string, { hash: string; size: number }>();
     for (const [path, st] of localStats) {
-      if (!this.opts.stateDB.getFile(path)) {
+      if (!this.opts.stateDB.getFile(path) && !this.isCreationDeferred(path)) {
         const data = await this.opts.localAdapter.readBinary(path);
         const hash = await sha256(data);
         newLocalFiles.set(path, { hash, size: st.size });
@@ -1279,7 +1323,7 @@ export class SyncEngine {
 
     const missingPaths = this.opts.stateDB.getAllFiles()
       .map(f => f.path)
-      .filter(p => !this.isSystemExcluded(p) && !localStats.has(p) && !remotePathSet.has(p));
+      .filter(p => !this.isSystemExcluded(p) && !localStats.has(p) && !remotePathSet.has(p) && !this.isCreationDeferred(p));
 
     const localRenames = rt.detectLocalRenamesByHash(missingPaths, newLocalFiles);
 
@@ -1320,7 +1364,7 @@ export class SyncEngine {
       const candidates: string[] = [];
       for (const fileState of this.opts.stateDB.getAllFiles()) {
         const path = fileState.path;
-        if (this.isSystemExcluded(path) || remotePathSet.has(path)) continue;
+        if (this.isCreationDeferred(path) || this.isSystemExcluded(path) || remotePathSet.has(path)) continue;
         if (!localStats.has(path)) continue;
         const data = await this.opts.localAdapter.readBinary(path);
         if (await sha256(data) !== fileState.localHash) continue;
@@ -1358,7 +1402,8 @@ export class SyncEngine {
   // Runs only on a COMPLETE listing. Directories are first-class entities, never deleted merely for being empty
   // (docs/spec.md §8a.1, docs/plan.md §16).
   private reconcileDirectories(summary: SyncSessionSummary, cachedDirs?: RemoteDirInfo[]): Promise<void> {
-    return this.directories.reconcileDirectories(this.client!, summary, cachedDirs);
+    return this.directories.reconcileDirectories(this.client!, summary, cachedDirs,
+      (path, remoteObservation) => remoteObservation ? this.deferRemotePath(path) : this.isCreationDeferred(path));
   }
 
   private async buildInitialPlan(
@@ -1406,7 +1451,7 @@ export class SyncEngine {
       async (path) => {
         try {
           const lf = localFiles.get(path);
-          if (!lf) return;
+          if (!lf || this.isCreationDeferred(path)) return;
           const data = await this.opts.localAdapter.readBinary(path);
           // Hash from the bytes just read; reused for the OC-Checksum upload header so the client does not hash twice.
           const localHash = await sha256(data);
@@ -1500,8 +1545,12 @@ export class SyncEngine {
   }
 
 
-  private scanLocalFiles(): Promise<Map<string, { size: number; mtime: number }>> {
-    return this.localScanner.scanLocalFiles();
+  private async scanLocalFiles(): Promise<Map<string, { size: number; mtime: number }>> {
+    const files = await this.localScanner.scanLocalFiles();
+    for (const path of files.keys()) {
+      if (this.isCreationDeferred(path)) files.delete(path);
+    }
+    return files;
   }
 
   private collectLocalStats(_dir: string, out: Map<string, { size: number; mtime: number }>): Promise<void> {
