@@ -34,6 +34,7 @@ export interface TransferDeps {
   maxFileSizeMB(): number;
   hasFilesLocking(): boolean;
   isRenameHeld?(path: string): boolean;
+  beginFirstUpload?(path: string): (outcome?: 'uploaded' | 'skipped') => void;
   // Asks which client is running, not what the server said: `StandardWebDAVClient` hardcodes `checksum: null`,
   // so recording a SHA-256 against plain WebDAV would mismatch what the next sync reads back (docs/spec.md §4.1).
   // Deliberately NOT the server's `hasChecksums` capability, which is false on the official Docker image even
@@ -74,66 +75,75 @@ export class TransferService {
       throw err;
     }
 
-    let outcome: 'uploaded' | 'skipped';
+    let finish: ((outcome?: 'uploaded' | 'skipped') => void) | undefined;
+    let recorded: 'uploaded' | 'skipped' | undefined;
     try {
-      if (this.deps.isRenameHeld?.(path)) return;
-      // If-Match with the known remote etag makes a remote changed since our baseline return 412
-      // (PreconditionFailedError, a conflict). A new path must still be absent to create it.
-      outcome = await uploadStrategy.upload(client, path, data, stat.mtime, {
-        ifMatchEtag: remote.etag,
-        ...(remote.checksum ? { expectedRemoteChecksum: remote.checksum } : {}),
-        ...(onlyIfAbsent ? { onlyIfAbsent } : {}),
-        ctime: uploadCreationTimeMs(stat.ctime, remote.creationTime),
-      });
-    } finally {
-      await this.releaseLock(client, path, token);
-    }
-
-    if (outcome === 'skipped') {
-      // Over the size limit: recorded for the end-of-sync count (docs/spec.md §9.4a), no retry.
-      this.deps.journal.recordOversizeSkip(summary, {
-        path, sizeBytes: data.byteLength, limitMB: this.deps.maxFileSizeMB(), direction: 'upload',
-      });
-      return;
-    }
-    summary.uploadedCount++;
-    // Record the state the server holds now, not before the PUT. Both strategies send `OC-Checksum: SHA256:<localHash>`
-    // and Nextcloud returns it as oc:checksums, so the remote id IS localHash; keeping the pre-upload id would make
-    // every later sync download the file just uploaded. Only true where the client can read a checksum back: on
-    // plain WebDAV the next PROPFIND yields an ETag, so ask the server and record that instead.
-    let uploadedRemoteId = localHash;
-    let uploadedIdType: FileState['idType'] = 'sha256';
-    let uploadedFileId = remote.fileId;
-    let uploadedRemoteMtime = remote.lastModified;
-    const reportsChecksums = this.deps.clientReportsChecksums();
-    if (!reportsChecksums || (onlyIfAbsent && !uploadedFileId)) {
+      let outcome: 'uploaded' | 'skipped';
       try {
-        const fresh = await client.statFile(path);
-        if (fresh && !reportsChecksums) {
-          // Plain WebDAV tracks the server's ETag. On a failed stat keep the SHA-256 baseline.
-          ({ remoteId: uploadedRemoteId, idType: uploadedIdType } = remoteIdOf(fresh));
-        } else if (fresh?.fileId && fresh.checksum === localHash) {
-          // A new Nextcloud file gets its ID on the server. Only index the ID if the stat
-          // still describes the uploaded bytes; a peer may already have replaced the path.
-          uploadedFileId = fresh.fileId;
-          uploadedRemoteMtime = fresh.lastModified;
-        }
-      } catch (err) {
-        void this.deps.logger?.log(`upload: could not re-read ${path} after upload — ${(err as Error).message}`);
+        if (this.deps.isRenameHeld?.(path)) return;
+        // If-Match with the known remote etag makes a remote changed since our baseline return 412
+        // (PreconditionFailedError, a conflict). A new path must still be absent to create it.
+        finish = onlyIfAbsent ? this.deps.beginFirstUpload?.(path) : undefined;
+        outcome = await uploadStrategy.upload(client, path, data, stat.mtime, {
+          ifMatchEtag: remote.etag,
+          ...(remote.checksum ? { expectedRemoteChecksum: remote.checksum } : {}),
+          ...(onlyIfAbsent ? { onlyIfAbsent } : {}),
+          ctime: uploadCreationTimeMs(stat.ctime, remote.creationTime),
+        });
+      } finally {
+        await this.releaseLock(client, path, token);
       }
-    }
-    this.deps.journal.recordHistory(path, 'uploaded', undefined, {
-      localHash, remoteId: uploadedRemoteId, remoteIdType: uploadedIdType,
-      localSize: stat.size, remoteSize: remote.size,
-    });
 
-    this.deps.stateDB.setFile(await withLocalSignature(this.deps.localAdapter, {
-      path, localHash, remoteId: uploadedRemoteId, idType: uploadedIdType,
-      size: stat.size, mtime: stat.mtime,
-      remoteFileId: uploadedFileId, isConflicted: false,
-    }, uploadedRemoteMtime));
-    // The remote now equals the uploaded body, so it is the new merge base.
-    this.deps.mergeBase.recordBytes(path, data);
+      if (outcome === 'skipped') {
+        recorded = outcome;
+        // Over the size limit: recorded for the end-of-sync count (docs/spec.md §9.4a), no retry.
+        this.deps.journal.recordOversizeSkip(summary, {
+          path, sizeBytes: data.byteLength, limitMB: this.deps.maxFileSizeMB(), direction: 'upload',
+        });
+        return;
+      }
+      summary.uploadedCount++;
+      // Record the state the server holds now, not before the PUT. Both strategies send `OC-Checksum: SHA256:<localHash>`
+      // and Nextcloud returns it as oc:checksums, so the remote id IS localHash; keeping the pre-upload id would make
+      // every later sync download the file just uploaded. Only true where the client can read a checksum back: on
+      // plain WebDAV the next PROPFIND yields an ETag, so ask the server and record that instead.
+      let uploadedRemoteId = localHash;
+      let uploadedIdType: FileState['idType'] = 'sha256';
+      let uploadedFileId = remote.fileId;
+      let uploadedRemoteMtime = remote.lastModified;
+      const reportsChecksums = this.deps.clientReportsChecksums();
+      if (!reportsChecksums || (onlyIfAbsent && !uploadedFileId)) {
+        try {
+          const fresh = await client.statFile(path);
+          if (fresh && !reportsChecksums) {
+            // Plain WebDAV tracks the server's ETag. On a failed stat keep the SHA-256 baseline.
+            ({ remoteId: uploadedRemoteId, idType: uploadedIdType } = remoteIdOf(fresh));
+          } else if (fresh?.fileId && fresh.checksum === localHash) {
+            // A new Nextcloud file gets its ID on the server. Only index the ID if the stat
+            // still describes the uploaded bytes; a peer may already have replaced the path.
+            uploadedFileId = fresh.fileId;
+            uploadedRemoteMtime = fresh.lastModified;
+          }
+        } catch (err) {
+          void this.deps.logger?.log(`upload: could not re-read ${path} after upload — ${(err as Error).message}`);
+        }
+      }
+      this.deps.journal.recordHistory(path, 'uploaded', undefined, {
+        localHash, remoteId: uploadedRemoteId, remoteIdType: uploadedIdType,
+        localSize: stat.size, remoteSize: remote.size,
+      });
+
+      this.deps.stateDB.setFile(await withLocalSignature(this.deps.localAdapter, {
+        path, localHash, remoteId: uploadedRemoteId, idType: uploadedIdType,
+        size: stat.size, mtime: stat.mtime,
+        remoteFileId: uploadedFileId, isConflicted: false,
+      }, uploadedRemoteMtime));
+      // The remote now equals the uploaded body, so it is the new merge base.
+      this.deps.mergeBase.recordBytes(path, data);
+      recorded = outcome;
+    } finally {
+      finish?.(recorded);
+    }
   }
 
   async downloadFile(

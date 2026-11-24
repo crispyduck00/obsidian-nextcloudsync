@@ -153,6 +153,8 @@ export class SyncEngine {
   // One aligner shared by transfer, resolution and conflicts (docs/spec.md §9.7).
   private readonly creationTime: CreationTimeAligner;
   private readonly transfer: TransferService;
+  private readonly firstUploads = new Set<string>();
+  private readonly firstDirectories = new Map<string, symbol>();
 
   private readonly versions: VersionService;
 
@@ -285,6 +287,7 @@ export class SyncEngine {
     });
     this.transfer = new TransferService({
       isRenameHeld: (p) => this.isPathHeld(p),
+      beginFirstUpload: path => this.beginFirstUpload(path),
       creationTime: this.creationTime,
       localAdapter: opts.localAdapter,
       stateDB: opts.stateDB,
@@ -492,6 +495,7 @@ export class SyncEngine {
     client: IWebDAVClient, shouldRetry?: (rename: PendingFileRename) => boolean,
   ): Promise<boolean> {
     const eligible = (rename: PendingFileRename): boolean => (shouldRetry?.(rename) ?? true)
+      && !rename.unconfirmedCreate
       && !this.pendingFolderMoves.holds(rename.source) && !this.pendingFolderMoves.holds(rename.destination)
       && (!rename.attemptedDestination || !this.pendingFolderMoves.holds(rename.attemptedDestination))
       && !this.isCreationDeferred(rename.destination);
@@ -526,10 +530,41 @@ export class SyncEngine {
   }
 
   retargetLocalCreation(source: string, destination: string, folder: boolean): boolean {
-    if (!this.localCreations.rename(source, destination, folder) || this.isRenameHeld(source)) return false;
+    if (!this.localCreations.rename(source, destination, folder) || this.isRenameHeld(source)
+      || (folder ? this.isFirstDirectoryInFlight(source) : this.firstUploads.has(source))) return false;
     // New parents can already contain destinations of pending moves for tracked items.
     if (folder && this.hasRenameInFolder(source)) return false;
     return !(folder ? this.opts.stateDB.getDir(source) : this.opts.stateDB.getFile(source));
+  }
+
+  private beginFirstUpload(path: string): (outcome?: 'uploaded' | 'skipped') => void {
+    const scope = this.fileRenameScope();
+    this.firstUploads.add(path);
+    return outcome => {
+      this.firstUploads.delete(path);
+      if (!outcome || scope !== this.fileRenameScope()) return;
+      const file = outcome === 'uploaded' ? this.opts.stateDB.getFile(path) : null;
+      if (file !== undefined && this.pendingFileRenames.finishFirstUpload(path, file)) this.persistRenameIntent();
+    };
+  }
+
+  private isFirstDirectoryInFlight(path: string): boolean {
+    // A first PUT may still need to create its parents after an initial "missing parent" response.
+    return this.firstDirectories.has(path) || [...this.firstUploads].some(file => file.startsWith(path + '/'));
+  }
+
+  private beginDirectoryCreation(client: IWebDAVClient, path: string): ((fileId: string | null) => void) | undefined {
+    if (client !== this.client || this.opts.stateDB.getDir(path) || this.isSystemExcluded(path)) return undefined;
+    const ticket = Symbol();
+    const scope = this.fileRenameScope();
+    this.firstDirectories.set(path, ticket);
+    return fileId => {
+      if (this.firstDirectories.get(path) !== ticket) return;
+      this.firstDirectories.delete(path);
+      if (!fileId || client !== this.client || scope !== this.fileRenameScope() || this.opts.stateDB.getDir(path)) return;
+      this.opts.stateDB.setDir({ path, remoteFileId: fileId });
+      if (this.pendingFolderMoves.confirmCreation(path, fileId)) this.persistRenameIntent();
+    };
   }
 
   async retryMovesIntoFolder(path: string): Promise<void> {
@@ -593,6 +628,7 @@ export class SyncEngine {
       const { client, features } = await this.opts.webdavFactory.createClient();
       client.trackKnownDirectories?.(this.opts.stateDB);
       this.client = client;
+      client.observeDirectoryCreations?.(path => this.beginDirectoryCreation(client, path));
       this.renameTracker = null;
       this.features = features;
       this.connectedPassword = password;
@@ -808,7 +844,8 @@ export class SyncEngine {
       this.syncProgress = { processed: 0, total: 0 };
       this.opts.statusBar.setStatus('syncing', { automatic: !manual });
 
-      const canMoveFolder = (move: PendingFolderMove): boolean => !this.isCreationDeferred(move.destination);
+      const canMoveFolder = (move: PendingFolderMove): boolean => !this.isCreationDeferred(move.destination)
+        && (!move.unconfirmedCreate || move.source === move.destination);
       if (this.pendingFolderMoves.list().some(canMoveFolder)) {
         await assertTrackedParentReadable(this.client!, this.opts.stateDB, '');
         await this.pendingFolderMoves.retry(this.client!, canMoveFolder);
@@ -1017,12 +1054,15 @@ export class SyncEngine {
   /** Records local intent even when Watch is off, on cellular, or a full scan is active. */
   rememberFileRename(oldPath: string, newPath: string): void {
     if (this.pendingFolderMoves.coversChildEvent(oldPath, newPath)) return;
-    if (this.pendingFileRenames.capture(oldPath, newPath, 'observed', this.pendingFolderMoves.originalPath(oldPath))) this.persistRenameIntent();
+    const source = this.pendingFolderMoves.originalPath(oldPath);
+    if (this.pendingFileRenames.capture(oldPath, newPath, 'observed', source, this.firstUploads.has(source))) {
+      this.persistRenameIntent();
+    }
   }
 
   rememberFolderRename(oldPath: string, newPath: string): void {
     this.forgetFolderDeletion(newPath);
-    const folder = this.pendingFolderMoves.capture(oldPath, newPath);
+    const folder = this.pendingFolderMoves.capture(oldPath, newPath, false, this.isFirstDirectoryInFlight(oldPath));
     const files = this.pendingFileRenames.captureFolder(oldPath, newPath);
     if (folder || files) this.persistRenameIntent();
   }
@@ -1380,11 +1420,11 @@ export class SyncEngine {
       void this.opts.logger?.log('sync: INITIAL — no vault folder on the server yet; the first upload will create it');
       remoteFiles = [];
     }
-    remoteFiles = remoteFiles.filter(file => !this.deferRemotePath(file.path));
+    remoteFiles = remoteFiles.filter(file => !this.deferRemotePath(file.path) && !this.isRenameHeld(file.path));
     await this.preparePluginSession(client, remoteFiles);
     const localFiles = await this.scanLocalFiles();
     for (const path of localFiles.keys()) {
-      if (this.isCreationDeferred(path)) localFiles.delete(path);
+      if (this.isPathHeld(path)) localFiles.delete(path);
     }
 
     // Server-computed checksums (no download) let identical files count as unchanged rather than conflicts.
@@ -2201,18 +2241,22 @@ export class SyncEngine {
       (path) => path,
       (path) => localFiles.get(path)?.size ?? 0,
       async (path) => {
+        let finish: ReturnType<SyncEngine['beginFirstUpload']> | undefined;
+        let recorded: 'uploaded' | 'skipped' | undefined;
         try {
           const lf = localFiles.get(path);
-          if (!lf || this.isCreationDeferred(path)) return;
+          if (!lf || this.isPathHeld(path)) return;
           const data = await this.opts.localAdapter.readBinary(path);
           // Hash from the bytes just read; reused for the OC-Checksum upload header so the client does not hash twice.
           const localHash = await sha256(data);
           // The local creation time is read before the upload; a server value for the same path is honoured (docs/spec.md §9.7).
           const before = await this.opts.localAdapter.stat(path);
           const ctime = uploadCreationTimeMs(before?.ctime, remoteMap.get(path)?.creationTime ?? 0);
-          if (this.isCreationDeferred(path)) return;
+          if (!before || this.isPathHeld(path)) return;
+          finish = this.beginFirstUpload(path);
           const outcome = await this.uploadStrategy!.upload(this.client!, path, data, lf.mtime, { precomputedSha256: localHash, ctime, onlyIfAbsent: true });
           if (outcome === 'skipped') {
+            recorded = outcome;
             // Over the size limit: counted for the end-of-sync notice (docs/spec.md §9.4a). This batch bypasses uploadFile.
             this.journal.recordOversizeSkip(summary, {
               path, sizeBytes: data.byteLength, limitMB: this.opts.settings.maxFileSizeMB, direction: 'upload',
@@ -2226,7 +2270,9 @@ export class SyncEngine {
           this.opts.stateDB.setFile(await this.withLocalSignature({ path, localHash, remoteId: localHash, idType: 'sha256', size: lf.size, mtime: stat?.mtime ?? 0, remoteFileId: null, isConflicted: false }));
           // This batch bypasses uploadFile, so it seeds its own merge base; without it a later concurrent edit duplicates shared blocks.
           this.recordMergeBase(path, data);
+          recorded = outcome;
         } catch (err) { this.recordError(summary, path, err); this.retryQueue.push(path); }
+        finally { finish?.(recorded); }
         this.tickProgress();
       },
       true,

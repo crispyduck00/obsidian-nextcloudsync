@@ -213,6 +213,8 @@ export interface PendingFileRename {
   fileId: string | null;
   /** Only a local rename event can authorize a MOVE across folders or after a remote edit. */
   observed?: true;
+  /** The local path changed during its first write. Keep both paths reserved until the write is confirmed. */
+  unconfirmedCreate?: true;
   /** Persisted before MOVE so a lost response or an app restart can be reconciled by identity. */
   attemptedDestination?: string;
   issue?: FileRenameIssue;
@@ -226,6 +228,8 @@ export interface PendingFolderMove {
   scope: string;
   fileId: string | null;
   inferred?: true;
+  /** The first MKCOL has yet to prove the identity of the original collection. */
+  unconfirmedCreate?: true;
   /** A local delete event invalidated the destination, even if the same path now exists again. */
   destinationRemoved?: true;
   attemptedDestination?: string;

@@ -16,6 +16,9 @@ const messages: Record<FolderMoveIssue, string> = {
 };
 
 export function folderMoveStatus(move: PendingFolderMove): string {
+  if (move.unconfirmedCreate) {
+    return 'The first directory creation could not be confirmed. Check the original path on Nextcloud and move the local folder back to its original path to resume sync safely.';
+  }
   return move.issue ? messages[move.issue] : 'Waiting to sync the folder move.';
 }
 
@@ -92,7 +95,7 @@ export class PendingFolderMoves {
     return changed;
   }
 
-  capture(oldPath: string, newPath: string, inferred = false): boolean {
+  capture(oldPath: string, newPath: string, inferred = false, firstCreateInFlight = false): boolean {
     if (oldPath === newPath || !validPath(oldPath) || !validPath(newPath) || this.coversChildEvent(oldPath, newPath)) return false;
     const scope = this.deps.scope();
     const existing = this.list();
@@ -103,7 +106,8 @@ export class PendingFolderMoves {
     const base = this.deps.state.getDir(source);
     const retarget = (move: PendingFolderMove): PendingFolderMove => move.scope === scope && inFolder(move.destination, oldPath)
       ? { ...move, destination: newPath + move.destination.slice(oldPath.length) } : move;
-    if (!chain && (this.current(source) || (!base && !this.deps.state.getAllFiles().some(file => inFolder(file.path, source))
+    if (!chain && (this.current(source) || (!base && !firstCreateInFlight
+      && !this.deps.state.getAllFiles().some(file => inFolder(file.path, source))
       && !this.deps.state.getAllDirs().some(dir => inFolder(dir.path, source))))) {
       // An untracked local parent can still contain destinations owned by pending moves.
       const updated = existing.map(retarget);
@@ -115,10 +119,18 @@ export class PendingFolderMoves {
     const next: PendingFolderMove = { ...chain, source, destination: newPath, scope,
       fileId: chain?.fileId ?? base?.remoteFileId ?? null, issue: inferred ? 'unobserved' : undefined,
       inferred: inferred || chain?.inferred ? true : undefined };
+    if (!chain && !base && firstCreateInFlight) next.unconfirmedCreate = true;
     const remaining = existing.filter(move => move !== chain && !(move.scope === scope && !move.attemptedDestination
       && !move.destinationRemoved && inFolder(move.source, source)
       && move.destination === newPath + move.source.slice(source.length)));
     this.deps.state.setPendingFolderMoves([...remaining.map(retarget), next]);
+    return true;
+  }
+
+  confirmCreation(path: string, fileId: string): boolean {
+    const move = this.current(path);
+    if (!move?.unconfirmedCreate || move.scope !== this.deps.scope()) return false;
+    this.replace(move, { ...move, fileId, unconfirmedCreate: undefined });
     return true;
   }
 
@@ -142,6 +154,7 @@ export class PendingFolderMoves {
       }
       return;
     }
+    if (move.unconfirmedCreate) return;
     if (!fileId || !client.statFolderMovePath) return this.recordIssue(move, 'unsupported');
     if (source !== destination && (inFolder(destination, source) || inFolder(source, destination))) return this.recordIssue(move, 'conflict');
     if (this.list().some(other => other !== move && pathsOf(other).some(path => paths.some(folder =>
