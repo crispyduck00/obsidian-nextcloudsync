@@ -10,6 +10,8 @@ The remote-mirror dialog also reserves the vault while its preview awaits confir
 
 Local structural events that arrive during a full sync request one coalesced follow-up scan. That scan uses the current files and identities, so a late delete, recreation, rename, or folder move is decided from the final state. It never replays a stale delete. Stopping the engine keeps the pending work for the next permitted run.
 
+Asynchronous initialization stops when its plugin instance unloads. Startup timers belong to their originating engine. A remote-mirror preview rejects planning or confirmation after login replaces that engine, and closing the old dialog resumes the current active engine.
+
 ## Upstream base and independence
 
 - Base: upstream `1.0.18`, commit `21f89023fdaee58068276df3cff876fcc74a1e95`.

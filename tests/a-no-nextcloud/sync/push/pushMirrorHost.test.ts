@@ -128,7 +128,7 @@ describe('Client Push while Mirror from remote is open', () => {
       await jest.advanceTimersByTimeAsync(12000);
       expect(reconcile).toHaveBeenCalledTimes(1);
       expect(original.resumeAfterRemoteMirror).not.toHaveBeenCalled();
-      expect(replacement.resumeAfterRemoteMirror).not.toHaveBeenCalled();
+      expect(replacement.resumeAfterRemoteMirror).toHaveBeenCalledTimes(1);
     } finally { closed.resolve(); await mirror; h.p.teardownClientPush(); }
   });
 
