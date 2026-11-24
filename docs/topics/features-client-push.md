@@ -8,6 +8,12 @@ Root scope is unchanged: unchanged root is ignored, changed root can select know
 
 Push uses the same live app-password source as WebDAV. A change restarts discovery and socket authentication with one credential, cancels the old attempt and preserves the existing reconnect catch-up. A missing secret parks Push without network retries. While the cached DAV connection belongs to an earlier password, the scope gate requests normal reconciliation so the engine can reconnect before trusting a root ETag or selecting file IDs.
 
+### Newly discovered Team Folders
+
+Nextcloud `notify_push` 1.4.2 caches a storage's recipient list for four to five minutes. A new Team Folder can initially have an empty or incomplete list. File edits made during that window can miss the other account's socket, and cache expiry alone does not replay them. For established mounts, file notifications use the usual Push path. [Recipient cache in notify_push 1.4.2](https://github.com/nextcloud/notify_push/blob/e393d172087e872fa88dc87baa39e6eb1bbde496/src/storage_mapping.rs#L32-L44)
+
+With Client Push enabled, a complete vault listing identifies in-scope Team Folder mounts by their Nextcloud DAV properties and file IDs. When a full sync first sees a mount ID, the window starts after that sync finishes, even for a long initial download. The first check of the vault root ETag is due ten seconds later, followed by five checks at one-minute intervals. If other sync work blocks the final check, it gets one more opportunity ten seconds later. Mounts found together share the same checks. Seeing the same mounts again leaves the deadline alone. A newly discovered mount can extend it. Each check needs an eligible, visible, connected client. A changed vault root triggers the existing sync. An unchanged vault root costs one depth-zero request. After the window, ordinary Push, resume, reconnect and manual sync apply. Running **Sync now** also discovers mounts added since the last full vault listing.
+
 ## Upstream base and independence
 
 - Base: upstream `1.0.18`, commit `21f89023fdaee58068276df3cff876fcc74a1e95`.

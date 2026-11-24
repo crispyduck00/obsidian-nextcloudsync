@@ -1011,6 +1011,7 @@ export default class ObsidianNextcloudsync extends Plugin {
         loggingEnabled: this.settings.loggingEnabled,
       }),
       logger: this.logger,
+      onTeamMountDiscovered: () => this.pushSyncScheduler?.teamMountDiscovered(),
       onFeatures: (features) => {
         // Lets the settings screen recommend an upgrade; persisted only on change.
         if (features.version && features.version !== this.settings.lastKnownServerVersion) {
@@ -1049,7 +1050,8 @@ export default class ObsidianNextcloudsync extends Plugin {
     const scheduler = new PushSyncScheduler({
       isSyncRunning: () => this.syncEngine?.isSyncRunning() ?? false,
       canSync: () => this.syncEngine?.canRunWatchSync() ?? false,
-      shouldSync: async (fileIds) => this.syncEngine?.shouldReconcileClientPush(fileIds) ?? true,
+      canProbeTeamMount: () => !this.mirrorInProgress && !document.hidden && this.pushClient?.getStatus().state === 'connected',
+      shouldSync: async (fileIds, probeOnly) => this.syncEngine?.shouldReconcileClientPush(fileIds, probeOnly) ?? true,
       verifyRoot: async (root) => this.syncEngine?.verifyClientPushRoot(root) ?? false,
       onReconciliationTriggered: () => {
         this.pushStatusItem?.pulse();
