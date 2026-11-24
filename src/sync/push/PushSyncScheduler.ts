@@ -21,6 +21,8 @@ export type ClientPushScopeResult =
 
 export interface PushSyncSchedulerOptions {
   isSyncRunning(): boolean;
+  /** Keep notifications queued while the host performs an exclusive operation such as Mirror. */
+  canSync?(): boolean;
   /**
    * Optional vault-scope check. The boolean form is retained for the standalone Client Push layer:
    * false means proven irrelevant, true means conservatively use the ordinary full sync. P2 returns
@@ -99,7 +101,7 @@ export class PushSyncScheduler {
   }
 
   private canProbeTeamMount(): boolean {
-    return !this.stopped && this.opts.canProbeTeamMount?.() === true;
+    return !this.stopped && this.canSync() && this.opts.canProbeTeamMount?.() === true;
   }
 
   private async probeTeamMount(retryBusy: boolean): Promise<void> {
@@ -174,6 +176,14 @@ export class PushSyncScheduler {
     this.schedule(this.opts.debounceMs ?? PUSH_SYNC_TIMING.batchDebounceMs);
   }
 
+  /** Wake queued work after the host leaves an exclusive operation. */
+  onNetworkChanged(): void {
+    if (!this.canSync()) {
+      if (this.timer !== null) window.clearTimeout(this.timer);
+      this.timer = null;
+    } else if (!this.syncing) this.scheduleNext();
+  }
+
   stop(): void {
     this.stopped = true;
     if (this.teamMountTimer !== null) window.clearTimeout(this.teamMountTimer);
@@ -202,10 +212,16 @@ export class PushSyncScheduler {
   private schedule(delayMs: number): void {
     if (this.stopped) return;
     if (this.timer !== null) window.clearTimeout(this.timer);
+    this.timer = null;
+    if (!this.canSync()) return;
     this.timer = window.setTimeout(() => {
       this.timer = null;
       void this.drain();
     }, Math.max(0, delayMs));
+  }
+
+  private canSync(): boolean {
+    return this.opts.canSync?.() !== false;
   }
 
   private scheduleNext(minDelayMs = 0): void {
@@ -265,7 +281,7 @@ export class PushSyncScheduler {
   }
 
   private async runPendingFullSync(): Promise<void> {
-    if (!this.fullSyncPending || this.fullSyncDelayMs() > 0 || this.stopped) return;
+    if (!this.fullSyncPending || this.fullSyncDelayMs() > 0 || this.stopped || !this.canSync()) return;
 
     // Consume the pending request BEFORE awaiting. A push arriving during this full sync forms a new
     // batch and is scope-checked afterwards instead of being silently swallowed by this run.
@@ -296,7 +312,7 @@ export class PushSyncScheduler {
   }
 
   private async drain(): Promise<void> {
-    if (this.stopped || !this.hasPending() || this.syncing) return;
+    if (this.stopped || !this.hasPending() || this.syncing || !this.canSync()) return;
     if (this.opts.isSyncRunning()) {
       // An ordinary full sync is authoritative. Forget the transient push checkpoint and keep our
       // hints until that run finishes; the next root probe will discard them if the run covered them.
@@ -328,7 +344,7 @@ export class PushSyncScheduler {
       }
 
       if (this.stopped) return;
-      if (this.opts.isSyncRunning()) {
+      if (this.opts.isSyncRunning() || !this.canSync()) {
         this.observedPushRootEtag = null;
         this.restoreBatch(fullSyncRequested, fileIds, catchUpRequested);
         retryDelayMs = PUSH_SYNC_TIMING.busyRetryMs;
@@ -410,7 +426,7 @@ export class PushSyncScheduler {
         return;
       }
 
-      if (result === 'busy') {
+      if (result === 'busy' || !this.canSync()) {
         if (!this.stopped) {
           this.observedPushRootEtag = null;
           this.restoreBatch(false, fileIds, catchUpRequested);

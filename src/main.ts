@@ -414,6 +414,7 @@ export default class ObsidianNextcloudsync extends Plugin {
       new Notice(`❌ Mirror from remote failed: ${(err as Error).message}`, 8000);
     } finally {
       this.mirrorInProgress = false;
+      this.pushSyncScheduler?.onNetworkChanged();
     }
   }
 
@@ -671,6 +672,7 @@ export default class ObsidianNextcloudsync extends Plugin {
 
     const scheduler = new PushSyncScheduler({
       isSyncRunning: () => this.syncEngine?.isSyncRunning() ?? false,
+      canSync: () => !this.mirrorInProgress,
       canProbeTeamMount: () => !this.mirrorInProgress && !document.hidden && navigator.onLine !== false && this.pushClient?.getStatus().state === 'connected',
       shouldSync: async (probeOnly) => this.syncEngine?.shouldReconcileClientPush(probeOnly) ?? true,
       onReconciliationTriggered: () => this.pushStatusItem?.pulse(),

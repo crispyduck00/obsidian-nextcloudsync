@@ -14,6 +14,8 @@ Nextcloud `notify_push` 1.4.2 caches a storage's recipient list for four to five
 
 With Client Push enabled, a complete vault listing identifies in-scope Team Folder mounts by their Nextcloud DAV properties and file IDs. When the client first sees a mount ID during a sync, it waits for that sync to finish. It then checks the vault root ETag after ten seconds and at one-minute intervals up to five more times. A busy final check gets one more opportunity ten seconds later. Mounts found together share the same checks. Seeing the same mounts again leaves the deadline alone. A newly discovered mount can extend it. Each check needs an eligible, visible, connected client. A changed vault root triggers the existing sync. An unchanged vault root costs one depth-zero request. After the window, ordinary Push, resume, reconnect and manual sync apply.
 
+Push notifications and reconnect catch-up stay queued while the host opens or applies Mirror from remote. Opening Mirror during a scope read also preserves that batch. Closing the dialog, including an error, wakes the active scheduler. This pause uses the optional scheduler eligibility check and keeps the pending queue without a retry timer. Compose with the Mirror extension to `fixes/sync-activity-coordination` for the corresponding full-sync and Watch pause.
+
 ## Upstream base and independence
 
 - Base: upstream `1.0.18`, commit `21f89023fdaee58068276df3cff876fcc74a1e95`.
