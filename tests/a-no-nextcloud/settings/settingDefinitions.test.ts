@@ -45,6 +45,7 @@ const BASELINE: { heading: string | null; rows: string[] }[] = [
       'Network concurrency',
       'Sync on Wi-Fi only',
       'Sync on file change',
+      'Watch delay after an edit (seconds)',
       'Maximum file size (MB)',
     ],
   },
