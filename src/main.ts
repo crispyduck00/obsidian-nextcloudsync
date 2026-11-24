@@ -176,13 +176,23 @@ export default class ObsidianNextcloudsync extends Plugin {
         }
       }, EDIT_WINDOW_MS, true);
 
-      this.registerEvent(this.app.workspace.on('editor-change', (_editor, info) => {
-        const path = info.file?.path;
-        if (path && !isOwnSyncEvent(path)) this.lastLocalEdit.set(path, Date.now());
+      const pendingEditorSaves = new WeakSet<TFile>();
+      this.registerEvent(this.app.workspace.on('editor-change', (_editor, { file }) => {
+        if (!file || isSyncTmpPath(file.path)) return;
+        this.lastLocalEdit.set(file.path, Date.now());
+        if (this.settings.watchOnChangeEnabled && this.localAdapter?.shouldIgnore(file.path)) {
+          // The editor and the saved-file event can arrive in either order. An unchanged echo
+          // stops at the watcher's local content check, before any server request.
+          pendingEditorSaves.add(file);
+          pendingUploads.add(file.path);
+          debouncedUpload();
+        }
       }));
 
       this.registerEvent(this.app.vault.on('modify', (file: TAbstractFile) => {
-        if (!guard(file) || isOwnSyncEvent(file.path)) return;
+        if (!guard(file) || isSyncTmpPath(file.path)) return;
+        const editorSave = pendingEditorSaves.delete(file);
+        if (!editorSave && this.localAdapter?.shouldIgnore(file.path)) return;
         this.lastLocalEdit.set(file.path, Date.now());
         pendingUploads.add(file.path);
         debouncedUpload();
@@ -206,10 +216,13 @@ export default class ObsidianNextcloudsync extends Plugin {
       this.registerEvent(this.app.vault.on('rename', (file: TAbstractFile, oldPath: string) => {
         if (!watchOn()) return;
         pendingUploads.delete(oldPath);
-        // tmp -> target renames are the tail of the plugin's own atomic writes.
-        if (isOwnSyncEvent(oldPath) || isOwnSyncEvent(file.path)) return;
+        // A sync write renames its temporary file. A rename between ordinary paths is new intent.
+        if (isSyncTmpPath(oldPath) || isSyncTmpPath(file.path)) return;
+        const recheckContent = this.localAdapter?.shouldIgnore(oldPath) === true;
         if (file instanceof TFolder) { void this.syncEngine?.renameSingleFolder(oldPath, file.path); return; }
-        void this.syncEngine?.renameSingleFile(oldPath, file.path);
+        const newPath = file.path;
+        const renamed = this.syncEngine?.renameSingleFile(oldPath, newPath);
+        if (recheckContent) void renamed?.then(() => this.syncEngine?.syncSingleFile(newPath), () => undefined);
       }));
 
       // Sync on foreground resume, on every platform (docs/spec.md §5.8). The cooldown inside the

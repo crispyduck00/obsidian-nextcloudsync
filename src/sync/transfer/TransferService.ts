@@ -9,7 +9,7 @@ import { IWebDAVClient } from '../../network/IWebDAVClient';
 import { IUploadStrategy } from '../upload/IUploadStrategy';
 import { SyncJournal } from '../session/SyncJournal';
 import { MergeBaseRecorder } from '../session/MergeBaseRecorder';
-import { withLocalSignature } from '../../data/localSignature';
+import { invalidateLocalSignature, withLocalSignature } from '../../data/localSignature';
 import { FileLogger } from '../../util/FileLogger';
 import { FIXED } from '../../util/fixedSyncConfig';
 import { isAnomalousRemoteContent, isOverFileSizeLimit } from '../../util/limits';
@@ -220,12 +220,8 @@ export class TransferService {
 
   deferLocalWrite(path: string, summary: SyncSessionSummary, error?: LocalFileChangedError): void {
     if (error?.retainedCopy) this.deps.journal.recordError(summary, path, error);
-    const base = this.deps.stateDB.getFile(path);
-    if (base && (base.localMtime !== undefined || base.localSize !== undefined)) {
-      // A same-size edit can keep the old mtime on Android or on a copied/restored file.
-      // Preserve the common ancestor while ensuring the retry hashes the actual local bytes.
-      this.deps.stateDB.setFile({ ...base, localMtime: undefined, localSize: undefined });
-    }
+    // A same-size edit can keep the old mtime. Preserve the base and hash the actual bytes on retry.
+    invalidateLocalSignature(this.deps.stateDB, path);
     this.deps.stateDB.setSyncToken?.(null);
     this.deps.queueRetry(path);
     void this.deps.logger?.log(`sync: local file changed during a write, kept both revisions and queued retry → ${path}`);

@@ -223,7 +223,10 @@ export class SyncEngine {
       queueRetry: (p) => { this.retryQueue.push(p); },
       logger: opts.logger,
     });
-    this.versions = new VersionService({ localAdapter: opts.localAdapter, stateDB: opts.stateDB });
+    this.versions = new VersionService({
+      localAdapter: opts.localAdapter, stateDB: opts.stateDB,
+      canApplyRestore: path => !opts.isBeingEdited?.(path),
+    });
     this.deletion = new DeletionService({
       app: opts.app,
       stateDB: opts.stateDB,
