@@ -19,6 +19,28 @@ async function moveLocally(device: Device, source: string, destination: string):
 }
 
 describeLive('Persistent folder moves against Nextcloud', getEnv => {
+  it('retains the Nextcloud file ID for a heading-driven rename of a freshly downloaded note', async () => {
+    const env = getEnv();
+    const { client: writer, ws } = await setupWorkspace(env);
+    try {
+      await writer.uploadFile('Downloaded.md', textBuf('# Downloaded\nbody\n'));
+      const originalId = (await writer.statFile('Downloaded.md'))?.fileId;
+      expect(originalId).toBeTruthy();
+      const device = makeDevice(env, ws.remoteBase, 'recent-download-rename');
+      await device.sync();
+      await device.vault.adapter.rename('Downloaded.md', 'New heading.md');
+      device.vault.seedLocal('New heading.md', '# New heading\nbody\n');
+      // The host must record this event even while the old path is in its own-write window.
+      await device.engine.renameSingleFile('Downloaded.md', 'New heading.md');
+      await device.sync();
+      expect(await writer.statFile('Downloaded.md')).toBeNull();
+      expect((await writer.statFile('New heading.md'))?.fileId).toBe(originalId);
+      expect(decodeBuf(await writer.downloadFile('New heading.md'))).toBe('# New heading\nbody\n');
+    } finally {
+      await cleanupWorkspace(writer, ws);
+    }
+  });
+
   it('keeps folder and child identities and versions across parents, while a second device sees the move', async () => {
     const env = getEnv();
     const { client: writer, ws } = await setupWorkspace(env);

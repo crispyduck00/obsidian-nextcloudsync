@@ -10,8 +10,8 @@ import { resolve } from 'path';
  */
 describe('watch event filter ignores the active own debug log before debounce', () => {
   const source = readFileSync(resolve(process.cwd(), 'src/main.ts'), 'utf-8');
-  const start = source.indexOf('const isOwnSyncEvent = (path: string): boolean =>');
-  const end = source.indexOf(';\n\n      // Accumulate paths changed during rapid editing', start);
+  const start = source.indexOf('const isInternalEventPath = (path: string): boolean =>');
+  const end = source.indexOf(';\n\n      // Filter before the Android lifecycle', start);
   const predicate = source.slice(start, end);
 
   it('checks the active own log in the early event predicate', () => {

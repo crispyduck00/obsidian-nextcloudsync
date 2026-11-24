@@ -35,11 +35,18 @@ describe('watch rename preserves a pending debounced edit', () => {
       : handler;
 
     const rename = desktop.indexOf('const renamePromise = engine.syncRememberedFileRename(oldPath, newPath);');
-    const pendingGuard = desktop.indexOf('if (hadPendingUpload)', rename);
+    const pendingGuard = desktop.indexOf('if (recheckContent)', rename);
     const reconcile = desktop.indexOf('void engine.syncSingleFile(newPath);', pendingGuard);
 
     expect(rename).toBeGreaterThanOrEqual(0);
     expect(pendingGuard).toBeGreaterThan(rename);
     expect(reconcile).toBeGreaterThan(pendingGuard);
+  });
+
+  it('records ordinary renames even on a path marked by a recent download', () => {
+    expect(handler).toContain('isInternalEventPath(oldPath) || isInternalEventPath(file.path)');
+    expect(handler).toContain('this.localAdapter?.shouldIgnore(oldPath) === true');
+    expect(handler).toContain('this.syncEngine?.rememberFileRename(oldPath, newPath)');
+    expect(handler).not.toContain('isOwnSyncEvent(oldPath)');
   });
 });

@@ -228,16 +228,15 @@ export default class ObsidianNextcloudsync extends Plugin {
           Platform.isIosApp,
         );
 
-      // Keep upstream's own-write filtering unchanged here. The separate
-      // fixes/watch-own-debug-log branch extends this for the active debug log.
-      const isOwnSyncEvent = (path: string): boolean =>
+      const isInternalEventPath = (path: string): boolean =>
         isSyncTmpPath(path)
         || isActiveOwnLog(path, {
           logsFolder: this.settings.logsFolder,
           host: this.hostToken(),
           loggingEnabled: this.settings.loggingEnabled,
-        })
-        || (this.localAdapter?.shouldIgnore(path) ?? false);
+        });
+      const isOwnSyncEvent = (path: string): boolean =>
+        isInternalEventPath(path) || (this.localAdapter?.shouldIgnore(path) ?? false);
 
       // Filter before the Android lifecycle can turn an irrelevant structural event into recovery.
       const isPluginEvent = (path: string): boolean => isUnderPluginsDir(path, this.app.vault.configDir);
@@ -363,8 +362,11 @@ export default class ObsidianNextcloudsync extends Plugin {
 
       this.registerEvent(this.app.vault.on('rename', (file: TAbstractFile, oldPath: string) => {
         if (isPluginEvent(oldPath) || isPluginEvent(file.path)) return;
+        // A sync write renames its temporary file. A rename between two ordinary paths
+        // is a new intent, even while the source is marked for a recent download.
+        if (isInternalEventPath(oldPath) || isInternalEventPath(file.path)) return;
         const hadPendingUpload = takePendingUpload(oldPath);
-        if (isOwnSyncEvent(oldPath) || isOwnSyncEvent(file.path)) return;
+        const recheckContent = hadPendingUpload || this.localAdapter?.shouldIgnore(oldPath) === true;
 
         if (file instanceof TFolder) {
           this.syncEngine?.rememberFolderRename(oldPath, file.path);
@@ -391,7 +393,7 @@ export default class ObsidianNextcloudsync extends Plugin {
         if (!engine) {
           if (mobileWatch) {
             mobileWatch.markStructuralDirty(`rename file ${oldPath} → ${newPath} arrived before sync engine was ready`);
-            if (hadPendingUpload) mobileWatch.queueFile(newPath);
+            if (recheckContent) mobileWatch.queueFile(newPath);
           }
           return;
         }
@@ -399,7 +401,7 @@ export default class ObsidianNextcloudsync extends Plugin {
         if (mobileWatch) {
           if (engine.isSyncRunning()) {
             mobileWatch.markStructuralDirty(`rename file ${oldPath} → ${newPath} arrived during full sync`, true);
-            if (hadPendingUpload) mobileWatch.queueFile(newPath);
+            if (recheckContent) mobileWatch.queueFile(newPath);
             mobileWatch.onVisible(); // await the current full run, then reconcile the final structure
             return;
           }
@@ -409,7 +411,7 @@ export default class ObsidianNextcloudsync extends Plugin {
             () => engine.syncRememberedFileRenameForMobileWatch(oldPath, newPath),
             `rename file ${oldPath} → ${newPath}`,
           ).then((ran) => {
-              if (hadPendingUpload) mobileWatch.queueFile(newPath);
+              if (recheckContent) mobileWatch.queueFile(newPath);
               if (!ran) {
                 mobileWatch.onVisible();
                 return;
@@ -420,7 +422,7 @@ export default class ObsidianNextcloudsync extends Plugin {
         }
 
         const renamePromise = engine.syncRememberedFileRename(oldPath, newPath);
-        if (hadPendingUpload) {
+        if (recheckContent) {
           void renamePromise.then(
             () => { void engine.syncSingleFile(newPath); },
             () => undefined,
