@@ -37,4 +37,11 @@ describe('[SPEC:G3-1] empty-base merge never silently fuses two divergent sides'
     expect(r.mergedContent).toBe('the only content');
     expect(r.mergedContent).not.toContain('<<<<<<<');
   });
+
+  it.each(['\n', '\r\n'])('preserves a longer note byte for byte when either side is a complete line prefix (%j)', newline => {
+    const heading = '# Project' + newline;
+    const body = heading + newline + 'Notes' + newline;
+    expect(engine.merge('', heading, body, markers).mergedContent).toBe(body);
+    expect(engine.merge('', body, heading, markers).mergedContent).toBe(body);
+  });
 });

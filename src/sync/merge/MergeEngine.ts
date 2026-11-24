@@ -106,9 +106,10 @@ export class MergeEngine {
     // Empty base: diff3 cannot tell a non-overlapping edit from a conflict, so reconcile-text produces the
     // union, guarded against its known duplication and fusion bugs below.
     if (base.length === 0) {
-      // One empty side cannot fuse with anything; it resolves to the non-empty side (local !== remote here).
-      if (local.length === 0 || remote.length === 0) {
-        return { content: local.length === 0 ? remote : local, hadConflicts: false };
+      // The longer side already contains the complete shorter document (e.g. an auto-created folder note).
+      const [shorter, longer] = local.length < remote.length ? [local, remote] : [remote, local];
+      if (shorter === '' || (shorter.endsWith('\n') && longer.startsWith(shorter))) {
+        return { content: longer, hadConflicts: false };
       }
       const reconciled = this.reconcile.merge('', local, remote);
       // reconcile-text can fuse two independent edits at the character level ('local' + 'remote' ->
