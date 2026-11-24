@@ -30,7 +30,6 @@ export interface SettingDefinitionsHost {
   /** Current Client Push runtime state, including the detected/overridden endpoint when known. */
   clientPushStatusSummary(): string;
   refreshWatchTiming?(): void;
-
   runSyncNow(): unknown;
   runRemoteMirror(): unknown;
   resetVaultIndex(): unknown;

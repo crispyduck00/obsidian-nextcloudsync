@@ -61,6 +61,7 @@ export default class ObsidianNextcloudsync extends Plugin {
   // In-flight `initSyncEngine`: concurrent callers (onLayoutReady and an early `runSyncNow`) await
   // it instead of each initializing. Cleared on settle so a later call (re-login) starts fresh.
   private initializingEngine?: Promise<void>;
+  private watchQueue?: WatchFileQueue;
   // Flushed on unload so a debounced base write is not lost.
   baseStore?: MergeBaseStore;
   // Flushed on unload so a debounced write is not lost.
