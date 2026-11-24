@@ -61,7 +61,6 @@ export default class ObsidianNextcloudsync extends Plugin {
   // In-flight `initSyncEngine`: concurrent callers (onLayoutReady and an early `runSyncNow`) await
   // it instead of each initializing. Cleared on settle so a later call (re-login) starts fresh.
   private initializingEngine?: Promise<void>;
-  private watchQueue?: WatchFileQueue;
   // Flushed on unload so a debounced base write is not lost.
   baseStore?: MergeBaseStore;
   // Flushed on unload so a debounced write is not lost.
@@ -1031,7 +1030,6 @@ export default class ObsidianNextcloudsync extends Plugin {
       configDir: this.app.vault.configDir,
       isLocalVaultAvailable: () => localAdapter.isFolder(pluginDir),
       localCreationGrace: this.localCreations,
-      isRemoteMirrorOpen: () => this.mirrorInProgress,
       pluginsAwaitingRestart: this.pluginsAwaitingRestart,
       // Evaluated live from the same settings and host token as the logger, so it follows the logging
       // toggle (docs/spec.md §9.1).
@@ -1042,6 +1040,7 @@ export default class ObsidianNextcloudsync extends Plugin {
         loggingEnabled: this.settings.loggingEnabled,
       }),
       logger: this.logger,
+      isRemoteMirrorOpen: () => this.mirrorInProgress,
       onTeamMountDiscovered: () => this.pushSyncScheduler?.teamMountDiscovered(),
       onFeatures: (features) => {
         // Lets the settings screen recommend an upgrade; persisted only on change.
@@ -1084,7 +1083,7 @@ export default class ObsidianNextcloudsync extends Plugin {
     const scheduler = new PushSyncScheduler({
       isSyncRunning: () => this.syncEngine?.isSyncRunning() ?? false,
       canSync: () => !this.mirrorInProgress && (this.syncEngine?.canRunWatchSync() ?? false),
-      canProbeTeamMount: () => !this.mirrorInProgress && !document.hidden && navigator.onLine !== false && this.pushClient?.getStatus().state === 'connected',
+      canProbeTeamMount: () => !this.mirrorInProgress && !document.hidden && this.pushClient?.getStatus().state === 'connected',
       shouldSync: async (fileIds, probeOnly) => this.syncEngine?.shouldReconcileClientPush(fileIds, probeOnly) ?? true,
       verifyRoot: async (root) => this.syncEngine?.verifyClientPushRoot(root) ?? false,
       onReconciliationTriggered: () => {
