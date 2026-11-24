@@ -14,7 +14,9 @@ export type PushFullSyncResult = 'completed' | 'retry';
 export type ClientPushScopeResult =
   | { kind: 'ignore' }
   | { kind: 'targeted'; rootFileId: string | null; rootEtag: string }
-  | { kind: 'full-sync' };
+  | { kind: 'full-sync'; retryOnUnchanged?: true };
+
+type ChangedPushRoot = Extract<ClientPushScopeResult, { kind: 'targeted' }>;
 
 export interface PushSyncSchedulerOptions {
   isSyncRunning(): boolean;
@@ -24,6 +26,8 @@ export interface PushSyncSchedulerOptions {
    * an explicit result so only a positively changed root may enter targeted reconciliation.
    */
   shouldSync?(fileIds: readonly string[]): Promise<boolean | ClientPushScopeResult>;
+  /** Establish whether tracking covers the complete remote view for a generic or untracked hint. */
+  verifyRoot?(root: ChangedPushRoot): Promise<boolean>;
   /** Called only when a push actually starts reconciliation, not while a full sync merely waits. */
   onReconciliationTriggered?(): void;
   /** Optional targeted path added by remote-reconcile; absent keeps the original full-sync behavior. */
@@ -42,9 +46,8 @@ export interface PushSyncSchedulerOptions {
 /**
  * Coalesces Nextcloud Client Push hints into the smallest safe reconciliation.
  *
- * The vault-root scope probe remains the safety boundary: ordinary/full sync owns the authoritative
- * root ETag, while this scheduler keeps a separate in-memory ETag only for push de-noising. That
- * observed ETag is NEVER written to StateDB and therefore can never suppress a later ordinary sync.
+ * The vault-root scope probe remains the safety boundary. A targeted batch covers only its IDs.
+ * An ambiguous notification needs a separate whole-vault proof or an ordinary full sync.
  *
  * Known files use the existing per-file classifier immediately. Structural/ambiguous work is
  * deliberately delayed for a short quiet window (with a hard max wait) so create -> rename -> move
@@ -60,11 +63,7 @@ export class PushSyncScheduler {
   private fullSyncPending = false;
   private fullSyncFirstRequestedAt: number | null = null;
   private fullSyncLastActivityAt: number | null = null;
-  /**
-   * Last vault-root ETag observed BEFORE a completely successful targeted push batch.
-   * Memory-only and intentionally independent from StateDB's authoritative root ETag.
-   */
-  private observedPushRootEtag: string | null = null;
+  private retryOnUnchanged = false;
   private timer: number | null = null;
   private stopped = false;
   private syncing = false;
@@ -126,7 +125,6 @@ export class PushSyncScheduler {
     this.needsFullSync = false;
     this.catchUpRequested = false;
     this.clearFullSyncPending();
-    this.observedPushRootEtag = null;
     if (this.timer !== null) window.clearTimeout(this.timer);
     this.timer = null;
   }
@@ -171,8 +169,9 @@ export class PushSyncScheduler {
     for (const id of fileIds) this.pendingFileIds.add(id);
   }
 
-  private requestFullSync(reason: string): void {
+  private requestFullSync(reason: string, retryOnUnchanged = false): void {
     const now = Date.now();
+    this.retryOnUnchanged ||= retryOnUnchanged;
     if (!this.fullSyncPending) {
       this.fullSyncPending = true;
       this.fullSyncFirstRequestedAt = now;
@@ -188,6 +187,7 @@ export class PushSyncScheduler {
     this.fullSyncPending = false;
     this.fullSyncFirstRequestedAt = null;
     this.fullSyncLastActivityAt = null;
+    this.retryOnUnchanged = false;
   }
 
   private fullSyncQuietMs(): number {
@@ -213,8 +213,8 @@ export class PushSyncScheduler {
 
     // Consume the pending request BEFORE awaiting. A push arriving during this full sync forms a new
     // batch and is scope-checked afterwards instead of being silently swallowed by this run.
+    const retryOnUnchanged = this.retryOnUnchanged;
     this.clearFullSyncPending();
-    this.observedPushRootEtag = null;
     this.opts.onReconciliationTriggered?.();
     this.opts.log?.('push: full reconciliation debounce elapsed → triggering full reconciliation');
 
@@ -231,7 +231,7 @@ export class PushSyncScheduler {
       // The request was skipped (busy / Wi-Fi-only) or the authoritative run itself failed. Keep one
       // debounced request alive instead of silently consuming the only hint. `requestFullSync` starts
       // a fresh quiet window, which also avoids a tight retry loop while the server/network is down.
-      this.requestFullSync('full reconciliation did not complete');
+      this.requestFullSync('full reconciliation did not complete', retryOnUnchanged);
       return;
     }
 
@@ -242,9 +242,7 @@ export class PushSyncScheduler {
   private async drain(): Promise<void> {
     if (this.stopped || !this.hasPending() || this.syncing) return;
     if (this.opts.isSyncRunning()) {
-      // An ordinary full sync is authoritative. Forget the transient push checkpoint and keep our
-      // hints until that run finishes; the next root probe will discard them if the run covered them.
-      this.observedPushRootEtag = null;
+      // Keep the hints until the running sync finishes, then check whether it covered them.
       this.scheduleNext(PUSH_SYNC_TIMING.busyRetryMs);
       return;
     }
@@ -273,29 +271,27 @@ export class PushSyncScheduler {
 
       if (this.stopped) return;
       if (this.opts.isSyncRunning()) {
-        this.observedPushRootEtag = null;
         this.restoreBatch(fullSyncRequested, fileIds, catchUpRequested);
         retryDelayMs = PUSH_SYNC_TIMING.busyRetryMs;
         return;
       }
 
       if (scope.kind === 'ignore') {
-        // The authoritative upstream root ETag has caught up (or never changed). Any delayed full
-        // request is now proven unnecessary, and an old observed checkpoint must not survive it.
+        if (this.retryOnUnchanged) {
+          await this.runPendingFullSync();
+          return;
+        }
         if (this.fullSyncPending) this.opts.log?.('push: authoritative vault root caught up → cancelling pending full reconciliation');
         this.clearFullSyncPending();
-        this.observedPushRootEtag = null;
         this.opts.log?.('push: vault root unchanged → no vault reconciliation needed');
         return;
       }
 
       if (scope.kind === 'full-sync') {
-        this.requestFullSync('vault scope is uncertain');
+        this.requestFullSync('vault scope requires reconciliation', scope.retryOnUnchanged);
         await this.runPendingFullSync();
         return;
       }
-
-      const rootEtag = scope.rootEtag;
 
       // A previously classified structural burst always wins over later targeted hints. Waiting for
       // one final authoritative scan is both cheaper and safer than reconciling paths in a moving tree.
@@ -304,36 +300,18 @@ export class PushSyncScheduler {
         return;
       }
 
-      if (catchUpRequested) {
-        // A connection gap has no trustworthy file-ID set: notifications may have been lost while the
-        // socket/WebView was suspended. Only a root state already certified by a successful targeted
-        // batch (P) can be dismissed. Any newer root state needs the ordinary authoritative scan even
-        // when fresh concrete IDs happened to arrive in the same scheduler batch — those IDs cannot
-        // prove that they cover everything missed during the gap.
-        if (this.observedPushRootEtag !== rootEtag) {
-          this.requestFullSync('remote catch-up found a newer/unexplained vault root state');
+      let verified = false;
+      if (catchUpRequested || fullSyncRequested) {
+        verified = await this.verifyRoot(scope);
+        if (this.stopped) return;
+        if (!verified) {
+          this.requestFullSync(catchUpRequested
+            ? 'remote catch-up found an unverified vault state'
+            : 'generic notification with an unverified vault state');
           await this.runPendingFullSync();
           return;
         }
-        this.opts.log?.(`push: remote catch-up matches observed vault root ETag (${rootEtag}) → no missed remote state`);
-        if (!fullSyncRequested && fileIds.length === 0) return;
-      }
-
-      if (fullSyncRequested) {
-        if (this.observedPushRootEtag !== rootEtag) {
-          this.requestFullSync('generic/ambiguous notification with a new vault root state');
-          await this.runPendingFullSync();
-          return;
-        }
-        if (fileIds.length === 0) {
-          this.opts.log?.(`push: generic notification matches observed vault root ETag (${rootEtag}) → no new vault change`);
-          return;
-        }
-        // A generic hint and file IDs can be coalesced into one scheduler batch. Once the root ETag
-        // proves the generic hint adds no NEW vault state, still process the concrete IDs: a delayed
-        // known-file notification from the same root state may be useful even though the generic hint
-        // itself is stale/outside noise.
-        this.opts.log?.(`push: generic notification matches observed root; reconciling ${fileIds.length} concrete id(s)`);
+        if (fileIds.length === 0) return;
       }
 
       if (!this.opts.reconcileFileIds) {
@@ -348,39 +326,34 @@ export class PushSyncScheduler {
         result = await this.opts.reconcileFileIds({ fileIds, rootFileId: scope.rootFileId });
       } catch (err) {
         // A bug/failure in the optimization must never become a second source of truth.
+        if (this.stopped) return;
         this.opts.log?.(`push: targeted reconciliation failed — ${this.errorMessage(err)}`);
         this.requestFullSync('targeted reconciliation failed');
         await this.runPendingFullSync();
         return;
       }
 
+      if (this.stopped) return;
       if (result === 'busy') {
-        if (!this.stopped) {
-          this.observedPushRootEtag = null;
-          this.restoreBatch(false, fileIds, catchUpRequested);
-          retryDelayMs = PUSH_SYNC_TIMING.busyRetryMs;
-        }
+        this.restoreBatch(fullSyncRequested, fileIds, catchUpRequested);
+        retryDelayMs = PUSH_SYNC_TIMING.busyRetryMs;
         return;
       }
 
       if (result === 'untracked') {
-        if (this.observedPushRootEtag === rootEtag) {
-          this.opts.log?.(`push: untracked IDs match observed vault root ETag (${rootEtag}) → treating as outside/stale push`);
-          return;
-        }
-        this.requestFullSync('untracked IDs coincide with a new vault root state');
+        if (verified || await this.verifyRoot(scope) || this.stopped) return;
+        this.requestFullSync('untracked IDs coincide with an unverified vault state');
         await this.runPendingFullSync();
         return;
       }
 
-      if (result === 'full-sync') {
-        this.requestFullSync('targeted batch became structural/ambiguous');
+      if (result === 'full-sync' || result === 'rename-pending') {
+        this.requestFullSync('targeted batch became structural/ambiguous', result === 'rename-pending');
         await this.runPendingFullSync();
         return;
       }
 
       if (result === 'plugin-pending') {
-        this.observedPushRootEtag = null;
         // A full session prepares and orders plugin bundles. Deferring one must not certify the
         // whole root as processed, hide an unrelated unknown ID, or create a retry timer loop.
         this.opts.log?.('push: known plugin work waits for the next full session; root checkpoint not advanced');
@@ -389,22 +362,22 @@ export class PushSyncScheduler {
 
       this.opts.onReconciliationTriggered?.();
       this.lastTriggeredSyncAt = Date.now();
-      if (result === 'done') {
-        // Checkpoint ONLY the ETag observed before this completely successful targeted batch. If the
-        // classifier uploaded a merge/local edit and changed the root again, the next push sees a new
-        // ETag and remains conservative.
-        this.observedPushRootEtag = rootEtag;
-      } else {
-        this.observedPushRootEtag = null;
-        // The path was deliberately deferred/unresolved (error, conflict, retry queue). It still
-        // counts as attempted work for status, but must never certify this root state as processed.
-        this.opts.log?.('push: targeted batch left deferred/unresolved work → push root checkpoint not advanced');
-      }
     } catch (err) {
       this.opts.log?.(`push: reconciliation failed — ${this.errorMessage(err)}`);
     } finally {
       this.syncing = false;
       if (this.hasPending() && !this.stopped) this.scheduleNext(retryDelayMs);
+    }
+  }
+
+  private async verifyRoot(root: ChangedPushRoot): Promise<boolean> {
+    try {
+      const verified = await this.opts.verifyRoot?.(root);
+      if (verified) this.opts.log?.('push: complete remote view already covered → no vault reconciliation needed');
+      return verified === true;
+    } catch (err) {
+      this.opts.log?.(`push: vault verification failed — ${this.errorMessage(err)}; reconciling normally`);
+      return false;
     }
   }
 

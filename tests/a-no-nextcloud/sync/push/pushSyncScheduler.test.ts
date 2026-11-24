@@ -8,10 +8,7 @@ const ignoreScope = { kind: 'ignore' as const };
 const fullSyncScope = { kind: 'full-sync' as const };
 const immediateFullSync = { fullSyncQuietMs: 0, fullSyncMaxDelayMs: 0 } as const;
 const flush = async () => {
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
+  for (let step = 0; step < 12; step++) await Promise.resolve();
 };
 
 describe('PushSyncScheduler', () => {
@@ -489,15 +486,16 @@ describe('PushSyncScheduler', () => {
   });
 
 
-  it('checkpoints a successful targeted root ETag and ignores a later all-untracked push at that same root state', async () => {
+  it('ignores a later all-untracked push after proving the complete root is already covered', async () => {
     const reconcileFileIds = jest.fn()
       .mockResolvedValueOnce('done' as const)
       .mockResolvedValueOnce('untracked' as const);
     const sync = jest.fn(async () => {});
-    let rootEtag = 'etag-1';
+    const verifyRoot = jest.fn(async () => true);
     const scheduler = new PushSyncScheduler({
       isSyncRunning: () => false,
-      shouldSync: async () => targetedScope('root-id', rootEtag),
+      shouldSync: async () => targetedScope('root-id', 'etag-1'),
+      verifyRoot,
       reconcileFileIds,
       sync,
       debounceMs: 0,
@@ -515,6 +513,7 @@ describe('PushSyncScheduler', () => {
     await flush();
 
     expect(reconcileFileIds).toHaveBeenCalledTimes(2);
+    expect(verifyRoot).toHaveBeenCalledWith(targetedScope('root-id', 'etag-1'));
     expect(sync).not.toHaveBeenCalled();
     expect(scheduler.getStatus().pending).toBe(false);
   });
@@ -556,12 +555,13 @@ describe('PushSyncScheduler', () => {
     expect(scheduler.getStatus().pending).toBe(false);
   });
 
-  it('uses the observed root checkpoint for generic notify_file noise too', async () => {
+  it('ignores a generic push if a complete scoped check confirms that tracking is current', async () => {
     const reconcileFileIds = jest.fn(async () => 'done' as const);
     const sync = jest.fn(async () => {});
     const scheduler = new PushSyncScheduler({
       isSyncRunning: () => false,
       shouldSync: async () => targetedScope('root-id', 'etag-1'),
+      verifyRoot: async () => true,
       reconcileFileIds,
       sync,
       debounceMs: 0,
@@ -587,6 +587,7 @@ describe('PushSyncScheduler', () => {
     const scheduler = new PushSyncScheduler({
       isSyncRunning: () => false,
       shouldSync: async () => targetedScope('root-id', 'etag-1'),
+      verifyRoot: async () => true,
       reconcileFileIds,
       sync,
       debounceMs: 0,
@@ -829,13 +830,14 @@ describe('PushSyncScheduler', () => {
     expect(scheduler.getStatus().pending).toBe(false);
   });
 
-  it('uses the observed push root checkpoint to dismiss a catch-up with no newer remote state', async () => {
+  it('dismisses catch-up after checking that tracking covers the whole remote view', async () => {
     const reconcileFileIds = jest.fn(async () => 'done' as const);
     const sync = jest.fn(async () => {});
     const scheduler = new PushSyncScheduler({
       ...immediateFullSync,
       isSyncRunning: () => false,
       shouldSync: async () => targetedScope('root-id', 'etag-1'),
+      verifyRoot: async () => true,
       reconcileFileIds,
       sync,
       debounceMs: 0,
@@ -852,6 +854,48 @@ describe('PushSyncScheduler', () => {
 
     expect(reconcileFileIds).toHaveBeenCalledTimes(1);
     expect(sync).not.toHaveBeenCalled();
+    expect(scheduler.getStatus().pending).toBe(false);
+  });
+
+  it.each(['generic', 'unknown ID', 'reconnect'])('checks the whole vault for a %s hint after a targeted sync at the same ETag', async (hint) => {
+    const sync = jest.fn(async () => {});
+    const verifyRoot = jest.fn(async () => false);
+    const reconcileFileIds = jest.fn().mockResolvedValueOnce('done').mockResolvedValue('untracked');
+    const scheduler = new PushSyncScheduler({
+      ...immediateFullSync, isSyncRunning: () => false, shouldSync: async () => targetedScope(),
+      reconcileFileIds, verifyRoot, sync, debounceMs: 0,
+    });
+    scheduler.notify({ fileIds: ['known'], raw: 'notify_file_id ["known"]' });
+    await jest.advanceTimersByTimeAsync(0);
+    expect(reconcileFileIds).toHaveBeenCalledTimes(1);
+    expect(sync).not.toHaveBeenCalled();
+
+    if (hint === 'reconnect') scheduler.requestRemoteCatchUp();
+    else if (hint === 'generic') scheduler.notify(GENERIC_NOTIFICATION);
+    else scheduler.notify({ fileIds: ['unknown'], raw: 'notify_file_id ["unknown"]' });
+    await jest.advanceTimersByTimeAsync(0);
+    expect(verifyRoot).toHaveBeenCalledTimes(1);
+    expect(sync).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['scope check', 'targeted run'])('keeps a pending rename retry from the %s through the quiet window despite an unchanged ETag', async (source) => {
+    const sync = jest.fn().mockResolvedValueOnce('retry').mockResolvedValue('completed');
+    const reconcileFileIds = jest.fn(async () => 'rename-pending' as const);
+    const scheduler = new PushSyncScheduler({
+      isSyncRunning: () => false,
+      shouldSync: async (ids) => {
+        if (!ids.includes('held')) return ignoreScope;
+        return source === 'scope check' ? { ...fullSyncScope, retryOnUnchanged: true } : targetedScope();
+      },
+      reconcileFileIds, sync, debounceMs: 0, fullSyncQuietMs: 100, fullSyncMaxDelayMs: 250,
+    });
+    scheduler.notify({ fileIds: ['held'], raw: 'notify_file_id ["held"]' });
+    await jest.advanceTimersByTimeAsync(0);
+    expect(sync).not.toHaveBeenCalled();
+    await jest.advanceTimersByTimeAsync(100);
+    expect(sync).toHaveBeenCalledTimes(1);
+    await jest.advanceTimersByTimeAsync(100);
+    expect(sync).toHaveBeenCalledTimes(2);
     expect(scheduler.getStatus().pending).toBe(false);
   });
 

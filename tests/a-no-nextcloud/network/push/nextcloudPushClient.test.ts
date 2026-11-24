@@ -512,6 +512,11 @@ describe('parseFileNotification', () => {
       raw: 'notify_file_id []',
     });
   });
+
+  it.each(['[42,null]', '[42,9007199254740993]', '[42,""]'])('treats a partially malformed ID array %s as a generic hint', (payload) => {
+    const raw = `notify_file_id ${payload}`;
+    expect(parseFileNotification(raw)).toEqual({ fileIds: null, raw });
+  });
 });
 
 describe('public share credentials stay outside account Push', () => {

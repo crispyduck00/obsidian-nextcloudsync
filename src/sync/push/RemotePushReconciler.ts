@@ -3,7 +3,7 @@ import type { DirState } from '../../types';
 import type { FileLogger } from '../../util/FileLogger';
 import type { RemoteFileReconcileResult } from '../watch/WatchOperations';
 
-export type RemoteBatchReconcileResult = 'done' | 'deferred' | 'plugin-pending' | 'untracked' | 'busy' | 'full-sync';
+export type RemoteBatchReconcileResult = 'done' | 'deferred' | 'plugin-pending' | 'untracked' | 'busy' | 'full-sync' | 'rename-pending';
 
 export interface RemotePushBatch {
   fileIds: readonly string[];
@@ -25,8 +25,8 @@ export interface RemotePushReconcilerDeps {
  * Known files are handed to the ordinary per-file classifier. Known directory IDs are accepted only
  * when they can be explained as parent/ancestor ETag propagation for a known file in the same push
  * batch; the directory itself is never synchronized here. An all-unknown batch is returned as
- * `untracked` so the scheduler can compare its already-fetched vault-root ETag with the transient
- * push checkpoint. Unknown mixed with known vault state, directory-only events, inconsistent identity,
+ * `untracked` so the scheduler can verify the complete scoped remote view. Unknown mixed with
+ * known vault state, directory-only events, inconsistent identity,
  * rename/delete ambiguity, and every other structural case still fall back to the existing full sync.
  */
 export class RemotePushReconciler {
@@ -49,7 +49,7 @@ export class RemotePushReconciler {
     let sawKnownScopeId = false;
 
     // Classify the complete batch before touching the network. Unknown-only is kept distinct so the
-    // scheduler can combine it with the already-fetched vault-root ETag; unknown mixed with any known
+    // scheduler can verify it against the complete scoped remote view; unknown mixed with any known
     // vault identity remains structural/ambiguous and therefore requires the authoritative full sync.
     for (const fileId of ids) {
       const file = this.deps.stateDB.getFileByRemoteId(fileId);

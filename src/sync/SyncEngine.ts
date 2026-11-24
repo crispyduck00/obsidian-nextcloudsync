@@ -54,6 +54,7 @@ import { WatchOperations } from './watch/WatchOperations';
 import { SyncActivityGate } from './SyncActivityGate';
 import { RemotePushReconciler, type RemoteBatchReconcileResult, type RemotePushBatch } from './push/RemotePushReconciler';
 import type { ClientPushScopeResult } from './push/PushSyncScheduler';
+import { matchesTrackedRemote } from './push/matchesTrackedRemote';
 import { MirrorService } from './mirror/MirrorService';
 import { SyncHistoryStore } from '../data/SyncHistoryStore';
 import { IStatusBar } from '../ui/StatusBarItem';
@@ -166,6 +167,8 @@ export class SyncEngine {
   private readonly activityGate = new SyncActivityGate();
   /** Resolves notify_push IDs and delegates only safe known-file work to the existing classifier. */
   private readonly remotePush: RemotePushReconciler;
+  /** Push-only observation. The ordinary sync cache is owned by StateDB. */
+  private observedPushRoot?: { etag: string; client: IWebDAVClient; scope: string; generation: number };
 
   private readonly mirror: MirrorService;
   // Turns each session's over-the-size-limit skip tally into the one end-of-sync notice (docs/spec.md §9.4a).
@@ -595,6 +598,9 @@ export class SyncEngine {
    * stored root ETag.
    */
   async shouldReconcileClientPush(fileIds: readonly string[] = []): Promise<ClientPushScopeResult> {
+    // An explicit hint for a pending move must survive Wi-Fi gating and an unchanged root.
+    if (this.isPendingRenamePush(fileIds)) return { kind: 'full-sync', retryOnUnchanged: true };
+
     // Preserve the existing Wi-Fi-only behavior without making a new network request on cellular.
     if (this.isBlockedByWifiOnly()) return { kind: 'full-sync' };
 
@@ -605,42 +611,84 @@ export class SyncEngine {
     if (!client || this.features?.isNextcloud !== true || !this.hasCurrentClientCredentials(password)) {
       return { kind: 'full-sync' };
     }
-
-    // A change to the pending source may have cleared its lock. Use the ordinary sync gate even
-    // if this metadata change did not advance the vault ETag. Unrelated IDs keep the fast path.
-    if (fileIds.length && this.pendingFileRenames.list().some(rename => rename.fileId !== null
-      && rename.scope === this.fileRenameScope() && fileIds.includes(rename.fileId))) {
-      return { kind: 'full-sync' };
-    }
-
-    if (this.pendingFolderMoves.list().some(move => move.scope === this.fileRenameScope() && move.fileId && fileIds.includes(move.fileId))
-      || fileIds.some(id => {
-        const path = this.opts.stateDB.getFileByRemoteId(id)?.path;
-        return path !== undefined && this.pendingFolderMoves.holds(path);
-      })) return { kind: 'full-sync' };
+    const scope = this.pushScopeKey();
 
     // A token-capable server can advance StateDB without a real full scan, while remoteRootEtag is
     // deliberately updated only by full scans. Avoid using a potentially stale baseline there.
     if (this.opts.stateDB.getSyncToken()) return { kind: 'full-sync' };
 
-    const stored = this.opts.stateDB.getRemoteRootEtag();
-    if (stored == null) return { kind: 'full-sync' };
+    const db = this.opts.stateDB;
+    const fingerprint = db.getSyncScopeFingerprint?.();
+    if (fingerprint != null && fingerprint !== computeSyncScopeFingerprint(this.opts.settings)) return { kind: 'full-sync' };
+    const stored = db.getRemoteRootEtag();
+    const generation = db.getRootListingGeneration?.();
+    const observed = this.observedPushRoot;
+    const observedEtag = observed?.client === client && observed.scope === scope && observed.generation === generation
+      ? observed.etag : null;
+    if (stored == null && observedEtag == null) return { kind: 'full-sync' };
 
     const root = client.getRootInfo
       ? await client.getRootInfo()
       : { etag: await client.getRootEtag(), fileId: null };
     // Capability and root information can go stale during a password change. Let the normal
     // sync path reconnect and establish the scope before using a targeted result.
-    if (root.etag == null || client !== this.client || !this.hasCurrentClientCredentials(password)) {
+    const expectedRoot = db.getRemoteRootFileId?.();
+    if (root.etag == null || (expectedRoot && root.fileId !== expectedRoot) || client !== this.client
+      || scope !== this.pushScopeKey() || generation !== db.getRootListingGeneration?.() || !this.hasCurrentClientCredentials(password)) {
       return { kind: 'full-sync' };
     }
-    if (root.etag !== stored) {
+    // A local move can be captured while the scope probe was in flight.
+    if (this.isPendingRenamePush(fileIds)) return { kind: 'full-sync', retryOnUnchanged: true };
+    if (root.etag !== stored && root.etag !== observedEtag) {
       void this.opts.logger?.log(`client-push: vault root ETag changed (${stored} → ${root.etag}) → reconciliation required`);
       return { kind: 'targeted', rootFileId: root.fileId?.trim() || null, rootEtag: root.etag };
     }
 
     void this.opts.logger?.log(`client-push: vault root ETag unchanged (${root.etag})`);
     return { kind: 'ignore' };
+  }
+
+  private isPendingRenamePush(fileIds: readonly string[]): boolean {
+    if (!fileIds.length) return false;
+    const scope = this.fileRenameScope();
+    const ids = new Set(fileIds);
+    if (this.pendingFileRenames.list().some(rename => rename.scope === scope && !!rename.fileId && ids.has(rename.fileId))) return true;
+    const moves = this.pendingFolderMoves.list().filter(move => move.scope === scope);
+    if (!moves.length) return false;
+    const held = (path: string): boolean => moves.some(move => inFolder(path, move.source) || inFolder(path, move.destination)
+      || (!!move.attemptedDestination && inFolder(path, move.attemptedDestination)));
+    return moves.some(move => !!move.fileId && ids.has(move.fileId))
+      || fileIds.some(id => {
+        const file = this.opts.stateDB.getFileByRemoteId(id);
+        return file !== undefined && held(file.path);
+      })
+      || this.opts.stateDB.getAllDirs().some(dir => !!dir.remoteFileId && ids.has(dir.remoteFileId) && held(dir.path));
+  }
+
+  private pushScopeKey(): string {
+    return JSON.stringify([this.fileRenameScope(), computeSyncScopeFingerprint(this.opts.settings)]);
+  }
+
+  /** Read-only proof for unknown IDs, generic notifications and reconnect gaps after targeted sync. */
+  async verifyClientPushRoot(root: Extract<ClientPushScopeResult, { kind: 'targeted' }>): Promise<boolean> {
+    const client = this.client;
+    if (!client?.getRootInfo || !root.rootFileId || this.features?.isNextcloud !== true || this.isSyncRunning()
+      || !this.canRunWatchSync() || !this.hasCurrentClientCredentials(this.connectedPassword)
+      || this.pendingFileRenames.list().length || this.pendingFolderMoves.list().length) return false;
+    const db = this.opts.stateDB;
+    if (db.getSyncToken() || db.getRemoteRootEtag() == null || this.retryQueue.length) return false;
+    const generation = db.getRootListingGeneration();
+    const scope = this.pushScopeKey();
+    const password = this.connectedPassword;
+    const [files, dirs] = await Promise.all([client.getFiles(''), client.getDirectories('')]);
+    const latest = await client.getRootInfo();
+    if (latest.etag !== root.rootEtag || latest.fileId !== root.rootFileId || client !== this.client
+      || this.isSyncRunning() || !this.canRunWatchSync() || generation !== db.getRootListingGeneration() || scope !== this.pushScopeKey()
+      || !this.hasCurrentClientCredentials(password) || this.retryQueue.length
+      || this.pendingFileRenames.list().length || this.pendingFolderMoves.list().length) return false;
+    if (!matchesTrackedRemote(files, dirs, this.rebuildRemoteFilesFromState(), this.rebuildRemoteDirsFromState(), path => this.isSystemExcluded(path))) return false;
+    this.observedPushRoot = { etag: root.rootEtag, client, scope, generation };
+    return true;
   }
 
   private hasCurrentClientCredentials(password: string | null): boolean {
@@ -873,9 +921,13 @@ export class SyncEngine {
   }
 
   /** Reconcile notify_push IDs without advancing the collection sync token. */
-  reconcileRemoteFileIds(batch: RemotePushBatch): Promise<RemoteBatchReconcileResult> {
-    if (!this.hasCurrentClientCredentials(this.connectedPassword)) return Promise.resolve('full-sync');
-    return this.remotePush.reconcileFileIds(batch);
+  async reconcileRemoteFileIds(batch: RemotePushBatch): Promise<RemoteBatchReconcileResult> {
+    if (!this.hasCurrentClientCredentials(this.connectedPassword)) return 'full-sync';
+    const available = this.canRunWatchSync() && (!this.opts.isLocalVaultAvailable || await this.opts.isLocalVaultAvailable());
+    if (this.isPendingRenamePush(batch.fileIds)) return 'rename-pending';
+    if (!available) return 'deferred';
+    const result = await this.remotePush.reconcileFileIds(batch);
+    return this.isPendingRenamePush(batch.fileIds) ? 'rename-pending' : result;
   }
 
   /**
@@ -1316,6 +1368,7 @@ export class SyncEngine {
   private async incrementalSync(summary: SyncSessionSummary, refreshRemote: boolean): Promise<void> {
     const client = this.client!;
     const rootListingGeneration = this.opts.stateDB.getRootListingGeneration();
+    const pushScope = this.pushScopeKey();
     let remoteFiles: RemoteFileInfo[];
     // A full scan has a complete listing (absence implies remote deletion). The token path only has a diff.
     let fullScan: FullScanListing | undefined;
@@ -1446,9 +1499,15 @@ export class SyncEngine {
 
     // An incomplete run cannot reconstruct a complete listing. Size-limit skips are deliberate: their
     // observed metadata keeps the listing complete without fabricating a common base (docs/spec.md §8a.5).
-    if (this.cancelled || summary.conflictedCount > 0 || summary.errorCount > 0 || this.retryQueue.length > 0
-        || this.pendingFolderMoves.list().length > 0 || (fullScan && !remoteDirs)) {
+    const incomplete = this.cancelled || summary.conflictedCount > 0 || summary.errorCount > 0 || this.retryQueue.length > 0;
+    const pendingRenames = this.pendingFolderMoves.list().length > 0 || this.pendingFileRenames.list().length > 0;
+    if (incomplete || pendingRenames || (fullScan && !remoteDirs)) {
       this.opts.stateDB.setRemoteRootEtag(null);
+      // This listing covered non-held paths. Ignore account noise for this ETag while allowing
+      // explicit hints for the held paths to retry independently of the ordinary sync cache.
+      if (!incomplete && pendingRenames && fullScan?.rootEtag && remoteDirs && pushScope === this.pushScopeKey()) {
+        this.observedPushRoot = { etag: fullScan.rootEtag, client, scope: pushScope, generation: this.opts.stateDB.getRootListingGeneration() };
+      }
     } else if (fullScan && this.opts.stateDB.getRootListingGeneration() === rootListingGeneration) {
       const sizeSkippedFiles = eligible.filter(file => summary.oversizeSkippedPaths.has(file.path));
       this.opts.stateDB.setRemoteRootEtag(fullScan.rootEtag, sizeSkippedFiles);

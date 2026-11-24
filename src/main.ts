@@ -953,6 +953,7 @@ export default class ObsidianNextcloudsync extends Plugin {
     const scheduler = new PushSyncScheduler({
       isSyncRunning: () => this.syncEngine?.isSyncRunning() ?? false,
       shouldSync: async (fileIds) => this.syncEngine?.shouldReconcileClientPush(fileIds) ?? true,
+      verifyRoot: async (root) => this.syncEngine?.verifyClientPushRoot(root) ?? false,
       onReconciliationTriggered: () => {
         this.pushStatusItem?.pulse();
         this.mobileSyncStatusItem?.pulseRealtime();
