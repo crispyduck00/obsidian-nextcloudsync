@@ -10,7 +10,7 @@ Push uses the same live app-password source as WebDAV. A change restarts discove
 
 Push batches retain a two-second maximum initial wait and failed authoritative reconciliation backs off to at most one attempt per minute. A targeted batch covers only its file IDs. Generic, unknown, and reconnect hints require a separate complete-root proof before they can be discarded. A verified observation is scoped to its client, settings, and root-listing generation.
 
-The independent guarded-root reconciliation fix supplies the root-listing generation and optional root identity APIs. Before that fix is composed, this standalone topic uses the ordinary full fallback for an ambiguous root. Persistent rename intent is owned by its separate fix topic. Integration routes pushed IDs for held renames through the same authoritative fallback and retains their original conditional MOVE.
+The general `fixes/oversize-root-etag` topic supplies the root-listing generation. `fixes/guarded-folder-reconciliation` supplies the root identity API, and `fixes/version-restore-state-convergence` supplies confirmed remote revisions. Before the required proof capabilities are composed, this standalone topic uses the ordinary full fallback for an ambiguous root. Persistent rename intent is owned by its separate fix topic. Integration routes pushed IDs for held renames through the same authoritative fallback and retains their original conditional MOVE.
 
 ### Newly discovered Team Folders
 
