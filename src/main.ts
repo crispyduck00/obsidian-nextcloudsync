@@ -369,6 +369,7 @@ export default class ObsidianNextcloudsync extends Plugin {
       new Notice(`❌ Mirror from remote failed: ${(err as Error).message}`, 8000);
     } finally {
       this.mirrorInProgress = false;
+      if (this.syncEngine === engine) await engine.resumeAfterRemoteMirror();
     }
   }
 
@@ -428,6 +429,7 @@ export default class ObsidianNextcloudsync extends Plugin {
     this.localAdapter?.dispose();
     this.statusBarEl?.remove();
     this.statusBarEl = undefined;
+    this.syncEngine = undefined;
   }
 
   async loadSettings(): Promise<void> {
@@ -575,6 +577,7 @@ export default class ObsidianNextcloudsync extends Plugin {
       readAppPassword,
       pluginDir,
       configDir: this.app.vault.configDir,
+      isRemoteMirrorOpen: () => this.mirrorInProgress,
       pluginsAwaitingRestart: this.pluginsAwaitingRestart,
       // Evaluated live from the same settings and host token as the logger, so it follows the logging
       // toggle (docs/spec.md §9.1).

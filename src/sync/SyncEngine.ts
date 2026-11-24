@@ -96,6 +96,8 @@ interface SyncEngineOptions {
   readAppPassword?: AppPasswordReader;
   pluginDir: string;
   configDir: string;
+  /** Pause ordinary sync while the host plans or applies a remote mirror. */
+  isRemoteMirrorOpen?: () => boolean;
   // Host-owned predicate for this device's active log files, which must stay out of sync (docs/spec.md §9.1).
   isActiveLogFile?: (path: string) => boolean;
   // True while the user is typing into `path`. Consulted before any REMOTE -> LOCAL write, because writing under the cursor
@@ -305,6 +307,7 @@ export class SyncEngine {
       renameTracker: () => this.getOrCreateRenameTracker(),
       isBlockedByWifiOnly: () => this.isBlockedByWifiOnly(),
       isSyncRunning: () => this.isSyncRunning(),
+      isCancelled: () => this.cancelled,
       runNonFullSyncOperation: (fn) => this.activityGate.runShared(fn),
       processFile: (remote, summary) => this.processFileWithRetry(remote, summary),
       queueRetry: (p) => { this.retryQueue.push(p); },
@@ -412,7 +415,7 @@ export class SyncEngine {
 
   /** True while a full-vault sync session or its final persistence is still active. */
   isSyncRunning(): boolean {
-    return this.running || this.currentRun !== null;
+    return this.running || this.currentRun !== null || this.opts.isRemoteMirrorOpen?.() === true;
   }
 
   async syncManual(opts: { manual?: boolean } = {}): Promise<void> {
@@ -567,6 +570,17 @@ export class SyncEngine {
 
   private drainWatchPending(): Promise<void> {
     return this.watch.drainPending();
+  }
+
+  /** The same active host resumes deferred work after its mirror dialog has closed. */
+  async resumeAfterRemoteMirror(): Promise<void> {
+    if (this.opts.isRemoteMirrorOpen?.()) return;
+    this.cancelled = false;
+    try {
+      await this.drainWatchPending();
+    } catch (err) {
+      void this.opts.logger?.log(`watch: could not resume after remote mirror — ${(err as Error).message}`);
+    }
   }
 
   deleteSingleFile(path: string): Promise<void> {

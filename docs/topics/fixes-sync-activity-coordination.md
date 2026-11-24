@@ -13,6 +13,8 @@ Retain writer-preferred shared/exclusive coordination and upstream per-path lock
 - Previous 1.0.13 topic head: `2ec3c490c93437fbbcfc6cfc8363d6e14e3a0619` (parent of the archived Beta.1 integration).
 - Applies directly to upstream. Client Push routes its per-path operation through the shared gate when composed.
 
+Remote Mirror pauses ordinary full sync and Watch while its preview or apply dialog remains open. Closing or failing that dialog resumes deferred work on the same active engine. Disposing the host clears its engine reference, so an old dialog cannot revive a replaced engine.
+
 The size-notice regression test now checks that a manual sync waits for active Watch work and counts only its own skips.
 
 ## Validation and limits

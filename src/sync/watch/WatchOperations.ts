@@ -59,6 +59,7 @@ export interface WatchDeps {
   // network, no local write, no StateDB change.
   isBlockedByWifiOnly(): boolean;
   isSyncRunning(): boolean;
+  isCancelled?(): boolean;
   /** Run one lightweight operation under the engine's shared activity gate. */
   runNonFullSyncOperation<T>(fn: () => Promise<T>): Promise<T>;
   /**
@@ -342,6 +343,7 @@ export class WatchOperations {
   // Called once the run has finished. The set is drained into a local copy first so re-entry cannot loop.
   // Failures are per-path and already handled inside syncSingleFile.
   async drainPending(): Promise<void> {
+    if (this.deps.isCancelled?.()) return;
     if (this.pendingPaths.size === 0) return;
     const paths = [...this.pendingPaths];
     this.pendingPaths.clear();
