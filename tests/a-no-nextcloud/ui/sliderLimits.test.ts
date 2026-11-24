@@ -21,6 +21,8 @@ const EXPECTED: Record<string, SliderLimit> = {
   syncInterval: { min: 0, max: 60, step: 4 },
   networkTimeout: { min: 15, max: 120, step: 15 },
   networkConcurrency: { min: 0, max: 60, step: 4 },
+  watchDebounce: { min: 0, max: 30, step: 1 },
+  newItemDelay: { min: 0, max: 60, step: 1 },
   maxFileSize: { min: 0, max: 2048, step: 16 },
 };
 
@@ -31,10 +33,8 @@ describe('[SPEC:SLD-1] slider limits match the contract', () => {
     });
   }
 
-  it('exposes exactly the five target sliders (no extras)', () => {
-    expect(Object.keys(SLIDER_LIMITS).sort()).toEqual(
-      ['maxFileSize', 'networkConcurrency', 'networkTimeout', 'startupSyncDelay', 'syncInterval'],
-    );
+  it('exposes the documented sliders', () => {
+    expect(Object.keys(SLIDER_LIMITS).sort()).toEqual(Object.keys(EXPECTED).sort());
   });
 });
 

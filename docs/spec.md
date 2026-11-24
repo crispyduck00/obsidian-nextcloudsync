@@ -124,7 +124,7 @@ Whichever row of either table applies, **§5.3a is applied first**: content that
 | Trigger | desktop | mobile |
 |---|---|---|
 | Periodic sync `syncIntervalMinutes` | Enabled (default 15 minutes, 0 = manual only) | Disabled (it does not fire because of the `!Platform.isMobile` guard in `applyAutoSyncInterval`; the initial mobile default is **0** = manual only, which matches the display of the disabled slider) |
-| Sync on edit (watch) `watchOnChangeEnabled` | Default true (about 2 seconds debounce after editing stops). **File and folder create / modify / delete / rename are propagated immediately**: for files, create/modify -> **single-file sync (§5.7 below)**, delete -> **remote deletion (to the trash) with a safety decision**, rename -> MOVE; for folders, create -> MKCOL (idempotent), delete -> collection deletion (tracked folders only, to the trash), rename -> MOVE (all immediate, no debounce). Events caused by the plugin's own writes (such as parent-folder creation during a download) are suppressed with the ignore list to prevent the reverse flow. While propagating immediately, the status bar shows "syncing" (FR-011). Failures converge through the next full-scan `reconcileDirectories` | **Enabled.** The initial default is OFF (§15). It runs only while the app is in the foreground, and anything missed is picked up by the next full sync. It is subject to Wi-Fi only (§5.7c) |
+| Sync on edit (watch) `watchOnChangeEnabled` | File edits use the configured per-file delay. Pending file and folder renames preserve the tracked server identity. The optional first-upload delay also applies to new folder creation and ordinary automatic syncs. Explicit Sync now releases the waiting work. | Android foreground Watch is opt-in. A permitted network is required. |
 | Startup sync `startupSyncDelaySeconds` | Default 1 (`>0` enables, `0` disables) | **Default 1 (mobile also has startup sync ON).** Silent unless it transfers files, or ends with errors or unresolved conflicts (§11) |
 | **Foreground-resume sync** (`RSY-1` to `RSY-3`, GitHub discussion #44) | **Enabled (no platform branching)** | **Enabled.** Silent unless it transfers files, or ends with errors or unresolved conflicts (§11) |
 | Wi-Fi only `syncOnWifiOnly` | Default false (`navigator.connection.type` cannot be obtained, so it is **effectively disabled**) | Default true (**effective on Android only**, **not supported on iOS**). Applies to both full sync and watch (§5.7c) |
@@ -242,8 +242,7 @@ the same overlap seen from the server side (colliding PUTs to the same file).
 - The "being edited" decision uses **the last edit time per path** (`lastLocalEdit` in `main.ts`, self-pruned on read).
   The debounce pending set cannot be used because it is **cleared at the moment of firing** (it is always empty when the sync starts,
   so at the only moment it is asked it always answers "not being edited").
-- The window is **the same constant** as the debounce window (`EDIT_WINDOW_MS`). If it were shorter, the gap that was added to close it
-  would open again.
+- The remote-write guard retains its two-second window (`EDIT_WINDOW_MS`). Local upload timing is configured separately.
 
 Tests: `WOV-1` (`watchOverlap.test.ts`) / `WOV-2` (`writeWhileEditing.test.ts`). Both
 **verify both the under-detection and over-detection directions by mutation**.
@@ -841,6 +840,8 @@ Settings has a Maintenance category. **Vault index reset** (empties the state da
 | `networkTimeoutSeconds` | `30` | Timeout of a WebDAV request in seconds. **Applies to every request (§5.6)**. `0` = unlimited |
 | `maxFileSizeMB` | `0` | Upper limit of the file size (MB) above which a file is skipped in both directions. A manual sync ends with one notice counting the skips; automatic syncs only log them (§9.4a). 0 = unlimited. Mobile first run: 20 |
 | `watchOnChangeEnabled` | `true` | Auto sync after an edit. Mobile first run: false |
+| `watchDebounceSeconds` | `2` | Quiet time after each file’s last local edit in Watch. |
+| `newItemDelaySeconds` | `0` | Additional minimum age for observed local file and folder creations in automatic sync. The deadline follows local renames in the current session. Sync now releases it. |
 | `startupSyncDelaySeconds` | `1` | Seconds to wait before the startup sync. **`0` = no startup sync / `1` to `10` = delay in seconds** (this merged the former `syncOnStartupEnabled` toggle). Default 1 = enabled |
 | `networkConcurrency` | `16` | Number of concurrent WebDAV requests. Set automatically from the device RAM on first launch (§5.4) |
 | `syncOnWifiOnly` | `false` | Wi-Fi only (mobile first run: true. Not supported on iOS; effectively disabled on desktop) |
@@ -865,7 +866,7 @@ Settings has a Maintenance category. **Vault index reset** (empties the state da
 
 The single source of truth for the range (min and max) of values a numeric slider can take and for its movement step is `SLIDER_LIMITS` (`src/settings/sliderLimits.ts`). The type, default and sync behaviour of the setting values are unchanged; only the choices that the slider presents are the subject of the change (minimizing user freedom). With Obsidian's `setLimits(min,max,step)` a value snaps to a discrete value `min + k*step`. `addNumberSlider` of `SettingTab`, the settings mockup, and this table agree on the same values.
 
-> **Numeric input next to the sliders**: each slider row has an editable numeric input box next to it, so an exact value can be typed on the keyboard (it is not bound by the coarse step, and defaults outside the grid, such as the mobile maxFileSize 20 and the RAM-derived concurrency, can be entered too). The input is clamped to min/max and made an integer by `normalizeNumericInput` (`src/util/numericInput.ts`), and an empty or non-numeric value returns to the previous value. It is committed on blur or Enter (not while typing). The slider and the numeric input stay in two-way sync with a single setting value. The range, default and meaning are unchanged (only an input method is added). It applies only to the existing 5 sliders (the chunk threshold is not a user setting and stays a fixed value, see §15.1.2). `SNI-1` to `SNI-6`, `SNI-11`.
+> **Numeric input next to the sliders**: each slider row has an editable numeric input box next to it, so an exact value can be typed on the keyboard (it is not bound by the coarse step, and defaults outside the grid, such as the mobile maxFileSize 20 and the RAM-derived concurrency, can be entered too). The input is clamped to min/max and made an integer by `normalizeNumericInput` (`src/util/numericInput.ts`), and an empty or non-numeric value returns to the previous value. It is committed on blur or Enter (not while typing). The slider and the numeric input stay in two-way sync with a single setting value. The range, default and meaning are unchanged (only an input method is added). The chunk threshold is a fixed value (see §15.1.2). `SNI-1` to `SNI-6`, `SNI-11`.
 
 | Slider (setting key) | min | max | step | Default | Grid fit |
 |---|---|---|---|---|---|
@@ -874,6 +875,8 @@ The single source of truth for the range (min and max) of values a numeric slide
 | Network timeout (`networkTimeoutSeconds`) | 15 | 120 | 15 | 30 | yes (15 x 2, and with min = 15 the value 30 is reachable) |
 | Network concurrency (`networkConcurrency`) | 0 | 60 | 4 | 16 | yes (16 = 4 x 4) |
 | Maximum file size (`maxFileSizeMB`) | 0 | 2048 | 16 | 0 / mobile 20 | desktop: yes / mobile: no |
+| Watch delay after an edit (`watchDebounceSeconds`) | 0 | 30 | 1 | 2 | yes |
+| First upload delay (`newItemDelaySeconds`) | 0 | 60 | 1 | 0 | yes |
 
 - Invariant: every limit satisfies `max % step === 0` (no fractional last step). `SLD-2`.
 - Defaults or saved values outside the grid (`syncIntervalMinutes=15`, the RAM-derived automatic `networkConcurrency` such as 3, mobile `maxFileSizeMB=20`) are kept **non-destructively**, and snap to the nearest step only when the user operates the slider (there is no automatic correction or immediate normalization). `SLD-4`, `SLD-5`.

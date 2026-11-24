@@ -41,7 +41,7 @@ export class DirectoryReconciler {
 
   async reconcileDirectories(
     client: IWebDAVClient, summary: SyncSessionSummary, cachedDirs?: RemoteDirInfo[], skipLocalRemovals = false,
-    isHeld: (path: string) => boolean = () => false,
+    isHeld: (path: string, remoteObservation: boolean) => boolean = () => false,
   ): Promise<void> {
     let remoteDirInfos: RemoteDirInfo[];
     if (cachedDirs) {
@@ -63,7 +63,7 @@ export class DirectoryReconciler {
     const tracked = new Map(this.deps.stateDB.getAllDirs().map(d => [d.path, d]));
 
     const plan = classifyDirectories(remoteDirs, localDirs, tracked, p =>
-      isHeld(p) || this.deps.isSystemExcluded(p) || this.deps.isRenameHeld?.(p) === true);
+      this.deps.isSystemExcluded(p) || isHeld(p, remoteDirs.has(p) || tracked.has(p)) || this.deps.isRenameHeld?.(p) === true);
     plan.trashLocal = plan.trashLocal.filter(path => !this.deps.hasRenameInFolder?.(path));
     const { mkcolRemote, mkdirLocal, deleteRemote, trashLocal, ensureTracked, dropTracked } = plan;
 
@@ -106,6 +106,7 @@ export class DirectoryReconciler {
       if (this.deps.isCancelled()) break;
       if (this.deps.isRenameHeld?.(p)) continue;
       try {
+        this.deps.markOwnEvent(p);
         await this.deps.app.vault.adapter.mkdir(normalizePath(p));
         if (this.deps.isRenameHeld?.(p)) continue;
         this.deps.stateDB.setDir({ path: p, remoteFileId: remoteDirs.get(p)?.fileId ?? null });

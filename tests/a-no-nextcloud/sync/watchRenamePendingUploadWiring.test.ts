@@ -46,7 +46,7 @@ describe('watch rename preserves a pending debounced edit', () => {
   it('records ordinary renames even on a path marked by a recent download', () => {
     expect(handler).toContain('isInternalEventPath(oldPath) || isInternalEventPath(file.path)');
     expect(handler).toContain('this.localAdapter?.shouldIgnore(oldPath) === true');
-    expect(handler).toContain('this.syncEngine?.rememberFileRename(oldPath, newPath)');
+    expect(handler).toContain('engine?.rememberFileRename(oldPath, newPath)');
     expect(handler).not.toContain('isOwnSyncEvent(oldPath)');
   });
 });

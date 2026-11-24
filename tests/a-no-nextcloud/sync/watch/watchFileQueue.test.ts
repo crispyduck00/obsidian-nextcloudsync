@@ -1,4 +1,5 @@
 import { WatchFileQueue } from '../../../../src/sync/watch/WatchFileQueue';
+import { LocalCreationGrace } from '../../../../src/sync/watch/LocalCreationGrace';
 
 describe('Watch file deadlines', () => {
   beforeEach(() => jest.useFakeTimers());
@@ -39,5 +40,43 @@ describe('Watch file deadlines', () => {
     queue.rebaseFolder('Draft', 'Project');
     jest.advanceTimersByTime(1700);
     expect(dispatch).toHaveBeenCalledWith(['Drafting/Other.md', 'Project/Note.md']);
+  });
+
+  it('keeps a newly created folder and its note behind the same deadline after a rename', () => {
+    const dispatch = jest.fn();
+    const grace = new LocalCreationGrace(() => 10000);
+    const queue = new WatchFileQueue(() => 2000, () => true, dispatch, path => grace.readyAt(path));
+    grace.add('Untitled', true);
+    grace.add('Untitled/Untitled.md', false);
+    queue.add('Untitled/Untitled.md');
+    jest.advanceTimersByTime(2000);
+    expect(grace.rename('Untitled', 'Project', true)).toBe(true);
+    queue.rebaseFolder('Untitled', 'Project');
+    expect(grace.rename('Project/Untitled.md', 'Project/Project.md', false)).toBe(true);
+    expect(queue.take('Project/Untitled.md')).toBe(true);
+    queue.add('Project/Project.md');
+    jest.advanceTimersByTime(7999);
+    expect(dispatch).not.toHaveBeenCalled();
+    jest.advanceTimersByTime(1);
+    expect(dispatch).toHaveBeenCalledWith(['Project/Project.md']);
+  });
+
+  it('flushes an existing edit before Android suspension while keeping a fresh note queued', () => {
+    const dispatch = jest.fn();
+    const grace = new LocalCreationGrace(() => 10000);
+    let visible = true;
+    const queue = new WatchFileQueue(() => 2000, () => visible, dispatch, path => grace.readyAt(path));
+    grace.add('New.md', false);
+    queue.add('New.md');
+    queue.add('Existing.md');
+    visible = false;
+    queue.flushBeforeHide();
+    expect(dispatch.mock.calls).toEqual([[['Existing.md']]]);
+    jest.advanceTimersByTime(10000);
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    visible = true;
+    queue.refresh();
+    jest.advanceTimersByTime(0);
+    expect(dispatch.mock.calls).toEqual([[['Existing.md']], [['New.md']]]);
   });
 });

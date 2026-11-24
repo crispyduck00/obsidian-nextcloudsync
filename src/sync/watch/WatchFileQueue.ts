@@ -8,12 +8,13 @@ export class WatchFileQueue {
     private readonly delayMs: () => number,
     private readonly canFlush: () => boolean,
     private readonly dispatch: (paths: string[]) => void,
+    private readonly notBefore: (path: string) => number | undefined = () => undefined,
   ) {}
 
   add(path: string): void {
     const now = Date.now();
     this.editedAt.set(path, now);
-    this.schedule(now + this.delayMs());
+    this.schedule(this.dueAt(path, now + this.delayMs()));
   }
 
   take(path: string): boolean {
@@ -22,10 +23,17 @@ export class WatchFileQueue {
 
   rebaseFolder(source: string, destination: string): void {
     for (const [path, time] of [...this.editedAt]) {
-      if (!path.startsWith(source + '/')) continue;
+      if (path !== source && !path.startsWith(source + '/')) continue;
       const target = destination + path.slice(source.length);
       this.editedAt.delete(path);
       this.editedAt.set(target, Math.max(time, this.editedAt.get(target) ?? time));
+    }
+    this.refresh();
+  }
+
+  removeFolder(path: string): void {
+    for (const key of this.editedAt.keys()) {
+      if (key === path || key.startsWith(path + '/')) this.editedAt.delete(key);
     }
   }
 
@@ -34,7 +42,7 @@ export class WatchFileQueue {
     if (!this.canFlush()) return;
     const delay = this.delayMs();
     let next = Number.POSITIVE_INFINITY;
-    for (const time of this.editedAt.values()) next = Math.min(next, time + delay);
+    for (const [path, time] of this.editedAt) next = Math.min(next, this.dueAt(path, time + delay));
     if (Number.isFinite(next)) this.schedule(next);
   }
 
@@ -64,12 +72,16 @@ export class WatchFileQueue {
     const delay = this.delayMs();
     const ready: string[] = [];
     for (const [path, time] of this.editedAt) {
-      if (!beforeHide && time + delay > now) continue;
+      if (this.dueAt(path, beforeHide ? now : time + delay) > now) continue;
       this.editedAt.delete(path);
       ready.push(path);
     }
     this.refresh();
     if (ready.length) this.dispatch(ready);
+  }
+
+  private dueAt(path: string, editDeadline: number): number {
+    return Math.max(editDeadline, this.notBefore(path) ?? 0);
   }
 
   private cancelTimer(): void {

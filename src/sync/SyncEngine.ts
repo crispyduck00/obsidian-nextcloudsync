@@ -14,6 +14,7 @@ import {
   SyncTokenExpiredError,
   NetworkError,
   type PendingFileRename,
+  type PendingFolderMove,
   PreconditionFailedError,
   RemoteCompareResult,
   RemoteRootChangedError,
@@ -51,6 +52,7 @@ import { hasCompleteMarkerSet } from './ConflictResolver';
 import { DirectoryReconciler } from './directory/DirectoryReconciler';
 import { RemoteFolderGuard, assertTrackedParentReadable, replacedRemoteFolders } from './directory/RemoteFolderGuard';
 import { WatchOperations } from './watch/WatchOperations';
+import { LocalCreationGrace } from './watch/LocalCreationGrace';
 import { SyncActivityGate } from './SyncActivityGate';
 import { RemotePushReconciler, type RemoteBatchReconcileResult, type RemotePushBatch } from './push/RemotePushReconciler';
 import type { ClientPushScopeResult } from './push/PushSyncScheduler';
@@ -120,6 +122,7 @@ interface SyncEngineOptions {
   // True while the user is typing into `path`. Consulted before any REMOTE -> LOCAL write, because writing under the cursor
   // discards edits; uploads are unaffected (docs/spec.md §5.7b).
   isBeingEdited?: (path: string) => boolean;
+  localCreationGrace?: LocalCreationGrace;
   logger?: FileLogger;
   // Lets the host persist the server version without coupling the engine to settings persistence.
   onFeatures?: (features: NextcloudFeatures) => void;
@@ -163,6 +166,8 @@ export class SyncEngine {
   private readonly remoteFolders: RemoteFolderGuard;
 
   private readonly watch: WatchOperations;
+  private readonly localCreations: LocalCreationGrace;
+  private deferredRemoteThisRun = false;
   /** Shared/exclusive gate: lightweight path operations may overlap each other, never a full sync. */
   private readonly activityGate = new SyncActivityGate();
   /** Resolves notify_push IDs and delegates only safe known-file work to the existing classifier. */
@@ -196,6 +201,8 @@ export class SyncEngine {
   private readonly remoteListing: RemoteListingSource;
 
   constructor(private readonly opts: SyncEngineOptions) {
+    this.localCreations = opts.localCreationGrace
+      ?? new LocalCreationGrace(() => (opts.settings.newItemDelaySeconds ?? 0) * 1000);
     this.pluginsAwaitingRestart = opts.pluginsAwaitingRestart ?? new Set();
     // Tolerates a bare engine built without a plugin folder (some suites construct one with only the fields they use).
     const pluginDir: string = opts.pluginDir ?? '';
@@ -277,7 +284,7 @@ export class SyncEngine {
       logger: opts.logger,
     });
     this.transfer = new TransferService({
-      isRenameHeld: (p) => this.isRenameHeld(p),
+      isRenameHeld: (p) => this.isPathHeld(p),
       creationTime: this.creationTime,
       localAdapter: opts.localAdapter,
       stateDB: opts.stateDB,
@@ -306,7 +313,7 @@ export class SyncEngine {
     this.deletion = new DeletionService({
       canDeleteMissingChild: (path, summary) => this.canDeleteMissingChild(path, summary),
       assertLocalVaultAvailable: () => this.assertLocalVaultAvailable(),
-      isRenameHeld: (p) => this.isRenameHeld(p),
+      isRenameHeld: (p) => this.isPathHeld(p),
       hasRenameInFolder: (p) => this.hasRenameInFolder(p),
       app: opts.app,
       localAdapter: opts.localAdapter,
@@ -336,7 +343,7 @@ export class SyncEngine {
       logger: opts.logger,
     });
     this.conflicts = new ConflictApplier({
-      isRenameHeld: (p) => this.isRenameHeld(p),
+      isRenameHeld: (p) => this.isPathHeld(p),
       creationTime: this.creationTime,
       app: opts.app,
       localAdapter: opts.localAdapter,
@@ -363,7 +370,7 @@ export class SyncEngine {
     });
     this.directories = new DirectoryReconciler({
       hasRenameInFolder: (p) => this.hasRenameInFolder(p),
-      isRenameHeld: (p) => this.isRenameHeld(p),
+      isRenameHeld: (p) => this.isPathHeld(p),
       app: opts.app,
       stateDB: opts.stateDB,
       journal: this.journal,
@@ -389,7 +396,7 @@ export class SyncEngine {
       isSystemExcluded: (p) => this.isSystemExcluded(p),
       isPluginPath: (p) => this.plugins.isPluginPath(p),
       connect: () => this.connection(),
-      isRenameHeld: (p) => this.isRenameHeld(p),
+      isRenameHeld: (p) => this.isPathHeld(p),
       hasRenameInFolder: (p) => this.hasRenameInFolder(p),
       reconcileFolderMove: async () => {
         await this.syncManualWithResult();
@@ -486,7 +493,8 @@ export class SyncEngine {
   ): Promise<boolean> {
     const eligible = (rename: PendingFileRename): boolean => (shouldRetry?.(rename) ?? true)
       && !this.pendingFolderMoves.holds(rename.source) && !this.pendingFolderMoves.holds(rename.destination)
-      && (!rename.attemptedDestination || !this.pendingFolderMoves.holds(rename.attemptedDestination));
+      && (!rename.attemptedDestination || !this.pendingFolderMoves.holds(rename.attemptedDestination))
+      && !this.isCreationDeferred(rename.destination);
     if (!this.pendingFileRenames.list().some(eligible)) return false;
     if (client.inspectDirectory) await assertTrackedParentReadable(client, this.opts.stateDB, '');
     return this.pendingFileRenames.retry(client, eligible);
@@ -494,6 +502,36 @@ export class SyncEngine {
 
   private isRenameHeld(path: string): boolean {
     return this.pendingFileRenames.holds(path) || this.pendingFolderMoves.holds(path);
+  }
+
+  private isPathHeld(path: string): boolean {
+    return this.isRenameHeld(path) || this.isCreationDeferred(path);
+  }
+
+  private isCreationDeferred(path: string): boolean {
+    return this.localCreations.readyAt(path) !== undefined;
+  }
+
+  /** Only a deferred remote observation makes the remote listing or sync token incomplete. */
+  private deferRemotePath(path: string): boolean {
+    if (!this.isCreationDeferred(path)) return false;
+    if (this.running) this.deferredRemoteThisRun = true;
+    return true;
+  }
+
+  rememberLocalCreation(path: string, folder: boolean): void {
+    if (!this.opts.settings.newItemDelaySeconds || this.isSystemExcluded(path) || this.plugins.isPluginPath(path)) return;
+    if (folder ? this.opts.stateDB.getDir(path) : this.opts.stateDB.getFile(path)) return;
+    this.localCreations.add(path, folder);
+  }
+
+  retargetLocalCreation(source: string, destination: string, folder: boolean): boolean {
+    if (!this.localCreations.rename(source, destination, folder) || this.isRenameHeld(source)) return false;
+    return !(folder ? this.opts.stateDB.getDir(source) : this.opts.stateDB.getFile(source));
+  }
+
+  async retryMovesIntoFolder(path: string): Promise<void> {
+    if (this.hasRenameInFolder(path)) await this.syncManual();
   }
 
   private hasRenameInFolder(path: string): boolean {
@@ -755,6 +793,8 @@ export class SyncEngine {
     let completed = false;
     try {
       await this.assertLocalVaultAvailable();
+      this.deferredRemoteThisRun = false;
+      if (manual) this.localCreations.clear();
       // Connect INSIDE the try: if ensureClient() threw or hung outside it, the finally that clears `running` would be
       // skipped and the engine would balk forever as "already running".
       void this.opts.logger?.log('sync: connecting (ensureClient)');
@@ -766,9 +806,10 @@ export class SyncEngine {
       this.syncProgress = { processed: 0, total: 0 };
       this.opts.statusBar.setStatus('syncing', { automatic: !manual });
 
-      if (this.pendingFolderMoves.list().length) {
+      const canMoveFolder = (move: PendingFolderMove): boolean => !this.isCreationDeferred(move.destination);
+      if (this.pendingFolderMoves.list().some(canMoveFolder)) {
         await assertTrackedParentReadable(this.client!, this.opts.stateDB, '');
-        await this.pendingFolderMoves.retry(this.client!);
+        await this.pendingFolderMoves.retry(this.client!, canMoveFolder);
       }
       if (this.pendingFileRenames.list().length) await this.retryPendingFileRenames(this.client!);
       const isFirstSync = !this.opts.stateDB.getSyncToken()
@@ -780,6 +821,7 @@ export class SyncEngine {
       } else {
         await this.incrementalSync(summary, refreshRemote);
       }
+      if (this.deferredRemoteThisRun) this.opts.stateDB.setSyncToken(null);
       completed = !this.cancelled;
     } catch (err) {
       this.opts.stateDB.setRemoteRootEtag(null);
@@ -1202,6 +1244,7 @@ export class SyncEngine {
   applyRemoteMirror(
     plan: MirrorPlan, onProgress?: (done: number, total: number) => void,
   ): Promise<MirrorResult> {
+    this.localCreations.clear();
     return this.mirror.applyRemoteMirror(this.client!, plan, onProgress);
   }
 
@@ -1335,8 +1378,12 @@ export class SyncEngine {
       void this.opts.logger?.log('sync: INITIAL — no vault folder on the server yet; the first upload will create it');
       remoteFiles = [];
     }
+    remoteFiles = remoteFiles.filter(file => !this.deferRemotePath(file.path));
     await this.preparePluginSession(client, remoteFiles);
     const localFiles = await this.scanLocalFiles();
+    for (const path of localFiles.keys()) {
+      if (this.isCreationDeferred(path)) localFiles.delete(path);
+    }
 
     // Server-computed checksums (no download) let identical files count as unchanged rather than conflicts.
     await this.remoteListing.resolveRemoteChecksums(client, remoteFiles, localFiles);
@@ -1389,7 +1436,8 @@ export class SyncEngine {
           const rt = this.getOrCreateRenameTracker();
           const remoteRenames = rt.detectRemoteRenames(remoteFiles);
           for (const [oldPath, newPath] of remoteRenames) {
-            if (this.isRenameHeld(oldPath) || this.isRenameHeld(newPath)) continue;
+            if (this.deferRemotePath(oldPath) || this.deferRemotePath(newPath)
+              || this.isRenameHeld(oldPath) || this.isRenameHeld(newPath)) continue;
             await rt.applyRemoteRename(oldPath, newPath);
           }
 
@@ -1435,7 +1483,9 @@ export class SyncEngine {
 
     const replaced = replacedRemoteFolders(remoteDirs ?? [], this.opts.stateDB, path => this.isSystemExcluded(path));
     const missingLocally = new Set<string>();
-    const isHeld = (path: string): boolean => replaced.has(path) || missingLocally.has(path)
+    const isHeld = (path: string, remoteObservation = false): boolean =>
+      (remoteObservation ? this.deferRemotePath(path) : this.isCreationDeferred(path))
+      || replaced.has(path) || missingLocally.has(path)
       || ((replaced.size > 0 || missingLocally.size > 0)
         && ancestorMatching(path, parent => replaced.has(parent) || missingLocally.has(parent)) !== undefined);
     for (const path of replaced) {
@@ -1474,7 +1524,7 @@ export class SyncEngine {
 
     summary.retriedFiles = this.retryQueue.splice(0);
 
-    const scopeFiles = remoteFiles.filter(f => !isHeld(f.path) && !this.isRenameHeld(f.path));
+    const scopeFiles = remoteFiles.filter(f => !isHeld(f.path, true) && !this.isRenameHeld(f.path));
     await this.preparePluginSession(client, scopeFiles);
     const eligible = scopeFiles.filter(f => !this.isSystemExcluded(f.path));
     this.syncProgress = { processed: 0, total: eligible.length };
@@ -1500,7 +1550,8 @@ export class SyncEngine {
 
     // An incomplete run cannot reconstruct a complete listing. Size-limit skips are deliberate: their
     // observed metadata keeps the listing complete without fabricating a common base (docs/spec.md §8a.5).
-    const incomplete = this.cancelled || summary.conflictedCount > 0 || summary.errorCount > 0 || this.retryQueue.length > 0;
+    const incomplete = this.cancelled || this.deferredRemoteThisRun
+      || summary.conflictedCount > 0 || summary.errorCount > 0 || this.retryQueue.length > 0;
     const pendingRenames = this.pendingFolderMoves.list().length > 0 || this.pendingFileRenames.list().length > 0;
     if (incomplete || pendingRenames || (fullScan && !remoteDirs)) {
       this.opts.stateDB.setRemoteRootEtag(null);
@@ -1561,7 +1612,7 @@ export class SyncEngine {
   }
 
   private async processFileWithRetry(remote: RemoteFileInfo, summary: SyncSessionSummary): Promise<void> {
-    if (this.isRenameHeld(remote.path)) return;
+    if (this.deferRemotePath(remote.path) || this.isRenameHeld(remote.path)) return;
     try {
       await this.processRemoteFile(remote, summary);
     } catch (err) {
@@ -1659,7 +1710,7 @@ export class SyncEngine {
       localChanged = false;
     }
 
-    if (this.isRenameHeld(remote.path)) return;
+    if (this.deferRemotePath(remote.path) || this.isRenameHeld(remote.path)) return;
     const plugin = { localPresent: localStat !== null, localHash, localChanged, remoteId, idType };
     if (await this.applyPluginFileAction(remote, base, plugin, summary)) return;
 
@@ -1921,6 +1972,7 @@ export class SyncEngine {
 
 
   private async processRemoteDeletion(path: string, summary: SyncSessionSummary): Promise<void> {
+    if (this.deferRemotePath(path)) return;
     const outcome = await this.deletion.processRemoteDeletion(path, summary);
     // The entry kept for the retry describes a file the server no longer has. A short-circuit would rebuild the
     // listing from State, report it as still on the server, and never retry (docs/spec.md §8a.5).
@@ -1932,7 +1984,7 @@ export class SyncEngine {
 
   private async processLocalModifications(
     remoteFiles: RemoteFileInfo[], summary: SyncSessionSummary, isFullScan = false, remoteDirs?: RemoteDirInfo[],
-    isHeld: (path: string) => boolean = () => false,
+    isHeld: (path: string, remoteObservation?: boolean) => boolean = () => false,
   ): Promise<boolean> {
     const remotePathSet = new Set(remoteFiles.map(f => f.path));
     const remoteDirPaths = new Set(remoteDirs?.map(dir => dir.path.replace(/\/+$/, '')));
@@ -2011,7 +2063,8 @@ export class SyncEngine {
 
     const missingPaths = this.opts.stateDB.getAllFiles()
       .map(f => f.path)
-      .filter(p => !this.isRenameHeld(p) && !isHeld(p) && !this.isSystemExcluded(p) && !localStats.has(p) && !remotePathSet.has(p));
+      .filter(p => !this.isRenameHeld(p) && !localStats.has(p) && !remotePathSet.has(p)
+        && !this.isSystemExcluded(p) && !isHeld(p, true));
 
     const localRenames = rt.detectLocalRenamesByHash(missingPaths, newLocalFiles);
 
@@ -2052,7 +2105,7 @@ export class SyncEngine {
       const candidates: string[] = [];
       for (const fileState of this.opts.stateDB.getAllFiles()) {
         const path = fileState.path;
-        if (this.isRenameHeld(path) || isHeld(path) || this.isSystemExcluded(path) || remotePathSet.has(path)) continue;
+        if (this.isRenameHeld(path) || remotePathSet.has(path) || this.isSystemExcluded(path) || isHeld(path, true)) continue;
         if (!localStats.has(path)) continue;
         const data = await this.opts.localAdapter.readBinary(path);
         if (await sha256(data) !== fileState.localHash || fileState.isConflicted) {
@@ -2096,7 +2149,9 @@ export class SyncEngine {
   // Runs only on a COMPLETE listing. Directories are first-class entities, never deleted merely for being empty
   // (docs/spec.md §8a.1, docs/plan.md §16).
   private reconcileDirectories(
-    summary: SyncSessionSummary, cachedDirs?: RemoteDirInfo[], skipLocalRemovals = false, isHeld?: (path: string) => boolean,
+    summary: SyncSessionSummary, cachedDirs?: RemoteDirInfo[], skipLocalRemovals = false,
+    isHeld: (path: string, remoteObservation?: boolean) => boolean =
+      (path, remoteObservation) => remoteObservation ? this.deferRemotePath(path) : this.isCreationDeferred(path),
   ): Promise<void> {
     return this.directories.reconcileDirectories(this.client!, summary, cachedDirs, skipLocalRemovals, isHeld);
   }
@@ -2146,13 +2201,14 @@ export class SyncEngine {
       async (path) => {
         try {
           const lf = localFiles.get(path);
-          if (!lf) return;
+          if (!lf || this.isCreationDeferred(path)) return;
           const data = await this.opts.localAdapter.readBinary(path);
           // Hash from the bytes just read; reused for the OC-Checksum upload header so the client does not hash twice.
           const localHash = await sha256(data);
           // The local creation time is read before the upload; a server value for the same path is honoured (docs/spec.md §9.7).
           const before = await this.opts.localAdapter.stat(path);
           const ctime = uploadCreationTimeMs(before?.ctime, remoteMap.get(path)?.creationTime ?? 0);
+          if (this.isCreationDeferred(path)) return;
           const outcome = await this.uploadStrategy!.upload(this.client!, path, data, lf.mtime, { precomputedSha256: localHash, ctime, onlyIfAbsent: true });
           if (outcome === 'skipped') {
             // Over the size limit: counted for the end-of-sync notice (docs/spec.md §9.4a). This batch bypasses uploadFile.

@@ -38,6 +38,7 @@ import { PushSyncScheduler } from './sync/push/PushSyncScheduler';
 import { ClientPushStatusItem } from './ui/ClientPushStatusItem';
 import { MobileWatchLifecycle } from './sync/watch/MobileWatchLifecycle';
 import { WatchFileQueue } from './sync/watch/WatchFileQueue';
+import { LocalCreationGrace } from './sync/watch/LocalCreationGrace';
 import { SLIDER_LIMITS } from './settings/sliderLimits';
 
 const MIN_OBSIDIAN_VERSION = '1.13.0';
@@ -67,6 +68,8 @@ export default class ObsidianNextcloudsync extends Plugin {
   /** Android-only lifecycle state for opt-in foreground Watch mode. */
   private mobileWatch?: MobileWatchLifecycle;
   private watchQueue?: WatchFileQueue;
+  private newFolderQueue?: WatchFileQueue;
+  private readonly localCreations = new LocalCreationGrace(() => this.settings.newItemDelaySeconds * 1000);
   /** Compact Android sync-status item in the active view action strip. */
   private mobileSyncStatusItem?: import('./ui/MobileSyncStatusItem').MobileSyncStatusItem;
   /**
@@ -284,6 +287,7 @@ export default class ObsidianNextcloudsync extends Plugin {
             for (const path of paths) void this.syncEngine?.syncSingleFile(path);
           }
         },
+        (path) => this.localCreations.readyAt(path),
       );
       this.watchQueue = watchQueue;
       const takePendingUpload = (path: string): boolean => {
@@ -325,6 +329,28 @@ export default class ObsidianNextcloudsync extends Plugin {
         if (engine) void desktopWork(engine);
       };
 
+      const createFolder = (path: string, resumeMoves = false): void => {
+        runStructural(
+          `create folder ${path}`,
+          async (engine) => {
+            await engine.createSingleFolder(path);
+            if (resumeMoves) await engine.retryMovesIntoFolder(path);
+          },
+          async (engine) => {
+            const created = await engine.createSingleFolderForMobileWatch(path);
+            if (created && resumeMoves) await engine.retryMovesIntoFolder(path);
+            return created;
+          },
+        );
+      };
+      const newFolderQueue = new WatchFileQueue(
+        () => 0,
+        () => watchOn() && (!mobileWatch || !document.hidden),
+        (paths) => { for (const path of paths) createFolder(path, true); },
+        (path) => this.localCreations.readyAt(path),
+      );
+      this.newFolderQueue = newFolderQueue;
+
       this.registerEvent(this.app.vault.on('modify', (file: TAbstractFile) => {
         if (!guard(file) || isPluginEvent(file.path) || isOwnSyncEvent(file.path)) return;
         this.lastLocalEdit.set(file.path, Date.now());
@@ -333,14 +359,15 @@ export default class ObsidianNextcloudsync extends Plugin {
 
       this.registerEvent(this.app.vault.on('create', (file: TAbstractFile) => {
         if (isPluginEvent(file.path) || isOwnSyncEvent(file.path)) return;
-        if (file instanceof TFolder) this.syncEngine?.forgetFolderDeletion(file.path);
+        const folder = file instanceof TFolder;
+        const engine = this.syncEngine;
+        if (folder) engine?.forgetFolderDeletion(file.path);
+        if (engine) engine.rememberLocalCreation(file.path, folder);
+        else this.localCreations.add(file.path, folder);
         if (!watchOn()) return;
-        if (file instanceof TFolder) {
-          runStructural(
-            `create folder ${file.path}`,
-            (engine) => engine.createSingleFolder(file.path),
-            (engine) => engine.createSingleFolderForMobileWatch(file.path),
-          );
+        if (folder) {
+          if (this.localCreations.readyAt(file.path) !== undefined) newFolderQueue.add(file.path);
+          else createFolder(file.path);
           return;
         }
         if (file instanceof TFile) queueDebouncedFile(file.path);
@@ -350,9 +377,15 @@ export default class ObsidianNextcloudsync extends Plugin {
         if (isPluginEvent(file.path)) return;
         takePendingUpload(file.path);
         if (isOwnSyncEvent(file.path)) return;
-        if (file instanceof TFolder) this.syncEngine?.rememberFolderDeletion(file.path);
+        const folder = file instanceof TFolder;
+        this.localCreations.remove(file.path, folder);
+        if (folder) {
+          newFolderQueue.removeFolder(file.path);
+          watchQueue.removeFolder(file.path);
+          this.syncEngine?.rememberFolderDeletion(file.path);
+        }
         if (!watchOn()) return;
-        if (file instanceof TFolder) {
+        if (folder) {
           runStructural(
             `delete folder ${file.path}`,
             (engine) => engine.deleteSingleFolder(file.path),
@@ -374,11 +407,21 @@ export default class ObsidianNextcloudsync extends Plugin {
         if (isInternalEventPath(oldPath) || isInternalEventPath(file.path)) return;
         const hadPendingUpload = takePendingUpload(oldPath);
         const recheckContent = hadPendingUpload || this.localAdapter?.shouldIgnore(oldPath) === true;
+        const folder = file instanceof TFolder;
+        const engine = this.syncEngine;
+        const renamedBeforeUpload = engine
+          ? engine.retargetLocalCreation(oldPath, file.path, folder)
+          : this.localCreations.rename(oldPath, file.path, folder);
 
-        if (file instanceof TFolder) {
+        if (folder) {
           watchQueue.rebaseFolder(oldPath, file.path);
-          this.syncEngine?.rememberFolderRename(oldPath, file.path);
-          if (!watchOn()) return;
+          newFolderQueue.rebaseFolder(oldPath, file.path);
+          if (renamedBeforeUpload) {
+            if (watchOn()) newFolderQueue.add(file.path);
+            return;
+          }
+          engine?.rememberFolderRename(oldPath, file.path);
+          if (!watchOn() || this.localCreations.readyAt(file.path) !== undefined) return;
           runStructural(
             `rename folder ${oldPath} → ${file.path}`,
             (engine) => engine.renameSingleFolder(oldPath, file.path),
@@ -389,7 +432,11 @@ export default class ObsidianNextcloudsync extends Plugin {
         if (!(file instanceof TFile)) return;
 
         const newPath = file.path;
-        this.syncEngine?.rememberFileRename(oldPath, newPath);
+        if (renamedBeforeUpload) {
+          queueDebouncedFile(newPath);
+          return;
+        }
+        engine?.rememberFileRename(oldPath, newPath);
         if (!watchOn()) return;
         const lastEditAt = this.lastLocalEdit.get(oldPath);
         if (lastEditAt !== undefined) {
@@ -397,7 +444,10 @@ export default class ObsidianNextcloudsync extends Plugin {
           this.lastLocalEdit.set(newPath, lastEditAt);
         }
 
-        const engine = this.syncEngine;
+        if (this.localCreations.readyAt(newPath) !== undefined) {
+          if (recheckContent) queueDebouncedFile(newPath);
+          return;
+        }
         if (!engine) {
           if (mobileWatch) {
             mobileWatch.markStructuralDirty(`rename file ${oldPath} → ${newPath} arrived before sync engine was ready`);
@@ -442,11 +492,13 @@ export default class ObsidianNextcloudsync extends Plugin {
         this.registerDomEvent(document, 'visibilitychange', () => {
           if (document.hidden) {
             watchQueue.flushBeforeHide();
+            newFolderQueue.refresh();
             mobileWatch.onHidden();
             return;
           }
           queueMicrotask(() => {
             watchQueue.refresh();
+            newFolderQueue.refresh();
             mobileWatch.onVisible();
           });
         });
@@ -470,6 +522,7 @@ export default class ObsidianNextcloudsync extends Plugin {
   reevaluateMobileWatchPolicy(): void {
     if (!isWatchModeActive(this.settings.watchOnChangeEnabled, Platform.isMobile, Platform.isIosApp)) {
       this.watchQueue?.clear();
+      this.newFolderQueue?.clear();
     }
     this.mobileWatch?.onNetworkChanged();
     this.pushSyncScheduler?.onNetworkChanged();
@@ -477,6 +530,7 @@ export default class ObsidianNextcloudsync extends Plugin {
 
   refreshWatchTiming(): void {
     this.watchQueue?.refresh();
+    this.newFolderQueue?.refresh();
   }
 
   /**
@@ -746,6 +800,8 @@ export default class ObsidianNextcloudsync extends Plugin {
   // status-bar item is never removed, and two engines read/write the same StateDB concurrently.
   private teardownSyncEngine(): void {
     this.watchQueue?.clear();
+    this.newFolderQueue?.clear();
+    this.localCreations.clear();
     this.teardownClientPush();
     this.syncEngine?.stopAutoSync();
     // Order matters: signal an in-flight sync to stop pulling new work, then flush pending debounced
@@ -768,6 +824,10 @@ export default class ObsidianNextcloudsync extends Plugin {
     this.settings.watchDebounceSeconds = Number.isFinite(watchDelay)
       ? Math.max(0, Math.min(SLIDER_LIMITS.watchDebounce.max, watchDelay))
       : DEFAULT_SETTINGS.watchDebounceSeconds;
+    const firstUploadDelay = this.settings.newItemDelaySeconds;
+    this.settings.newItemDelaySeconds = Number.isFinite(firstUploadDelay)
+      ? Math.max(0, Math.min(SLIDER_LIMITS.newItemDelay.max, firstUploadDelay))
+      : DEFAULT_SETTINGS.newItemDelaySeconds;
 
     // Migrations below must run before pruneObsoleteSettings drops the keys they read.
     this.settings.configSync = { ...DEFAULT_SETTINGS.configSync };
@@ -926,6 +986,7 @@ export default class ObsidianNextcloudsync extends Plugin {
       pluginDir,
       configDir: this.app.vault.configDir,
       isLocalVaultAvailable: () => localAdapter.isFolder(pluginDir),
+      localCreationGrace: this.localCreations,
       pluginsAwaitingRestart: this.pluginsAwaitingRestart,
       // Evaluated live from the same settings and host token as the logger, so it follows the logging
       // toggle (docs/spec.md §9.1).

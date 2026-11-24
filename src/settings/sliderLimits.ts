@@ -18,6 +18,7 @@ export const SLIDER_LIMITS = {
   networkTimeout: { min: 15, max: 120, step: 15 },
   networkConcurrency: { min: 0, max: 60, step: 4 },
   watchDebounce: { min: 0, max: 30, step: 1 },
+  newItemDelay: { min: 0, max: 60, step: 1 },
   maxFileSize: { min: 0, max: 2048, step: 16 },
 } as const satisfies Record<string, SliderLimit>;
 

@@ -123,11 +123,11 @@ export class PendingFolderMoves {
   }
 
   // Called inside the full-sync gate. Capturing later user events stays synchronous while a request is in flight.
-  async retry(client: IWebDAVClient): Promise<void> {
+  async retry(client: IWebDAVClient, ready: (move: PendingFolderMove) => boolean = () => true): Promise<void> {
     const ordered = [...this.list()].sort((a, b) => a.source.length - b.source.length);
     for (const move of ordered) {
       if (this.deps.isCancelled()) break;
-      if (this.current(move.source) === move) await this.attempt(client, move);
+      if (this.current(move.source) === move && ready(move)) await this.attempt(client, move);
     }
   }
 

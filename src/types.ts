@@ -71,6 +71,8 @@ export interface DavSyncSettings {
   watchOnChangeEnabled: boolean;
   /** Quiet time after each file's last local edit before Watch sends it. */
   watchDebounceSeconds: number;
+  /** Grace period for observed local creations before automatic sync sends them. */
+  newItemDelaySeconds: number;
   /** Use Nextcloud Client Push (notify_push) as a best-effort remote-change trigger. */
   useClientPush: boolean;
   /** Optional WebSocket endpoint override. Empty = auto-detect from Nextcloud capabilities. */
@@ -130,6 +132,7 @@ export const DEFAULT_SETTINGS: DavSyncSettings = {
   maxFileSizeMB: 0, // desktop default; mobile gets a cap in loadSettings()
   watchOnChangeEnabled: true,
   watchDebounceSeconds: 2,
+  newItemDelaySeconds: 0,
   useClientPush: false,
   clientPushUrlOverride: '',
   mobileWatchMigrationVersion: 0,
