@@ -176,6 +176,11 @@ export default class ObsidianNextcloudsync extends Plugin {
         }
       }, EDIT_WINDOW_MS, true);
 
+      this.registerEvent(this.app.workspace.on('editor-change', (_editor, info) => {
+        const path = info.file?.path;
+        if (path && !isOwnSyncEvent(path)) this.lastLocalEdit.set(path, Date.now());
+      }));
+
       this.registerEvent(this.app.vault.on('modify', (file: TAbstractFile) => {
         if (!guard(file) || isOwnSyncEvent(file.path)) return;
         this.lastLocalEdit.set(file.path, Date.now());

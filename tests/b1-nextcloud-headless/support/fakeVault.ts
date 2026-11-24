@@ -77,9 +77,9 @@ export class FakeVault {
         const e = store.get(from);
         if (e) { addAncestors(to); store.set(to, e); store.delete(from); }
       },
-      async stat(p: string): Promise<{ size: number; mtime: number; ctime: number } | null> {
+      async stat(p: string): Promise<{ type: 'file'; size: number; mtime: number; ctime: number } | null> {
         const e = store.get(p);
-        return e ? { size: e.data.byteLength, mtime: e.mtime, ctime: e.ctime } : null;
+        return e ? { type: 'file', size: e.data.byteLength, mtime: e.mtime, ctime: e.ctime } : null;
       },
       // Full vault-relative paths of the immediate children of `path` (mirrors Obsidian's adapter.list).
       async list(path: string): Promise<{ files: string[]; folders: string[] }> {

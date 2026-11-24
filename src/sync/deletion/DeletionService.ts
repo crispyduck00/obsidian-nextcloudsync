@@ -68,7 +68,7 @@ export class DeletionService {
     if (serverHash && serverHash !== base.localHash) {
       // The server copy diverged after our base; restore it so a remote edit is never dropped.
       void this.deps.logger?.log(`conflict(local-delete vs remote-edit): restoring remote → ${remote.path}`);
-      await this.deps.transfer.downloadFile(client, remote, remoteId, idType, summary);
+      await this.deps.transfer.downloadFile(client, remote, remoteId, idType, summary, { stat: null });
       return 'restored';
     }
     // Without a reliable checksum (plain WebDAV, or recalc failed) do NOT delete: etag/size do not prove

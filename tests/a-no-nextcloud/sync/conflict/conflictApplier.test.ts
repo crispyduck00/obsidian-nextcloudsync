@@ -1,3 +1,4 @@
+import type { LocalWriteExpectation } from '../../../../src/data/LocalAdapter';
 // Direct tests for ConflictApplier.
 //
 // No [SPEC:...] tags: CF-*, MB-* and CSS-* stay with the engine-level suites.
@@ -111,7 +112,8 @@ function build(o: Opts = {}, over: Partial<ConflictDeps> = {}) {
       stat: async () => { calls.events.push('stat'); return { size: local.size, mtime: local.mtime, ctime: local.ctime }; },
       read: async () => { calls.reads++; return onDisk; },
       readBinary: async () => new TextEncoder().encode(onDisk).buffer,
-      atomicWrite: async (p: string, c: string, mtime?: number, ctime?: number) => {
+      atomicWrite: async (p: string, c: string, mtime?: number, ctime?: number, guard?: LocalWriteExpectation) => {
+        guard?.beforeCommit?.();
         calls.events.push('write');
         calls.wrote.push(p); calls.wroteMtime.push(mtime); calls.wroteCtime.push(ctime); onDisk = c;
       },
@@ -405,7 +407,7 @@ describe('ConflictApplier.resolveByWrite — creation time [SPEC:CT-3]', () => {
         const { applier, conn, calls } = build({ upload: 'ok', local: { content: 'x', mtime: 1, size: 1, ctime: local } });
         await applier.resolveByWrite(conn, 'note.md', 'merged\n', clean, remoteAt(server), 'old-remote', 'etag', summary());
         expect(calls.wroteCtime).toEqual([expectedWrite]);
-        expect(calls.uploadOpts).toEqual([{ ctime: expectedUpload }]);
+        expect(calls.uploadOpts).toEqual([expect.objectContaining({ ctime: expectedUpload, ifMatchEtag: '"r1"' })]);
       });
     }
 
@@ -533,19 +535,19 @@ describe('ConflictApplier.resolveByPreferLocal — creation time [SPEC:CT-4]', (
   it('uploads with the older of local and server creation time: older local [SPEC:CT-4]', async () => {
     const { applier, conn, calls } = build({ local: { content: 'x', mtime: 1, size: 1, ctime: OLD } });
     await applier.resolveByPreferLocal(conn, 'note.md', remoteInfo({ creationTime: NEW }), summary());
-    expect(calls.uploadOpts).toEqual([{ ctime: OLD }]);
+    expect(calls.uploadOpts).toEqual([expect.objectContaining({ ctime: OLD })]);
   });
 
   it('uploads with the older of local and server creation time: older server [SPEC:CT-4]', async () => {
     const { applier, conn, calls } = build({ local: { content: 'x', mtime: 1, size: 1, ctime: NEW } });
     await applier.resolveByPreferLocal(conn, 'note.md', remoteInfo({ creationTime: OLD }), summary());
-    expect(calls.uploadOpts).toEqual([{ ctime: OLD }]);
+    expect(calls.uploadOpts).toEqual([expect.objectContaining({ ctime: OLD })]);
   });
 
   it('sends no ctime when the server value is unknown [SPEC:CT-4]', async () => {
     const { applier, conn, calls } = build({ local: { content: 'x', mtime: 1, size: 1, ctime: OLD } });
     await applier.resolveByPreferLocal(conn, 'note.md', remoteInfo({ creationTime: undefined }), summary());
-    expect(calls.uploadOpts).toEqual([{ ctime: undefined }]);
+    expect(calls.uploadOpts).toEqual([expect.objectContaining({ ctime: undefined })]);
   });
 });
 
