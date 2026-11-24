@@ -20,9 +20,7 @@ function makeStateAdapter(): DataAdapter {
   } as unknown as DataAdapter;
 }
 
-// In-memory local vault used only for the watch-mode single-file calls. `listVaultFiles` (the full sync's own
-// scan) always reports empty so the full sync completes with an empty plan: the point is the exclusivity
-// gate, not full-sync classification.
+// In-memory vault shared by Watch and full sync, with immediate-child directory listings.
 function makeLocalAdapter(files: Record<string, string>) {
   return {
     files,
@@ -30,7 +28,14 @@ function makeLocalAdapter(files: Record<string, string>) {
     stat: jest.fn(async (p: string) =>
       (p in files ? { size: enc.encode(files[p]).length, mtime: 1_000 } : null)),
     exists: jest.fn(async (p: string) => p in files),
-    list: jest.fn(async () => ({ files: Object.keys(files), folders: [] })),
+    list: jest.fn(async (parent: string) => {
+      const prefix = parent ? `${parent}/` : '';
+      const children = Object.keys(files).filter(path => path.startsWith(prefix)).map(path => path.slice(prefix.length));
+      return {
+        files: children.filter(path => !path.includes('/')).map(path => prefix + path),
+        folders: [...new Set(children.filter(path => path.includes('/')).map(path => prefix + path.split('/')[0]))],
+      };
+    }),
     read: jest.fn(async (p: string) => files[p] ?? ''),
     readBinary: jest.fn(async (p: string) => toBuf(files[p] ?? '')),
     atomicWrite: jest.fn(async (p: string, d: string) => { files[p] = d; }),
