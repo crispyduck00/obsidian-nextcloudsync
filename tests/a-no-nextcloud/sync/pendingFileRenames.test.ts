@@ -2,7 +2,8 @@ import type { DataAdapter } from 'obsidian';
 import { StateDB } from '../../../src/data/StateDB';
 import type { IWebDAVClient } from '../../../src/network/IWebDAVClient';
 import { PendingFileRenames } from '../../../src/sync/PendingFileRenames';
-import { ConflictError, NetworkError, type FileState, type RemoteFileInfo } from '../../../src/types';
+import { SyncEngine } from '../../../src/sync/SyncEngine';
+import { ConflictError, NetworkError, DEFAULT_SETTINGS, type FileState, type RemoteFileInfo } from '../../../src/types';
 
 const original: FileState = {
   path: 'Old.md', localHash: 'hash', remoteId: 'hash', idType: 'sha256', size: 4, mtime: 1,
@@ -230,4 +231,55 @@ describe('persistent file renames', () => {
     expect(h.move).toHaveBeenLastCalledWith('Old.md', 'New.md', 'peer-rev');
     expect(h.remote.get('New.md')?.checksum).toBe('edited');
   });
+});
+
+describe('manual server-normalized name correction', () => {
+  const source = 'Cafe\u0301.md', destination = source.normalize('NFC');
+  async function normalizedRename() {
+    const h = await build();
+    h.db.deleteFile(original.path);
+    h.db.setFile({ ...original, path: source, localMtime: 100, localSize: 4 });
+    h.remote.clear();
+    h.remote.set(source, { ...remoteOriginal, path: source });
+    h.remote.set(destination, { ...remoteOriginal, path: destination });
+    h.local.clear(); h.local.add(destination);
+    h.queue.capture(source, destination);
+    return h;
+  }
+
+  it('recognizes the same-ID normalized destination after restart without sending MOVE or inventing a content signature', async () => {
+    const h = await normalizedRename();
+    await h.db.save();
+    const { db, queue } = await h.restart();
+    await expect(queue.retry(h.client)).resolves.toBe(true);
+    expect(h.move).not.toHaveBeenCalled(); expect(queue.list()).toEqual([]);
+    expect(db.getFile(source)).toBeUndefined();
+    expect(db.getFile(destination)).toEqual(expect.objectContaining({ remoteFileId: original.remoteFileId,
+      localHash: original.localHash, localMtime: undefined, localSize: undefined }));
+  });
+
+  it.each(['source remains', 'different ID', 'unrelated spelling'] as const)('keeps a safe conflict when %s', async mode => {
+    const h = await normalizedRename();
+    if (mode === 'source remains') h.local.add(source);
+    if (mode === 'different ID') h.remote.set(destination, { ...remoteOriginal, path: destination, fileId: 'other' });
+    if (mode === 'unrelated spelling') {
+      h.db.setPendingFileRenames([]); h.queue.capture(source, 'Other.md');
+      h.remote.set('Other.md', { ...remoteOriginal, path: 'Other.md' }); h.local.add('Other.md');
+    }
+    await expect(h.queue.retry(h.client)).resolves.toBe(false);
+    expect(h.move).not.toHaveBeenCalled(); expect(h.queue.list()[0].issue).toBe('conflict');
+    expect(h.db.getFile(source)?.localHash).toBe(original.localHash);
+  });
+});
+
+
+it('marks an existing rename ownership stop as requiring manual resolution without changing its message', async () => {
+  const h = await build(); h.queue.capture('Old.md', 'New.md');
+  const engine = new SyncEngine({ app: { vault: { adapter: {} } }, stateDB: h.db, localAdapter: {}, statusBar: {}, webdavFactory: {},
+    settings: { ...DEFAULT_SETTINGS }, pluginDir: '.obsidian/plugins/nextcloud-sync', configDir: '.obsidian' } as never);
+  const guard = engine as unknown as { assertFileRenameSettled(path: string): void };
+  expect(() => guard.assertFileRenameSettled('New.md')).toThrow('Resolve the pending rename in Sync status before changing this path.');
+  try { guard.assertFileRenameSettled('Old.md'); throw new Error('Expected a rename hold'); }
+  catch (error) { expect(error).toMatchObject({ requiresManualResolution: true }); }
+  expect(() => guard.assertFileRenameSettled('Unrelated.md')).not.toThrow();
 });
