@@ -22,7 +22,7 @@ import {
   AppPasswordReader,
   CredentialsNotFoundError,
 } from '../types';
-import { LocalAdapter } from '../data/LocalAdapter';
+import { LocalAdapter, type LocalStat, type LocalWriteExpectation } from '../data/LocalAdapter';
 import { StateDB } from '../data/StateDB';
 import type { MergeBaseStore } from '../data/MergeBaseStore';
 import type { CleanSideStore } from '../data/CleanSideStore';
@@ -286,6 +286,7 @@ export class SyncEngine {
       logger: opts.logger,
     });
     this.transfer = new TransferService({
+      isBeingEdited: opts.isBeingEdited,
       isRenameHeld: (p) => this.isPathHeld(p),
       beginFirstUpload: path => this.beginFirstUpload(path),
       creationTime: this.creationTime,
@@ -347,6 +348,7 @@ export class SyncEngine {
     });
     this.conflicts = new ConflictApplier({
       isRenameHeld: (p) => this.isPathHeld(p),
+      isBeingEdited: opts.isBeingEdited,
       creationTime: this.creationTime,
       app: opts.app,
       localAdapter: opts.localAdapter,
@@ -1457,7 +1459,7 @@ export class SyncEngine {
     await this.reconcileDirectories(summary);
 
     const token = await client.getSyncToken();
-    this.opts.stateDB.setSyncToken(token);
+    this.opts.stateDB.setSyncToken(this.retryQueue.length ? null : token);
   }
 
   private rememberRemoteRoot(client: IWebDAVClient): void {
@@ -1765,7 +1767,7 @@ export class SyncEngine {
 
     if (this.deferRemotePath(remote.path) || this.isRenameHeld(remote.path)) return;
     const plugin = { localPresent: localStat !== null, localHash, localChanged, remoteId, idType };
-    if (await this.applyPluginFileAction(remote, base, plugin, summary)) return;
+    if (await this.applyPluginFileAction(remote, base, plugin, localStat, summary)) return;
 
     // Previously synced but gone locally: this device deleted it. Propagate rather than re-download (which resurrects it).
     if (!localStat && base) {
@@ -1837,7 +1839,7 @@ export class SyncEngine {
       await this.uploadOrConflict(remote, base, localHash, remoteId, idType, summary);
     } else if (!localChanged && remoteChanged) {
       if (this.deferIfBeingEdited(remote.path, 'download')) return;
-      await this.downloadFile(remote, remoteId, idType, summary);
+      await this.downloadFile(remote, remoteId, idType, summary, { stat: localStat, hash: localStat ? localHash : undefined });
     } else {
       if (this.deferIfBeingEdited(remote.path, 'conflict')) return;
       await this.handleConflict(remote.path, base, remote, remoteId, idType, summary);
@@ -1875,6 +1877,7 @@ export class SyncEngine {
   private async applyPluginFileAction(
     remote: RemoteFileInfo, base: FileState | undefined,
     side: { localPresent: boolean; localHash: string; localChanged: boolean; remoteId: string; idType: FileState['idType'] },
+    localStat: LocalStat | null,
     summary: SyncSessionSummary,
   ): Promise<boolean> {
     const action = this.plugins.fileAction(remote.path, {
@@ -1885,7 +1888,10 @@ export class SyncEngine {
     });
     switch (action) {
       case 'download':
-        if (!this.deferIfBeingEdited(remote.path, 'download')) await this.downloadFile(remote, side.remoteId, side.idType, summary);
+        if (!this.deferIfBeingEdited(remote.path, 'download')) {
+          await this.downloadFile(remote, side.remoteId, side.idType, summary,
+            { stat: localStat, hash: localStat ? side.localHash : undefined });
+        }
         return true;
       case 'upload':
         await this.uploadOrConflict(remote, base, side.localHash, side.remoteId, side.idType, summary);
@@ -1984,9 +1990,9 @@ export class SyncEngine {
 
   private downloadFile(
     remote: RemoteFileInfo, remoteId: string,
-    idType: FileState['idType'], summary: SyncSessionSummary,
+    idType: FileState['idType'], summary: SyncSessionSummary, expected: LocalWriteExpectation,
   ): Promise<void> {
-    return this.transfer.downloadFile(this.client!, remote, remoteId, idType, summary);
+    return this.transfer.downloadFile(this.client!, remote, remoteId, idType, summary, expected);
   }
 
 
@@ -2333,7 +2339,7 @@ export class SyncEngine {
         try {
           const remote = remoteMap.get(path)!;
           const { remoteId, idType } = remoteIdOf(remote);
-          await this.downloadFile(remote, remoteId, idType, summary);
+          await this.downloadFile(remote, remoteId, idType, summary, { stat: null });
         } catch (err) { this.recordError(summary, path, err); this.retryQueue.push(path); }
         this.tickProgress();
       },

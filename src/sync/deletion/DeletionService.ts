@@ -58,7 +58,7 @@ export class DeletionService {
     if (base.checkAfterFolderMove) {
       await this.deps.assertLocalVaultAvailable?.();
       if (await this.deps.localAdapter.stat(remote.path) || this.deps.isRenameHeld?.(remote.path)) return 'kept';
-      await this.deps.transfer.downloadFile(client, remote, remoteId, idType, summary, true);
+      await this.deps.transfer.downloadFile(client, remote, remoteId, idType, summary, { stat: null });
       return await this.deps.localAdapter.stat(remote.path) ? 'restored' : 'kept';
     }
     if (!remote.etag && client.inspectDirectory) {
@@ -102,7 +102,7 @@ export class DeletionService {
       void this.deps.logger?.log(`conflict(local-delete vs remote-edit): restoring remote → ${remote.path}`);
       if (await this.deps.localAdapter.stat(remote.path)) return 'kept';
       await this.deps.transfer.downloadFile(client, remote, remote.checksum ?? remote.etag ?? remoteId,
-        remote.checksum ? 'sha256' : remote.etag ? 'etag' : idType, summary, true);
+        remote.checksum ? 'sha256' : remote.etag ? 'etag' : idType, summary, { stat: null });
       return 'restored';
     }
     // Without a reliable checksum (plain WebDAV, or recalc failed) do NOT delete: etag/size do not prove

@@ -3,6 +3,7 @@
 import { DataAdapter } from 'obsidian';
 import { SyncEngine } from '../../../src/sync/SyncEngine';
 import { CleanSideStore } from '../../../src/data/CleanSideStore';
+import type { LocalWriteExpectation } from '../../../src/data/LocalAdapter';
 import { DEFAULT_SETTINGS, DavSyncSettings, FileState, RemoteFileInfo, SyncSessionSummary } from '../../../src/types';
 
 const enc = new TextEncoder();
@@ -41,12 +42,16 @@ async function buildHarness(o: HarnessOpts) {
   await cleanSideStore.load();
   const baseStore = { get: jest.fn(() => o.base), set: jest.fn(), delete: jest.fn(), requestSave: jest.fn(), flush: jest.fn(async () => undefined) };
 
-  const atomicWrite = jest.fn(async (_p: string, _d: string) => undefined);
+  let body = o.local;
+  const atomicWrite = jest.fn(async (_p: string, data: string, _mtime?: number, _ctime?: number, guard?: LocalWriteExpectation) => {
+    guard?.beforeCommit?.();
+    body = data;
+  });
   const atomicWriteBinary = jest.fn(async (_p: string, _d: ArrayBuffer) => undefined);
   const localAdapter = {
     stat: jest.fn(async () => ({ size: enc.encode(o.local).byteLength, mtime: 1000 })),
     read: jest.fn(async () => o.local),
-    readBinary: jest.fn(async () => toBuf(o.local)),
+    readBinary: jest.fn(async () => toBuf(body)),
     atomicWrite, atomicWriteBinary,
   };
   const setFile = jest.fn();

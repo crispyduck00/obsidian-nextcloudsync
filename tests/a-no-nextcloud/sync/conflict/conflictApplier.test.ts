@@ -1,3 +1,4 @@
+import type { LocalWriteExpectation } from '../../../../src/data/LocalAdapter';
 // Direct tests for ConflictApplier.
 //
 // No [SPEC:...] tags: CF-*, MB-* and CSS-* stay with the engine-level suites.
@@ -111,7 +112,8 @@ function build(o: Opts = {}, over: Partial<ConflictDeps> = {}) {
       stat: async () => { calls.events.push('stat'); return { size: local.size, mtime: local.mtime, ctime: local.ctime }; },
       read: async () => { calls.reads++; return onDisk; },
       readBinary: async () => new TextEncoder().encode(onDisk).buffer,
-      atomicWrite: async (p: string, c: string, mtime?: number, ctime?: number) => {
+      atomicWrite: async (p: string, c: string, mtime?: number, ctime?: number, guard?: LocalWriteExpectation) => {
+        guard?.beforeCommit?.();
         calls.events.push('write');
         calls.wrote.push(p); calls.wroteMtime.push(mtime); calls.wroteCtime.push(ctime); onDisk = c;
       },

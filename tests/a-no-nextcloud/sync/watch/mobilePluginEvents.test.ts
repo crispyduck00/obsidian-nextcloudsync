@@ -23,6 +23,7 @@ function host({ running = true, newDelay = 0, ignoredPath = '' } = {}) {
   expect(start).toBeGreaterThan(0); expect(end).toBeGreaterThan(start);
   const body = transpileModule(source.slice(start, end), { compilerOptions: { module: ModuleKind.CommonJS } }).outputText;
   const events = new Map<string, (file: TFile | TFolder, oldPath?: string) => void>();
+  const editorEvents = new Map<string, (editor: unknown, info: { file: TFile | null }) => void>();
   const grace = new LocalCreationGrace(() => newDelay);
   const engine = { isSyncRunning: () => running, canRunWatchSync: () => true,
     rememberLocalCreation: (path: string, folder: boolean) => grace.add(path, folder),
@@ -31,7 +32,10 @@ function host({ running = true, newDelay = 0, ignoredPath = '' } = {}) {
     createSingleFolderForMobileWatch: jest.fn(async (_path: string) => true),
     retryMovesIntoFolder: jest.fn(async (_path: string) => undefined),
     syncForWatchRecovery: jest.fn(async () => true), syncSingleFileForMobileWatch: jest.fn(async () => true) };
-  const self = { app: { vault: { configDir: '.obsidian', on: (event: string, fn: (file: TFile | TFolder, oldPath?: string) => void) => events.set(event, fn) } },
+  const self = { app: {
+    vault: { configDir: '.obsidian', on: (event: string, fn: (file: TFile | TFolder, oldPath?: string) => void) => events.set(event, fn) },
+    workspace: { on: (event: string, fn: (editor: unknown, info: { file: TFile | null }) => void) => editorEvents.set(event, fn) },
+  },
     settings: { watchOnChangeEnabled: true, watchDebounceSeconds: 0 }, syncEngine: engine,
     localCreations: grace,
     lastLocalEdit: new Map(), logger: { log: () => undefined }, registerEvent: () => undefined,
@@ -40,7 +44,7 @@ function host({ running = true, newDelay = 0, ignoredPath = '' } = {}) {
   new Function('Platform', 'TFile', 'TFolder', 'MobileWatchLifecycle', 'isWatchModeActive', 'isUnderPluginsDir', 'isSyncTmpPath', 'WatchFileQueue', 'document', 'isActiveOwnLog', body)
     .call(self, { isMobile: true, isIosApp: false }, TFile, TFolder, MobileWatchLifecycle, isWatchModeActive,
       isUnderPluginsDir, () => false, WatchFileQueue, { hidden: false }, () => false);
-  return { events, engine };
+  return { events, editorEvents, engine, edits: self.lastLocalEdit };
 }
 
 it('keeps plugin temp/status and folder events out of Android recovery during a full sync', async () => {
@@ -87,4 +91,13 @@ it('still queues a normal note when plugin events are noisy', async () => {
   await jest.advanceTimersByTimeAsync(0);
   expect(h.engine.syncSingleFileForMobileWatch).toHaveBeenCalledWith('notes/n.md');
   expect(h.engine.syncForWatchRecovery).not.toHaveBeenCalled();
+});
+
+it('protects a note as soon as the editor changes, before any file-modify event', () => {
+  const h = host({ ignoredPath: 'notes/downloaded.md' });
+  const edited = h.editorEvents.get('editor-change')!;
+  edited(undefined, { file: new File('notes/downloaded.md') });
+  edited(undefined, { file: new File('notes/unsaved.md') });
+  expect([...h.edits.keys()]).toEqual(['notes/unsaved.md']);
+  expect(h.engine.syncSingleFileForMobileWatch).not.toHaveBeenCalled();
 });

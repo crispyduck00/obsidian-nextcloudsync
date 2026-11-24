@@ -637,7 +637,7 @@ describe('[SPEC:GDP-23] a path the server has EDITED is not a deletion at all', 
     expect(h.client.deleteFile).not.toHaveBeenCalled();
     expect(h.client.uploadFile).not.toHaveBeenCalled();
     expect(h.vault[path]).toBe('new local draft');
-    expect(h.stateDB.getFile(path)).toEqual(base);
+    expect(h.stateDB.getFile(path)).toEqual({ ...base, localMtime: undefined, localSize: undefined });
     expect(summary.downloadedCount).toBe(0);
     expect(h.engine.getStatusReport().retryFiles).toEqual([path]);
   });
