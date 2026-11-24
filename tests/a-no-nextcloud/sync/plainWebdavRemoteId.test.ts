@@ -1,6 +1,7 @@
 // [SPEC:PWR-1] The identity recorded after an upload must be the identity the next classification
 // reads back. A plain WebDAV client never reports a checksum, so recording a hash while classification
 // reads the ETag would make every file look remotely changed (docs/spec.md §5.9).
+import { sha256 } from '../../../src/util/hash';
 import { DataAdapter } from 'obsidian';
 import { SyncEngine } from '../../../src/sync/SyncEngine';
 import { TransferService } from '../../../src/sync/transfer/TransferService';
@@ -43,7 +44,6 @@ const plainRemote = (etag: string): RemoteFileInfo => ({
 
 // Drives the real TransferService so the test follows the recording rule instead of a hand-written copy.
 async function recordAfterUpload(
-  localHash: string,
   opts: { reportsChecksums?: boolean; statFile?: () => Promise<RemoteFileInfo | null> } = {},
 ): Promise<{ state: FileState; statCalls: number }> {
   const stateDB = new StateDB(memoryAdapter(), PLUGIN_DIR, 'dev-1');
@@ -77,7 +77,7 @@ async function recordAfterUpload(
   await transfer.uploadFile(
     client,
     { upload: async () => 'uploaded' } as unknown as IUploadStrategy,
-    PATH, localHash, PLAIN_ETAG, 'etag', plainRemote('"stale-pre-upload"'), summary(),
+    plainRemote('"stale-pre-upload"'), summary(),
   );
 
   const recorded = stateDB.getFile(PATH);
@@ -85,7 +85,7 @@ async function recordAfterUpload(
   return { state: recorded, statCalls };
 }
 
-async function engineWithBase(base: FileState) {
+async function engineWithBase(base: FileState, content = BODY) {
   const stateDB = new StateDB(memoryAdapter(), PLUGIN_DIR, 'dev-1');
   await stateDB.load();
   stateDB.setFile(base);
@@ -93,8 +93,8 @@ async function engineWithBase(base: FileState) {
   const engine = new SyncEngine({
     app: {}, settings: { ...DEFAULT_SETTINGS },
     localAdapter: {
-      stat: async () => ({ size: BODY.length, mtime: 1000 }),
-      readBinary: async () => new TextEncoder().encode(BODY).buffer,
+      stat: async () => ({ size: content.length, mtime: 1000 }),
+      readBinary: async () => new TextEncoder().encode(content).buffer,
     },
     stateDB, statusBar: {}, webdavFactory: {}, pluginDir: PLUGIN_DIR, configDir: '.obsidian',
   } as never);
@@ -115,7 +115,7 @@ describe('[SPEC:PWR-1] what an upload records is what the next sync reads back',
   it('does not re-download a file it just uploaded, on a server without checksums', async () => {
     // Nothing changed anywhere, yet the file comes down again: the recorded id and the read-back id are not
     // even the same kind of value.
-    const { state: base } = await recordAfterUpload('h-local');
+    const { state: base } = await recordAfterUpload();
     const { engine, calls } = await engineWithBase(base);
     (engine as unknown as Record<string, unknown>).isLocallyUnchanged = () => true;
 
@@ -127,8 +127,8 @@ describe('[SPEC:PWR-1] what an upload records is what the next sync reads back',
   it('does not raise a conflict against its own upload while the user keeps editing', async () => {
     // Local changed, remote did not, but the remote reads as changed: both sides look changed and a merged
     // body is written over the file being edited.
-    const { state: base } = await recordAfterUpload('h-local');
-    const { engine, calls } = await engineWithBase(base);
+    const { state: base } = await recordAfterUpload();
+    const { engine, calls } = await engineWithBase(base, 'edited');
     (engine as unknown as Record<string, unknown>).isLocallyUnchanged = () => false;
 
     await classify(engine, plainRemote(PLAIN_ETAG));
@@ -139,7 +139,7 @@ describe('[SPEC:PWR-1] what an upload records is what the next sync reads back',
 
   it('still sees a genuine remote change', async () => {
     // Making the two halves agree must not silence the case where another device really wrote to the server.
-    const { state: base } = await recordAfterUpload('h-local');
+    const { state: base } = await recordAfterUpload();
     const { engine, calls } = await engineWithBase(base);
     (engine as unknown as Record<string, unknown>).isLocallyUnchanged = () => true;
 
@@ -153,15 +153,15 @@ describe('[SPEC:PWR-2] the Nextcloud path must not pay for the plain-WebDAV fix'
   it('does not re-read the file after an upload when the client reports checksums', async () => {
     // Asking the server what it now holds after every upload would cost an extra PROPFIND per file (a thousand
     // on a first sync) for users who never had the bug.
-    const { statCalls } = await recordAfterUpload('h-local', { reportsChecksums: true });
+    const { statCalls } = await recordAfterUpload({ reportsChecksums: true });
     expect(statCalls).toBe(0);
   });
 
   it('keeps recording the local hash on a checksum-reporting server', async () => {
     // Nextcloud stores the OC-Checksum we sent and returns it from PROPFIND, so the hash we already hold is
     // what the next classification reads.
-    const { state } = await recordAfterUpload('h-local', { reportsChecksums: true });
-    expect(state.remoteId).toBe('h-local');
+    const { state } = await recordAfterUpload({ reportsChecksums: true });
+    expect(state.remoteId).toBe(await sha256(new TextEncoder().encode(BODY).buffer));
     expect(state.idType).toBe('sha256');
   });
 });
@@ -170,15 +170,15 @@ describe('[SPEC:PWR-3] when the server cannot be re-read', () => {
   it('falls back to the previous behaviour rather than recording nothing', async () => {
     // Recording nothing would leave the pre-upload baseline and the next sync would resolve a false conflict.
     // The fallback is one redundant download, after which the download path records the real remote id.
-    const { state } = await recordAfterUpload('h-local', { statFile: async () => null });
-    expect(state.remoteId).toBe('h-local');
+    const { state } = await recordAfterUpload({ statFile: async () => null });
+    expect(state.remoteId).toBe(await sha256(new TextEncoder().encode(BODY).buffer));
     expect(state.idType).toBe('sha256');
   });
 
   it('does not let a failed re-read abort the upload', async () => {
-    const { state } = await recordAfterUpload('h-local', {
+    const { state } = await recordAfterUpload({
       statFile: async () => { throw new Error('network went away'); },
     });
-    expect(state.remoteId).toBe('h-local');
+    expect(state.remoteId).toBe(await sha256(new TextEncoder().encode(BODY).buffer));
   });
 });

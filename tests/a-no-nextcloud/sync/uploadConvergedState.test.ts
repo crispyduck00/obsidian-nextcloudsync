@@ -11,6 +11,7 @@ import { DataAdapter } from 'obsidian';
 import { SyncEngine } from '../../../src/sync/SyncEngine';
 import { StateDB } from '../../../src/data/StateDB';
 import { DEFAULT_SETTINGS, RemoteFileInfo, SyncSessionSummary } from '../../../src/types';
+import type { UploadOptions } from '../../../src/network/IWebDAVClient';
 import { sha256 } from '../../../src/util/hash';
 
 const enc = new TextEncoder();
@@ -57,8 +58,9 @@ async function buildEngine(
   localAdapter: Record<string, unknown>,
   client: Record<string, unknown>,
   upload: jest.Mock,
+  stateAdapter = makeStateAdapter(),
 ) {
-  const stateDB = new StateDB(makeStateAdapter(), PLUGIN_DIR, 'dev1');
+  const stateDB = new StateDB(stateAdapter, PLUGIN_DIR, 'dev1');
   await stateDB.load();
   const baseStore = {
     get: jest.fn(() => undefined), set: jest.fn(), delete: jest.fn(),
@@ -66,7 +68,7 @@ async function buildEngine(
   };
   const engine = new SyncEngine({
     app: {}, settings: { ...DEFAULT_SETTINGS },
-    localAdapter, stateDB, baseStore, statusBar: {}, webdavFactory: {},
+    localAdapter, stateDB, baseStore, statusBar: { setProgress: jest.fn() }, webdavFactory: {},
     pluginDir: PLUGIN_DIR, configDir: '.obsidian',
   } as never);
   (engine as unknown as { client: unknown }).client = client;
@@ -154,5 +156,86 @@ describe('[SPEC:WSF-6] uploaded FileState converges instead of re-downloading (C
     const state = stateDB.getFile('note.md');
     expect(state!.isConflicted).toBe(false);
     expect(local.files['note.md']).toBe(EDITED); // untouched
+  });
+});
+
+
+describe('upload receipts survive a slow PUT and restart', () => {
+  it.each([
+    ['first sync', false], ['first sync', true],
+    ['tracked edit', false], ['tracked edit', true],
+  ] as const)('%s preserves the next save (same mtime: %s)', async (scenario, sameMtime) => {
+    const path = 'note.md';
+    const start = Date.UTC(2026, 0, 1);
+    let now = start;
+    const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    const mtimes = { [path]: start };
+    const local = makeLocalAdapter({ [path]: 'one' }, mtimes);
+    const persisted = makeStateAdapter();
+    let server = 'old';
+    const put = jest.fn(async (_client: unknown, _path: string, data: ArrayBuffer, _mtime: number, opts: UploadOptions) => {
+      server = new TextDecoder().decode(data);
+      expect(opts.precomputedSha256).toBe(await sha256(data));
+      opts.onUploadedEtag?.(server);
+      opts.onCreatedFileId?.('f1');
+      if (server === 'one') {
+        local.files[path] = 'two';
+        mtimes[path] = sameMtime ? start : start + 100;
+        now += 5_000; // The PUT finishes long after both edits' timestamp window closed.
+      }
+      return 'uploaded';
+    });
+    const listed = async () => remoteOf(path, server, { etag: server, checksum: await sha256(toBuf(server)) });
+    const client = { statFile: listed, downloadFile: async () => toBuf(server) };
+    try {
+      const first = await buildEngine(local, client, put, persisted);
+      if (scenario === 'first sync') {
+        const initial = first.engine as unknown as {
+          executePlan(plan: unknown, files: RemoteFileInfo[], summary: SyncSessionSummary, local: Map<string, unknown>): Promise<void>;
+        };
+        await initial.executePlan({ uploads: [path], downloads: [], conflicts: [], unchanged: [] },
+          [], makeSummary(), new Map([[path, await local.stat(path)]]));
+      } else {
+        const oldHash = await sha256(toBuf(server));
+        first.stateDB.setFile({ path, localHash: oldHash, remoteId: oldHash, idType: 'sha256',
+          size: 3, mtime: start - 60_000, remoteEtag: 'old', remoteFileId: 'f1', isConflicted: false });
+        await callProcessRemote(first.engine, await listed(), makeSummary());
+      }
+
+      expect(server).toBe('one');
+      await first.stateDB.save();
+      const restarted = await buildEngine(local, client, put, persisted);
+      expect(restarted.stateDB.getFile(path)?.localHash).toBe(await sha256(toBuf('one')));
+      await callProcessRemote(restarted.engine, await listed(), makeSummary());
+      expect(server).toBe('two');
+      expect(restarted.stateDB.getFile(path)?.localHash).toBe(await sha256(toBuf('two')));
+      local.readBinary.mockClear();
+      await callProcessRemote(restarted.engine, await listed(), makeSummary());
+      expect(put).toHaveBeenCalledTimes(2);
+      expect(local.readBinary).not.toHaveBeenCalled();
+    } finally { clock.mockRestore(); }
+  });
+
+  it('recovers the stat shortcut once a recent upload is checked against stable bytes', async () => {
+    const path = 'note.md';
+    let now = Date.UTC(2026, 0, 1);
+    const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const local = makeLocalAdapter({ [path]: 'new' }, { [path]: now });
+      const oldHash = await sha256(toBuf('old'));
+      const newHash = await sha256(toBuf('new'));
+      const put = jest.fn(async (_c, _p, _d, _m, opts: UploadOptions) => { opts.onUploadedEtag?.('new'); return 'uploaded'; });
+      const { engine, stateDB } = await buildEngine(local, {}, put);
+      stateDB.setFile({ path, localHash: oldHash, remoteId: oldHash, idType: 'sha256',
+        size: 3, mtime: now - 60_000, remoteEtag: 'old', remoteFileId: 'f1', isConflicted: false });
+      await callProcessRemote(engine, remoteOf(path, 'old', { etag: 'old', checksum: oldHash }), makeSummary());
+      now += 5_000;
+      const remote = remoteOf(path, 'new', { etag: 'new', checksum: newHash });
+      await callProcessRemote(engine, remote, makeSummary());
+      local.readBinary.mockClear();
+      await callProcessRemote(engine, remote, makeSummary());
+      expect(local.readBinary).not.toHaveBeenCalled();
+      expect(put).toHaveBeenCalledTimes(1);
+    } finally { clock.mockRestore(); }
   });
 });

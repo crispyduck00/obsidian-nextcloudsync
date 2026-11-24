@@ -132,7 +132,7 @@ describe('CreationTimeAligner', () => {
     it.each([
       ['with', true],
       ['without', false],
-    ])('applied %s a base: clears the record and refreshes the signature', async (_n, hasBase) => {
+    ])('applied %s a base: clears the record and keeps the content signature', async (_n, hasBase) => {
       const h = makeHarness({ base: hasBase ? { ctimeLocalAttempt: 42, ctimeRemoteAttempt: 43 } : null, localResult: 'applied' });
       await h.aligner.align(h.client, remote(OLD), stOf(NEW));
       expect(h.setLocal).toHaveBeenCalledWith(PATH, OLD * 1000);
@@ -142,10 +142,10 @@ describe('CreationTimeAligner', () => {
       const saved = h.setFile.mock.calls[0][0] as FileState;
       expect('ctimeLocalAttempt' in saved).toBe(false);
       expect(saved.ctimeRemoteAttempt).toBe(43);
-      expect(saved.localMtime).toBe(777);
-      expect(saved.localSize).toBe(11);
+      expect(saved.localMtime).toBe(1);
+      expect(saved.localSize).toBe(2);
       expect(saved.path).toBe(PATH);
-      expect(h.stat).toHaveBeenCalledWith(PATH);
+      expect(h.stat).not.toHaveBeenCalled();
     });
 
     it.each([['ineffective' as const], ['throw' as const]])('%s with a base records the attempt for T', async (result) => {

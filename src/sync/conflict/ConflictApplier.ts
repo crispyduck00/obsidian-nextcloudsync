@@ -15,7 +15,7 @@ import { SyncJournal } from '../session/SyncJournal';
 import { MergeBaseRecorder } from '../session/MergeBaseRecorder';
 import { TransferService } from '../transfer/TransferService';
 import { ResolutionService } from '../resolution/ResolutionService';
-import { withLocalSignature } from '../../data/localSignature';
+import { localReadSignature, withLocalSignature } from '../../data/localSignature';
 import { isMarkdown } from '../../util/mergeableExtensions';
 import { isAnomalousRemoteContent } from '../../util/limits';
 import { FileLogger } from '../../util/FileLogger';
@@ -91,7 +91,7 @@ export class ConflictApplier {
     if (identity.converged) return;
     if (verifyBase && identity.remoteData && identity.remoteData.byteLength === base.size
         && await sha256(identity.remoteData) === base.localHash) {
-      await this.deps.transfer.uploadFile(conn.client, conn.uploadStrategy, path, identity.localHash!, remoteId, idType, remote, summary);
+      await this.deps.transfer.uploadFile(conn.client, conn.uploadStrategy, remote, summary);
       return;
     }
     const expected: LocalWriteExpectation = {
@@ -335,14 +335,16 @@ export class ConflictApplier {
   ): Promise<void> {
     const stat = await this.deps.localAdapter.stat(path);
     const mtime = stat?.mtime ?? Date.now();
+    const observedAt = Date.now();
     const localData = await this.deps.localAdapter.readBinary(path);
+    const signature = stat && localReadSignature(stat, observedAt, localData.byteLength);
     const localHash = await sha256(localData);
     try {
       const lockToken = await this.deps.transfer.acquireLock(conn.client, path);
       try {
         if (this.deps.isRenameHeld?.(path)) return;
         const outcome = await conn.uploadStrategy.upload(conn.client, path, localData, mtime, {
-          ifMatchEtag: remote.etag,
+          ifMatchEtag: remote.etag, precomputedSha256: localHash,
           ...(remote.checksum ? { expectedRemoteChecksum: remote.checksum } : {}),
           ctime: uploadCreationTimeMs(stat?.ctime, remote.creationTime),
         });
@@ -369,13 +371,14 @@ export class ConflictApplier {
     summary.uploadedCount++;
     this.deps.journal.recordHistory(path, 'local-wins', undefined, {
       localHash, remoteId: localHash, remoteIdType: 'sha256',
-      localSize: stat?.size ?? localData.byteLength, remoteSize: remote.size,
+      localSize: localData.byteLength, remoteSize: remote.size,
     });
-    this.deps.stateDB.setFile(await withLocalSignature(this.deps.localAdapter, {
+    this.deps.stateDB.setFile({
       path, localHash, remoteId: localHash, idType: 'sha256',
-      size: stat?.size ?? localData.byteLength, mtime,
+      size: localData.byteLength, mtime, ...signature,
       remoteFileId: remote.fileId, isConflicted: false,
-    }, remote.lastModified));
+      remoteMtime: remote.lastModified,
+    });
     this.deps.mergeBase.recordBytes(path, localData);
     void this.deps.logger?.log(`conflict: resolved by prefer-local (remote overwritten) → ${path}`);
   }
