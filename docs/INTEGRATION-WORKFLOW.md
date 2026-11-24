@@ -92,10 +92,41 @@ Adds a richer UI around versions retained by Nextcloud:
 
 Line History is retained-version provenance rather than Git blame; pruned intermediate versions cannot be reconstructed.
 
+### Configurable edit debounce
+
+Branch: `features/watch-debounce`
+
+Makes the per-file quiet period for Sync on change configurable. Desktop and Android use the same
+queue, and further edits extend that file's deadline. Manual sync uses the authoritative full-sync path.
+
+### New-item first-upload delay
+
+Branch: `features/new-item-delay`
+
+Adds a separate configurable grace period for newly observed notes and folders. It gives filename,
+heading and Folder Notes hooks time to settle before first upload. Renames retain the original
+creation deadline, and manual sync flushes the grace through the existing reconciliation path.
+
 ## Integrated fixes
 
 - `fixes/sync-activity-coordination`
   - serializes full sync against lightweight/watch operations with a shared/exclusive gate
+  - owns Mirror-dialog exclusion, deferred structural scans and asynchronous host lifecycle ownership
+
+- `fixes/guard-local-download`
+  - preserves real local edits during downloads, restores and the sync-own-write event window
+
+- `fixes/local-vault-availability`
+  - holds reconciliation when the local adapter cannot provide a trustworthy vault view
+
+- `fixes/upload-snapshot`
+  - records the exact uploaded body and its local signature without trusting a later file read
+
+- `fixes/preserve-prefix-merges`
+  - preserves both texts when independently created notes share a prefix
+
+- `fixes/watch-connection-recovery`
+  - contains Watch connection failures and permits later ordinary reconciliation to recover
 
 - `fixes/remote-file-id-index`
   - preserves correct reverse remote-file-ID mappings across path replacement
@@ -138,13 +169,38 @@ Line History is retained-version provenance rather than Git blame; pruned interm
   - retains remote collections after local deletion, propagates independently verified file deletions, and keeps Watch moves within the selected sync scope
 
 - `fixes/persistent-file-renames`
-  - persists blocked WebDAV file renames per device along with the original Nextcloud file identity
+  - persists blocked file and folder moves per device along with the original Nextcloud identities
   - holds both paths through lock, read-only and conflict states. A full sync resumes the conditional MOVE after access returns.
+  - retains acknowledged first PUT/MKCOL identities through concurrent local rename and move events
   - the integration sends relevant Client Push IDs through the full-sync gate even with an unchanged root ETag and keeps the directory identity checks
 
 - `fixes/scoped-version-history`
   - verifies the live vault path and file ID before opening, comparing or restoring versions
   - the integration also uses this verification in the enhanced history and line history views
+
+## RC15 topic reconstruction
+
+The selected set contains six feature topics, twenty fix topics and `docs/fork-overview`. Every
+selected topic starts directly from the pinned upstream commit, contains no merge commit and does
+not contain another selected topic. Follow-up commits remain within the owning topic. All 27 heads
+are merged into `integration/all-topics`, preserving its previous canonical history.
+
+The reconstruction preserves every tracked runtime and build input from the tested RC15 candidate
+`d72545c032a294e954e27e38b14496ff66eac0d1`. Additional regression tests and documentation explain
+the isolated topics and their composition. It adds no runtime behavior beyond RC15.
+
+| Overlap | Integration responsibility |
+| --- | --- |
+| Push and root proof | Compose `fixes/oversize-root-etag` listing generations, guarded-folder root identity and version-convergence confirmed revisions. Pending moves keep ambiguous hints on the authoritative fallback path. |
+| Restore and enhanced history | Apply the general local-write and revision guards to enhanced-history entry points and the separately scoped version lookup. |
+| Upload and pending moves | Combine one immutable upload snapshot with conditional creation, confirmed server identity and revision receipts. |
+| Edit debounce and new-item delay | Share one queue and central held-path predicates with persistent move recovery. Manual sync flushes creation grace. |
+| Mirror and host lifecycle | Compose the shared activity gate with Watch queues, Push parking and Android status. Late callbacks may act only on the current plugin/engine owner. |
+| Folder reconciliation | Reuse guarded-root, creation-receipt and local-write contracts while retaining independent delete and move intent. |
+
+These are adaptations between independently usable topics. Shared helpers are composed once.
+A bug in a feature stays in that feature topic. General fixes own upstream behavior, and a new
+independent behavior gets its own feature topic.
 
 ## Superseded topics
 
@@ -159,7 +215,10 @@ Integration validation includes:
 - full `pnpm test`
 - secret scan
 
-The integration branch includes all currently selected `features/*`, `fixes/*`, and maintained fork-documentation topic heads. Version History restore/browser/Line History behavior was also exercised interactively on desktop and Android during the 2026-10-05 update.
+The integration branch includes all currently selected `features/*`, `fixes/*`, and maintained
+fork-documentation topic heads. The RC15 checks use simulated desktop/Android Obsidian hosts with
+real isolated Nextcloud DAV, Versions, Team Folders and notify_push connections. Native Windows and
+Android acceptance remains required. Older interactive checks do not replace that current check.
 
 ## Upstream workflow
 
@@ -208,5 +267,9 @@ The Beta.1 integration is retained at `archive/integration-0.2.0-beta.1`. The ma
 ## 1.0.18 development candidate
 
 Beta.2 is retained at `archive/integration-0.2.0-beta.2`. The Beta.3 manual build adds upstream's live app-password refresh and carries the Push adaptation in the independent Client Push topic. The other feature and fix patches remain directly based on upstream.
+
+The current manual acceptance build is `0.2.0-rc.15`. Canonical topic reconstruction preserves its
+runtime and plugin identity. The standalone repository, stable release and BRAT rollout remain a
+separate promotion after real-vault acceptance.
 
 [Upstream 1.0.18 validation](UPSTREAM-1.0.18-VALIDATION.md) records compatibility checks and real-vault acceptance.
