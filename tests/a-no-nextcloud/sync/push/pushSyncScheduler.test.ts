@@ -18,6 +18,184 @@ describe('PushSyncScheduler', () => {
   beforeEach(() => jest.useFakeTimers());
   afterEach(() => jest.useRealTimers());
 
+  describe('new Team Folder catch-up', () => {
+    const advance = (ms: number) => jest.advanceTimersByTimeAsync(ms);
+    const options = () => ({
+      ...immediateFullSync, isSyncRunning: () => false, canProbeTeamMount: () => true,
+      shouldSync: jest.fn().mockResolvedValue(ignoreScope), sync: jest.fn().mockResolvedValue('completed'),
+    });
+
+    it('stays idle until discovery, probes six times and syncs only for a confirmed root change', async () => {
+      const opts = options();
+      opts.shouldSync.mockResolvedValueOnce(ignoreScope).mockRejectedValueOnce(new Error('offline'))
+        .mockResolvedValueOnce(targetedScope()).mockResolvedValueOnce(fullSyncScope).mockResolvedValueOnce(true);
+      opts.sync.mockResolvedValue('retry');
+      const scheduler = new PushSyncScheduler(opts);
+      await advance(3600000);
+      expect(opts.shouldSync).not.toHaveBeenCalled();
+      scheduler.teamMountDiscovered();
+      await advance(9999);
+      expect(opts.shouldSync).not.toHaveBeenCalled();
+      await advance(1);
+      expect(opts.shouldSync).toHaveBeenCalledTimes(1);
+      await advance(300000);
+      expect(opts.shouldSync.mock.calls).toEqual(Array(6).fill([true]));
+      expect(opts.sync).toHaveBeenCalledTimes(1);
+      expect(jest.getTimerCount()).toBe(0);
+      await advance(3600000);
+      expect(opts.shouldSync).toHaveBeenCalledTimes(6);
+    });
+
+    it('shares a single timer across new mounts without postponing the first probe or bunching the last two', async () => {
+      const opts = options();
+      const scheduler = new PushSyncScheduler(opts);
+      scheduler.teamMountDiscovered();
+      await advance(9000);
+      for (let i = 0; i < 10; i++) scheduler.teamMountDiscovered();
+      expect(jest.getTimerCount()).toBe(1);
+      await advance(1000);
+      expect(opts.shouldSync).toHaveBeenCalledTimes(1);
+      await advance(300000);
+      expect(opts.shouldSync).toHaveBeenCalledTimes(6);
+      await advance(59999);
+      expect(opts.shouldSync).toHaveBeenCalledTimes(6);
+      await advance(1);
+      expect(opts.shouldSync).toHaveBeenCalledTimes(7);
+      expect(jest.getTimerCount()).toBe(0);
+    });
+
+    it('skips hidden, disconnected, policy-blocked or busy checkpoints and expires without a retry loop', async () => {
+      const opts = options();
+      const canSync = jest.fn(() => false);
+      const connected = jest.fn().mockReturnValueOnce(false).mockReturnValue(true);
+      const scheduler = new PushSyncScheduler({ ...opts,
+        canProbeTeamMount: () => canSync() && connected(),
+        isSyncRunning: jest.fn().mockReturnValueOnce(true).mockReturnValue(false),
+      });
+      scheduler.teamMountDiscovered();
+      await advance(10000); // network policy
+      canSync.mockReturnValue(true);
+      await advance(60000); // disconnected / hidden
+      await advance(60000); // another sync is running
+      expect(opts.shouldSync).not.toHaveBeenCalled();
+      await advance(60000);
+      expect(opts.shouldSync).toHaveBeenCalledTimes(1);
+      canSync.mockReturnValue(false);
+      await advance(120000);
+      expect(opts.shouldSync).toHaveBeenCalledTimes(1);
+      expect(jest.getTimerCount()).toBe(0);
+    });
+
+    it('expires the grace silently when the WebView resumes a suspended timer hours late', async () => {
+      const opts = options();
+      const scheduler = new PushSyncScheduler(opts);
+      scheduler.teamMountDiscovered();
+      jest.setSystemTime(Date.now() + 3600000);
+      await advance(10000);
+      expect(opts.shouldSync).not.toHaveBeenCalled();
+      expect(jest.getTimerCount()).toBe(0);
+      scheduler.requestRemoteCatchUp('app resumed');
+      await advance(0);
+      expect(opts.shouldSync.mock.calls).toEqual([[]]);
+    });
+
+    it.each(['stop', 'hidden', 'blocked', 'busy'])('drops a late positive reply after %s', async (change) => {
+      let eligible = true;
+      let resolve!: (scope: ReturnType<typeof targetedScope>) => void;
+      const opts = options();
+      opts.shouldSync.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+      const scheduler = new PushSyncScheduler({ ...opts,
+        isSyncRunning: () => change === 'busy' && !eligible,
+        canProbeTeamMount: () => (change !== 'hidden' && change !== 'blocked') || eligible,
+      });
+      scheduler.teamMountDiscovered();
+      await advance(10000);
+      eligible = false;
+      if (change === 'stop') scheduler.stop();
+      resolve(targetedScope());
+      await flush();
+      expect(opts.sync).not.toHaveBeenCalled();
+      scheduler.stop();
+      scheduler.teamMountDiscovered();
+      expect(jest.getTimerCount()).toBe(0);
+    });
+
+    it('drains real notifications that arrive while a silent probe is in flight', async () => {
+      let resolve!: (scope: typeof ignoreScope) => void;
+      const opts = options();
+      opts.shouldSync.mockImplementationOnce(() => new Promise((done) => { resolve = done; }))
+        .mockResolvedValueOnce(fullSyncScope);
+      const scheduler = new PushSyncScheduler(opts);
+      scheduler.teamMountDiscovered();
+      await advance(10000);
+      scheduler.notify({ fileIds: ['42'], raw: 'notify_file_id [42]' });
+      await advance(500);
+      expect(opts.shouldSync.mock.calls).toEqual([[true]]);
+      resolve(ignoreScope);
+      await flush();
+      await advance(0);
+      expect(opts.shouldSync.mock.calls).toEqual([[true], []]);
+      expect(opts.sync).toHaveBeenCalledTimes(1);
+      expect(scheduler.getStatus().pending).toBe(false);
+      scheduler.stop();
+    });
+
+    it('lets an already queued structural sync cover the checkpoint', async () => {
+      const opts = options();
+      const scheduler = new PushSyncScheduler({ ...opts, fullSyncQuietMs: 3000, fullSyncMaxDelayMs: 8000 });
+      scheduler.teamMountDiscovered();
+      await advance(9000);
+      opts.shouldSync.mockResolvedValue(fullSyncScope);
+      scheduler.notify(GENERIC_NOTIFICATION);
+      await advance(1000);
+      expect(opts.shouldSync.mock.calls).toEqual([[]]);
+      expect(opts.sync).not.toHaveBeenCalled();
+      await advance(3000);
+      expect(opts.shouldSync.mock.calls).toEqual([[], []]);
+      expect(opts.sync).toHaveBeenCalledTimes(1);
+      scheduler.stop();
+    });
+
+    it.each([true, false])('retries a busy final check once (still busy: %s)', async (stillBusy) => {
+      const opts = options();
+      let busy = false;
+      const scheduler = new PushSyncScheduler({ ...opts, isSyncRunning: () => busy });
+      scheduler.teamMountDiscovered();
+      await advance(250000);
+      expect(opts.shouldSync).toHaveBeenCalledTimes(5);
+      busy = true;
+      await advance(60000);
+      expect(opts.shouldSync).toHaveBeenCalledTimes(5);
+      expect(jest.getTimerCount()).toBe(1);
+      busy = stillBusy;
+      opts.shouldSync.mockResolvedValue(targetedScope());
+      await advance(10000);
+      expect(opts.sync).toHaveBeenCalledTimes(stillBusy ? 0 : 1);
+      expect(jest.getTimerCount()).toBe(0);
+    });
+
+    it('merges a new discovery with a busy final probe that has not yet returned', async () => {
+      let resolve!: (scope: ReturnType<typeof targetedScope>) => void;
+      const opts = options();
+      let busy = false;
+      const scheduler = new PushSyncScheduler({ ...opts, isSyncRunning: () => busy });
+      scheduler.teamMountDiscovered();
+      await advance(250000);
+      opts.shouldSync.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+      await advance(60000);
+      busy = true;
+      scheduler.teamMountDiscovered();
+      resolve(targetedScope());
+      await flush();
+      expect(opts.sync).not.toHaveBeenCalled();
+      expect(jest.getTimerCount()).toBe(1);
+      busy = false;
+      await advance(310000);
+      expect(opts.shouldSync).toHaveBeenCalledTimes(12);
+      expect(jest.getTimerCount()).toBe(0);
+    });
+  });
+
   it('debounces a burst into one reconciliation', async () => {
     const sync = jest.fn(async () => {});
     const scheduler = new PushSyncScheduler({ ...immediateFullSync, isSyncRunning: () => false, sync, debounceMs: 350 });

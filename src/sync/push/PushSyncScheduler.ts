@@ -7,6 +7,9 @@ export const PUSH_SYNC_TIMING = {
   busyRetryMs: 500,
   fullSyncQuietMs: 3000,
   fullSyncMaxDelayMs: 8000,
+  teamMountFirstProbeMs: 10000,
+  teamMountProbeIntervalMs: 60000,
+  teamMountGraceMs: 310000,
 } as const;
 
 export type PushFullSyncResult = 'completed' | 'retry';
@@ -23,7 +26,9 @@ export interface PushSyncSchedulerOptions {
    * false means proven irrelevant, true means conservatively use the ordinary full sync. P2 returns
    * an explicit result so only a positively changed root may enter targeted reconciliation.
    */
-  shouldSync?(): Promise<boolean | ClientPushScopeResult>;
+  shouldSync?(probeOnly?: true): Promise<boolean | ClientPushScopeResult>;
+  /** Only check a recently seen Team Folder while its push session is connected and visible. */
+  canProbeTeamMount?(): boolean;
   /** Called only when a push actually starts reconciliation, not while a full sync merely waits. */
   onReconciliationTriggered?(): void;
   /** Optional targeted path added by remote-reconcile; absent keeps the original full-sync behavior. */
@@ -66,12 +71,61 @@ export class PushSyncScheduler {
    */
   private observedPushRootEtag: string | null = null;
   private timer: number | null = null;
+  private teamMountTimer: number | null = null;
+  private teamMountGraceUntil = 0;
   private stopped = false;
   private syncing = false;
   private lastNotificationAt: number | null = null;
   private lastTriggeredSyncAt: number | null = null;
 
   constructor(private readonly opts: PushSyncSchedulerOptions) {}
+
+  /** notify_push can cache a new Team Folder's recipient mapping for up to five minutes. */
+  teamMountDiscovered(): void {
+    if (this.stopped) return;
+    this.teamMountGraceUntil = Date.now() + PUSH_SYNC_TIMING.teamMountGraceMs;
+    if (this.teamMountTimer === null) this.scheduleTeamMountProbe(PUSH_SYNC_TIMING.teamMountFirstProbeMs);
+  }
+
+  private scheduleTeamMountProbe(delayMs: number, retryBusy = true): void {
+    this.teamMountTimer = window.setTimeout(() => {
+      this.teamMountTimer = null;
+      const remaining = this.teamMountGraceUntil - Date.now();
+      // Mobile timers may resume hours late. The ordinary foreground catch-up covers that gap.
+      if (remaining < -PUSH_SYNC_TIMING.teamMountProbeIntervalMs) return;
+      if (remaining > 0) this.scheduleTeamMountProbe(PUSH_SYNC_TIMING.teamMountProbeIntervalMs);
+      void this.probeTeamMount(remaining <= 0 && retryBusy);
+    }, delayMs);
+  }
+
+  private canProbeTeamMount(): boolean {
+    return !this.stopped && this.opts.canProbeTeamMount?.() === true;
+  }
+
+  private async probeTeamMount(retryBusy: boolean): Promise<void> {
+    if (!this.canProbeTeamMount()) return;
+    // A running upload may never inspect the rest of the vault. Give a busy final check one more slot.
+    const deferIfBusy = (busy: boolean): boolean => {
+      if (busy && retryBusy && this.teamMountTimer === null) this.scheduleTeamMountProbe(PUSH_SYNC_TIMING.teamMountFirstProbeMs, false);
+      return busy;
+    };
+    if (deferIfBusy(this.syncing || this.hasPending() || this.opts.isSyncRunning())) return;
+    this.syncing = true;
+    try {
+      const scope = await this.opts.shouldSync?.(true);
+      // A timer is not evidence of a change. Only a positively changed vault root warrants a scan.
+      if (typeof scope !== 'object' || scope.kind !== 'targeted' || !this.canProbeTeamMount() || deferIfBusy(this.opts.isSyncRunning())) return;
+      this.opts.log?.('push: Team Folder catch-up found a changed vault root → triggering full reconciliation');
+      this.opts.onReconciliationTriggered?.();
+      if (await this.opts.sync() !== 'retry' && !this.stopped) this.lastTriggeredSyncAt = Date.now();
+    } catch (err) {
+      this.opts.log?.(`push: Team Folder catch-up failed — ${this.errorMessage(err)}`);
+    } finally {
+      this.syncing = false;
+      // A real hint may have arrived (and its debounce timer elapsed) while the probe was in flight.
+      if (this.timer === null) this.scheduleNext();
+    }
+  }
 
   /**
    * Request a cheap root-ETag catch-up after a period in which push notifications may have been
@@ -122,6 +176,8 @@ export class PushSyncScheduler {
 
   stop(): void {
     this.stopped = true;
+    if (this.teamMountTimer !== null) window.clearTimeout(this.teamMountTimer);
+    this.teamMountTimer = null;
     this.pendingFileIds.clear();
     this.needsFullSync = false;
     this.catchUpRequested = false;

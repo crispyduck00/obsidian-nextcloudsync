@@ -52,7 +52,7 @@ import { MirrorService } from './mirror/MirrorService';
 import { SyncHistoryStore } from '../data/SyncHistoryStore';
 import { IStatusBar } from '../ui/StatusBarItem';
 import { WebDAVFactory } from '../network/WebDAVFactory';
-import { IWebDAVClient } from '../network/IWebDAVClient';
+import { IWebDAVClient, type RemoteRootInfo } from '../network/IWebDAVClient';
 import { RenameTracker } from './RenameTracker';
 import { ConfigSyncResolver } from './ConfigSyncResolver';
 import { PluginSyncCoordinator } from './plugins/PluginSyncCoordinator';
@@ -105,6 +105,7 @@ interface SyncEngineOptions {
   logger?: FileLogger;
   // Lets the host persist the server version without coupling the engine to settings persistence.
   onFeatures?: (features: NextcloudFeatures) => void;
+  onTeamMountDiscovered?: () => void;
   // Plugin ids whose code was written and that still need an Obsidian restart. Shared with the host so it
   // outlives engine re-creation; a fresh set when omitted.
   pluginsAwaitingRestart?: Set<string>;
@@ -146,6 +147,7 @@ export class SyncEngine {
   private readonly watch: WatchOperations;
   /** Resolves notify_push IDs and delegates only safe known-file work to the existing classifier. */
   private readonly remotePush: RemotePushReconciler;
+  private teamMountListing?: { client: IWebDAVClient; scope: string; root: RemoteRootInfo; ids: Set<string> };
 
   private readonly mirror: MirrorService;
   // Turns each session's over-the-size-limit skip tally into the one end-of-sync notice (docs/spec.md §9.4a).
@@ -398,6 +400,27 @@ export class SyncEngine {
     if (!this.client || !this.features || rebuild) {
       const { client, features } = await this.opts.webdavFactory.createClient();
       this.client = client;
+      if (features.isNextcloud && this.opts.onTeamMountDiscovered) {
+        const account = this.pushAccountKey();
+        client.onTeamMountListing = (root, mounts) => {
+          if (this.cancelled || client !== this.client || account !== this.pushAccountKey() || !this.opts.settings.useClientPush) return;
+          const scope = this.pushScopeKey();
+          const ids = new Set([...mounts].filter(([path]) => !path || !this.isSystemExcluded(path)).map(([, id]) => id));
+          const previous = this.teamMountListing;
+          const discovered = [...ids].filter(id => previous?.client !== client || previous.scope !== scope || !previous.ids.has(id));
+          this.teamMountListing = { client, scope, ids, root };
+          if (!discovered.length) return;
+          const notify = () => {
+            const latest = this.teamMountListing;
+            if (!this.cancelled && this.opts.settings.useClientPush && this.client === client && latest?.client === client
+              && latest.scope === scope && scope === this.pushScopeKey() && this.hasCurrentClientCredentials(password)
+              && discovered.some(id => latest.ids.has(id))) this.opts.onTeamMountDiscovered?.();
+          };
+          // A slow initial download must not consume the entire catch-up window while sync is busy.
+          if (this.currentRun) void this.currentRun.then(notify).catch(() => { /* best-effort catch-up */ });
+          else notify();
+        };
+      }
       this.features = features;
       this.connectedPassword = password;
       // Chunked upload needs the account-only uploads namespace, which a public link share lacks (docs/spec.md §3);
@@ -430,32 +453,38 @@ export class SyncEngine {
    * context; this method never updates StateDB, so only a real full scan advances the authoritative
    * stored root ETag.
    */
-  async shouldReconcileClientPush(): Promise<ClientPushScopeResult> {
+  async shouldReconcileClientPush(probeOnly?: true): Promise<ClientPushScopeResult> {
+    const unknown: ClientPushScopeResult = probeOnly ? { kind: 'ignore' } : { kind: 'full-sync' };
+    if (probeOnly && (navigator.onLine === false || !this.opts.settings.useClientPush)) return unknown;
     // Preserve the existing Wi-Fi-only behavior without making a new network request on cellular.
-    if (this.isBlockedByWifiOnly()) return { kind: 'full-sync' };
+    if (this.isBlockedByWifiOnly()) return unknown;
 
     // Do not create/connect a client just for the optimization. The first ordinary sync establishes
     // the client and the root-ETag baseline; until then a push follows the original full-sync path.
     const client = this.client;
     const password = this.connectedPassword;
     if (!client || this.features?.isNextcloud !== true || !this.hasCurrentClientCredentials(password)) {
-      return { kind: 'full-sync' };
+      return unknown;
     }
 
     // A token-capable server can advance StateDB without a real full scan, while remoteRootEtag is
     // deliberately updated only by full scans. Avoid using a potentially stale baseline there.
-    if (this.opts.stateDB.getSyncToken()) return { kind: 'full-sync' };
+    if (this.opts.stateDB.getSyncToken()) return unknown;
 
-    const stored = this.opts.stateDB.getRemoteRootEtag();
-    if (stored == null) return { kind: 'full-sync' };
+    const listing = this.teamMountListing;
+    if (probeOnly && (!listing?.ids.size || listing.client !== client || listing.scope !== this.pushScopeKey())) return unknown;
+    const stored = this.opts.stateDB.getRemoteRootEtag() ?? (probeOnly ? listing?.root.etag : null);
+    if (stored == null) return unknown;
 
     const root = client.getRootInfo
       ? await client.getRootInfo()
       : { etag: await client.getRootEtag(), fileId: null };
     // Capability and root information can go stale during a password change. Let the normal
     // sync path reconnect and establish the scope before using a targeted result.
-    if (root.etag == null || client !== this.client || !this.hasCurrentClientCredentials(password)) {
-      return { kind: 'full-sync' };
+    if (root.etag == null || client !== this.client || !this.hasCurrentClientCredentials(password)
+      || (probeOnly && (root.fileId !== listing?.root.fileId || listing !== this.teamMountListing
+        || listing.scope !== this.pushScopeKey() || this.isBlockedByWifiOnly() || navigator.onLine === false))) {
+      return unknown;
     }
     if (root.etag !== stored) {
       void this.opts.logger?.log(`client-push: vault root ETag changed (${stored} → ${root.etag}) → reconciliation required`);
@@ -464,6 +493,15 @@ export class SyncEngine {
 
     void this.opts.logger?.log(`client-push: vault root ETag unchanged (${root.etag})`);
     return { kind: 'ignore' };
+  }
+
+  private pushAccountKey(): string {
+    const { serverUrl, username } = this.opts.settings;
+    return JSON.stringify([serverUrl, username, this.opts.app.vault?.getName?.()]);
+  }
+
+  private pushScopeKey(): string {
+    return JSON.stringify([this.pushAccountKey(), computeSyncScopeFingerprint(this.opts.settings), this.opts.settings.maxFileSizeMB]);
   }
 
   private hasCurrentClientCredentials(password: string | null): boolean {
@@ -749,6 +787,7 @@ export class SyncEngine {
   // Phase 1 of termination: signal workers to stop pulling work; the run's finally block still persists state.
   requestStop(): void {
     this.cancelled = true;
+    this.teamMountListing = undefined;
   }
 
   // Waits for the run's final state save so a following reset cannot interleave with it. Never throws.
