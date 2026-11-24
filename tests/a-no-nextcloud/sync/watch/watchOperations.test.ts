@@ -399,6 +399,15 @@ describe('WatchOperations — connection failure', () => {
     expect(calls.deleteDir).toEqual([]);
     expect(calls.deleteFile).toEqual([]);
   });
+
+  it('keeps a file pending when connection setup rejects with a transport error', async () => {
+    const { watch, calls } = build({ localContent: 'edited', base: tracked() }, {
+      connect: async () => { throw new Error('request timed out'); },
+    });
+
+    await watch.syncSingleFile('note.md');
+    expect(calls.retries).toEqual(['note.md']);
+  });
 });
 
 describe('WatchOperations — the status bar', () => {

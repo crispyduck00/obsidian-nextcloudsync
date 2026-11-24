@@ -253,9 +253,11 @@ export class WatchOperations {
     // A real summary: its counters decide whether to notify the user, and processFile maintains them as in a full sync.
     const summary = this.deps.journal.newSummary();
     const conflictsBefore = this.deps.conflictEncounters();
+    let connected = false;
     this.begin();
     try {
       const conn = await this.deps.connect();
+      connected = true;
       if (conn.client.inspectDirectory) await assertTrackedParentReadable(conn.client, this.deps.stateDB, path);
       const remote = await conn.client.statFile(path);
       if (remote) {
@@ -282,7 +284,7 @@ export class WatchOperations {
       console.warn(`[SyncEngine] Single-file sync failed for ${path}:`, err);
       void this.deps.logger?.log(`watch: FAILED ${path} — ${(err as Error).message}`, 'error');
       this.deps.journal.recordError(summary, path, err);
-      if (err instanceof NetworkError) this.deps.queueRetry(path);
+      if (!connected || err instanceof NetworkError) this.deps.queueRetry(path);
     } finally {
       this.end();
     }
