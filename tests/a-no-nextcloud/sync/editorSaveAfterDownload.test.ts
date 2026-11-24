@@ -34,7 +34,7 @@ function host(enabled = true) {
       workspace: { on: (name: string, fn: (...args: any[]) => void) => editor.set(name, fn) } },
     registerEvent: () => undefined, syncEngine: engine, localCreations: grace,
     hostToken: () => 'test', logger: { log: () => undefined }, refreshMobileConflictStatus: () => undefined,
-    localAdapter: { shouldIgnore: () => true } };
+    localAdapter: { cancelAfterIgnore: () => undefined, shouldIgnore: () => true } };
   new Function('Platform', 'TFile', 'TFolder', 'MobileWatchLifecycle', 'isWatchModeActive', 'isUnderPluginsDir',
     'isSyncTmpPath', 'WatchFileQueue', 'document', 'isActiveOwnLog', body)
     .call(self, { isMobile: false, isIosApp: false }, TFile, TFolder, MobileWatchLifecycle, isWatchModeActive,

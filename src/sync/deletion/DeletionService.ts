@@ -42,7 +42,7 @@ export interface DeletionDeps {
   dropCleanSnapshot(path: string): void;
   // Registers a path so the vault event this plugin causes is not fed back to the watcher. Required: an
   // unwired no-op here turns a plugin trash back into a server DELETE.
-  markOwnEvent: (path: string) => void;
+  markOwnEvent: (path: string, deletion?: boolean) => void;
   logger?: Pick<FileLogger, 'log'>;
 }
 
@@ -209,7 +209,7 @@ export class DeletionService {
             return { status: 'failed', message: 'The remote path is missing or inaccessible. Local changes were kept.' };
           }
         }
-        this.deps.markOwnEvent(path);
+        this.deps.markOwnEvent(path, true);
         if (file instanceof TFile) await this.deps.app.fileManager.trashFile(file);
         else await this.deps.app.vault.adapter.remove(normalized);
         removed = true;

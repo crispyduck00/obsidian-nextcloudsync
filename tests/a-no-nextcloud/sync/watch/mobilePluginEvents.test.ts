@@ -39,7 +39,7 @@ function host({ running = true, newDelay = 0, ignoredPath = '' } = {}) {
     settings: { watchOnChangeEnabled: true, watchDebounceSeconds: 0 }, syncEngine: engine,
     localCreations: grace,
     lastLocalEdit: new Map(), logger: { log: () => undefined }, registerEvent: () => undefined,
-    localAdapter: { shouldIgnore: (path: string) => path === ignoredPath },
+    localAdapter: { cancelAfterIgnore: () => undefined, shouldIgnore: (path: string) => path === ignoredPath },
     hostToken: () => 'test', refreshMobileConflictStatus: () => undefined };
   new Function('Platform', 'TFile', 'TFolder', 'MobileWatchLifecycle', 'isWatchModeActive', 'isUnderPluginsDir', 'isSyncTmpPath', 'WatchFileQueue', 'document', 'isActiveOwnLog', body)
     .call(self, { isMobile: true, isIosApp: false }, TFile, TFolder, MobileWatchLifecycle, isWatchModeActive,

@@ -27,7 +27,7 @@ export interface DirectoryDeps {
   dropCleanSnapshot(path: string): void;
   // Registers a path so the vault event this plugin causes is not fed back to the watcher. Required: an
   // unwired no-op here turns a plugin trash back into a server DELETE.
-  markOwnEvent: (path: string) => void;
+  markOwnEvent: (path: string, deletion?: boolean) => void;
   isSystemExcluded(path: string): boolean;
   hasRenameInFolder?(path: string): boolean;
   isRenameHeld?(path: string): boolean;

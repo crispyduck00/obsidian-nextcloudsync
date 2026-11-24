@@ -102,7 +102,9 @@ export function isSyncTmpPath(path: string): boolean {
 // Uses the Adapter API rather than the Vault API: it gives tmp-write -> rename atomicity, reaches paths the Vault index
 // does not track (state/log files), and reads raw bytes. Remote->local paths go through normalizePath() at the boundary.
 export class LocalAdapter {
-  private ignoreList: Map<string, number> = new Map();
+  private ignoreList = new Map<string, {
+    timer: number; deletion: boolean; onExpire?: (isCurrent: () => boolean) => Promise<void>;
+  }>();
   private creationTimeSupportPromise: Promise<CreationTimeSupport> | undefined = undefined;
 
   constructor(
@@ -182,24 +184,46 @@ export class LocalAdapter {
     return found;
   }
 
-  ignore(path: string): void {
+  ignore(path: string, deletion = false): void {
     const existing = this.ignoreList.get(path);
-    if (existing) window.clearTimeout(existing);
-    const timer = window.setTimeout(() => this.ignoreList.delete(path), IGNORE_TIMEOUT_MS);
+    if (existing) window.clearTimeout(existing.timer);
+    const entry = { timer: 0, deletion, onExpire: deletion ? undefined : existing?.onExpire };
+    const timer = window.setTimeout(() => {
+      entry.timer = 0;
+      const check = entry.onExpire;
+      const finish = (): void => { if (this.ignoreList.get(path) === entry) this.ignoreList.delete(path); };
+      if (!check) finish();
+      else void check(() => this.ignoreList.get(path) === entry && entry.onExpire === check).finally(finish);
+    }, IGNORE_TIMEOUT_MS);
     // Node timers keep the process alive in tests: unref when present (window.setTimeout returns a number in Electron).
     (timer as unknown as { unref?: () => void }).unref?.();
-    this.ignoreList.set(path, timer);
+    entry.timer = timer;
+    this.ignoreList.set(path, entry);
   }
 
   // Not consumed on read: one atomicWrite fires several Vault events (create/delete/rename) for the same path, so consuming
   // on the first would leak the rest as user edits. Entries expire by timeout.
   shouldIgnore(path: string): boolean {
-    return this.ignoreList.has(path);
+    return !!this.ignoreList.get(path)?.timer;
+  }
+
+  // A real user deletion can follow our write within the echo window. Reuse its
+  // existing timer for one final-state check; repeated events do not add work.
+  afterIgnore(path: string, onExpire: (isCurrent: () => boolean) => Promise<void>): void {
+    const entry = this.ignoreList.get(path);
+    if (entry && !entry.deletion) entry.onExpire = onExpire;
+  }
+
+  // A later rename supersedes absence at the old path, including its children.
+  cancelAfterIgnore(path: string, folder = false): void {
+    for (const [current, entry] of this.ignoreList) {
+      if (current === path || (folder && current.startsWith(path + '/'))) entry.onExpire = undefined;
+    }
   }
 
   // Call from onunload so pending timers cannot fire after teardown or leak across reloads.
   dispose(): void {
-    for (const timer of this.ignoreList.values()) window.clearTimeout(timer);
+    for (const entry of this.ignoreList.values()) window.clearTimeout(entry.timer);
     this.ignoreList.clear();
   }
 
@@ -270,7 +294,7 @@ export class LocalAdapter {
     const tmp = tmpPathFor(target);
     this.ignore(tmp);
     if (!expected) this.ignore(target);
-    let targetRemoved = false;
+    let targetRemovalAttempted = false;
     try {
       await this.ensureParentDir(target);
       await writeTemp(tmp);
@@ -279,15 +303,18 @@ export class LocalAdapter {
         await this.commitGuardedWrite(tmp, target, expected);
       } else {
         if (await this.adapter.exists(target)) {
+          targetRemovalAttempted = true;
+          this.ignore(target, true);
           await this.adapter.remove(target);
-          targetRemoved = true;
         }
         await this.adapter.rename(tmp, target);
+        this.ignore(target);
       }
       return size === undefined ? undefined : await this.verifyWrite(target, size);
     } catch (err) {
-      // For an unconditional replacement, a failed rename after removal can leave the temp as the only local copy.
-      if (!targetRemoved && await this.adapter.exists(tmp)) await this.adapter.remove(tmp);
+      // A rejected remove may already have unlinked the target. Keep its only surviving replacement.
+      const targetMissing = targetRemovalAttempted && !await this.adapter.exists(target);
+      if (!targetMissing && await this.adapter.exists(tmp)) await this.adapter.remove(tmp);
       throw translateNameTooLong(err, target);
     }
   }

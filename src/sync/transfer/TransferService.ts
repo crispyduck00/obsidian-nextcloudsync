@@ -219,7 +219,7 @@ export class TransferService {
     let written: LocalStat | void;
     try {
       written = await this.deps.localAdapter.atomicWriteBinary(remote.path, data, writeMtime, writeCtime,
-        ...(expected ? [{ ...expected, canWrite }] : []));
+        expected ? { ...expected, canWrite } : { stat: localStat, canWrite });
     } catch (err) {
       if (!(err instanceof LocalFileChangedError)) throw err;
       this.deferLocalWrite(remote.path, summary, err);

@@ -391,31 +391,50 @@ export default class ObsidianNextcloudsync extends Plugin {
         if (file instanceof TFile) queueDebouncedFile(file.path);
       }));
 
-      this.registerEvent(this.app.vault.on('delete', (file: TAbstractFile) => {
-        if (isPluginEvent(file.path)) return;
-        takePendingUpload(file.path);
-        if (isOwnSyncEvent(file.path)) return;
-        const folder = file instanceof TFolder;
-        this.localCreations.remove(file.path, folder);
+      const handleDeletion = (path: string, folder: boolean): void => {
+        if (isPluginEvent(path)) return;
+        takePendingUpload(path);
+        if (isInternalEventPath(path)) return;
+        if (this.localAdapter?.shouldIgnore(path)) {
+          const engine = this.syncEngine;
+          const { serverUrl, username } = this.settings;
+          const isCurrent = (): boolean => watchOn() && this.syncEngine === engine
+            && this.settings.serverUrl === serverUrl && this.settings.username === username;
+          this.localAdapter.afterIgnore(path, async (isPending) => {
+            if (!engine || !isCurrent() || !isPending()) return;
+            try {
+              if (await engine.isLocalDeletionPending(path, folder) && isCurrent() && isPending()) {
+                handleDeletion(path, folder);
+              }
+            } catch (err: unknown) {
+              void this.logger.log(`watch: could not recheck deletion of ${path}: ${String(err)}`, 'error');
+            }
+          });
+          return;
+        }
+        this.localCreations.remove(path, folder);
         if (folder) {
-          newFolderQueue.removeFolder(file.path);
-          watchQueue.removeFolder(file.path);
-          this.syncEngine?.rememberFolderDeletion(file.path);
+          newFolderQueue.removeFolder(path);
+          watchQueue.removeFolder(path);
+          this.syncEngine?.rememberFolderDeletion(path);
         }
         if (!watchOn()) return;
         if (folder) {
           runStructural(
-            `delete folder ${file.path}`,
-            (engine) => engine.deleteSingleFolder(file.path),
-            (engine) => engine.deleteSingleFolderForMobileWatch(file.path),
+            `delete folder ${path}`,
+            (engine) => engine.deleteSingleFolder(path),
+            (engine) => engine.deleteSingleFolderForMobileWatch(path),
           );
           return;
         }
         runStructural(
-          `delete file ${file.path}`,
-          (engine) => engine.deleteSingleFile(file.path),
-          (engine) => engine.deleteSingleFileForMobileWatch(file.path),
+          `delete file ${path}`,
+          (engine) => engine.deleteSingleFile(path),
+          (engine) => engine.deleteSingleFileForMobileWatch(path),
         );
+      };
+      this.registerEvent(this.app.vault.on('delete', (file: TAbstractFile) => {
+        handleDeletion(file.path, file instanceof TFolder);
       }));
 
       this.registerEvent(this.app.vault.on('rename', (file: TAbstractFile, oldPath: string) => {
@@ -423,6 +442,7 @@ export default class ObsidianNextcloudsync extends Plugin {
         // A sync write renames its temporary file. A rename between two ordinary paths
         // is a new intent, even while the source is marked for a recent download.
         if (isInternalEventPath(oldPath) || isInternalEventPath(file.path)) return;
+        this.localAdapter?.cancelAfterIgnore(oldPath, file instanceof TFolder);
         const hadPendingUpload = takePendingUpload(oldPath);
         const recheckContent = hadPendingUpload || this.localAdapter?.shouldIgnore(oldPath) === true;
         const folder = file instanceof TFolder;
