@@ -709,6 +709,7 @@ export default class ObsidianNextcloudsync extends Plugin {
         this.watchQueue?.refresh();
         this.newFolderQueue?.refresh();
         this.mobileWatch?.onVisible();
+        this.pushSyncScheduler?.onNetworkChanged();
       }
     }
   }
@@ -1057,7 +1058,7 @@ export default class ObsidianNextcloudsync extends Plugin {
 
     const scheduler = new PushSyncScheduler({
       isSyncRunning: () => this.syncEngine?.isSyncRunning() ?? false,
-      canSync: () => this.syncEngine?.canRunWatchSync() ?? false,
+      canSync: () => !this.mirrorInProgress && (this.syncEngine?.canRunWatchSync() ?? false),
       canProbeTeamMount: () => !this.mirrorInProgress && !document.hidden && this.pushClient?.getStatus().state === 'connected',
       shouldSync: async (fileIds, probeOnly) => this.syncEngine?.shouldReconcileClientPush(fileIds, probeOnly) ?? true,
       verifyRoot: async (root) => this.syncEngine?.verifyClientPushRoot(root) ?? false,

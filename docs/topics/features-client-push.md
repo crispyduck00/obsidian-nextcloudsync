@@ -8,6 +8,8 @@ Root scope is unchanged: unchanged root is ignored, changed root can select know
 
 Push uses the same live app-password source as WebDAV. A change restarts discovery and socket authentication with one credential, cancels the old attempt and preserves the existing reconnect catch-up. A missing secret parks Push without network retries. While the cached DAV connection belongs to an earlier password, the scope gate requests normal reconciliation so the engine can reconnect before trusting a root ETag or selecting file IDs.
 
+Normal Push notifications also wait while the remote-mirror dialog is open. Closing the dialog wakes the current scheduler. Pending hints survive the pause, including a scope request that was already in flight when the dialog opened.
+
 ### Newly discovered Team Folders
 
 Nextcloud `notify_push` 1.4.2 caches a storage's recipient list for four to five minutes. A new Team Folder can initially have an empty or incomplete list. File edits made during that window can miss the other account's socket, and cache expiry alone does not replay them. For established mounts, file notifications use the usual Push path. [Recipient cache in notify_push 1.4.2](https://github.com/nextcloud/notify_push/blob/e393d172087e872fa88dc87baa39e6eb1bbde496/src/storage_mapping.rs#L32-L44)
