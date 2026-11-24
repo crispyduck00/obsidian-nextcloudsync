@@ -36,6 +36,8 @@ export interface UploadOptions {
 }
 
 export interface IWebDAVClient {
+  /** Observed Group Folder mount paths and IDs from a complete, in-scope file listing. */
+  onTeamMountListing?(root: RemoteRootInfo, mounts: ReadonlyMap<string, string>): void;
   connect(): Promise<NextcloudFeatures>;
   /**
    * The COMPLETE listing beneath `path` (the vault root when `path` is '') (docs/spec.md §5.2).

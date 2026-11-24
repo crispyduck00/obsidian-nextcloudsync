@@ -60,7 +60,7 @@ import { MirrorService } from './mirror/MirrorService';
 import { SyncHistoryStore } from '../data/SyncHistoryStore';
 import { IStatusBar } from '../ui/StatusBarItem';
 import { WebDAVFactory } from '../network/WebDAVFactory';
-import { IWebDAVClient } from '../network/IWebDAVClient';
+import { IWebDAVClient, type RemoteRootInfo } from '../network/IWebDAVClient';
 import { ancestorsOf } from '../network/RemoteDirCache';
 import { RenameTracker } from './RenameTracker';
 import { PendingFileRenames, fileRenameStatus } from './PendingFileRenames';
@@ -127,10 +127,16 @@ interface SyncEngineOptions {
   logger?: FileLogger;
   // Lets the host persist the server version without coupling the engine to settings persistence.
   onFeatures?: (features: NextcloudFeatures) => void;
+  onTeamMountDiscovered?: () => void;
   // Plugin ids whose code was written and that still need an Obsidian restart. Shared with the host so it
   // outlives engine re-creation; a fresh set when omitted.
   pluginsAwaitingRestart?: Set<string>;
 }
+
+type PushRootState = StateDB & {
+  getRootListingGeneration?(): number;
+  getRemoteRootFileId?(): string | null;
+};
 
 export class SyncEngine {
   private autoSyncHandle: number | null = null;
@@ -175,7 +181,7 @@ export class SyncEngine {
   private readonly activityGate = new SyncActivityGate();
   /** Resolves notify_push IDs and delegates only safe known-file work to the existing classifier. */
   private readonly remotePush: RemotePushReconciler;
-  /** Push-only observation. The ordinary sync cache is owned by StateDB. */
+  private teamMountListing?: { client: IWebDAVClient; scope: string; root: RemoteRootInfo; ids: Set<string> };
   private observedPushRoot?: { etag: string; client: IWebDAVClient; scope: string; generation: number };
 
   private readonly mirror: MirrorService;
@@ -635,6 +641,27 @@ export class SyncEngine {
       const { client, features } = await this.opts.webdavFactory.createClient();
       this.client = client;
       client.trackKnownDirectories?.(this.opts.stateDB, path => this.beginDirectoryCreation(client, path));
+      if (features.isNextcloud && this.opts.onTeamMountDiscovered) {
+        const accountScope = this.fileRenameScope();
+        client.onTeamMountListing = (root, mounts) => {
+          if (this.cancelled || client !== this.client || accountScope !== this.fileRenameScope() || !this.opts.settings.useClientPush) return;
+          const scope = this.pushScopeKey();
+          const ids = new Set([...mounts].filter(([path]) => !path || !this.isSystemExcluded(path)).map(([, id]) => id));
+          const previous = this.teamMountListing;
+          const discovered = [...ids].filter(id => previous?.client !== client || previous.scope !== scope || !previous.ids.has(id));
+          this.teamMountListing = { client, scope, ids, root };
+          if (!discovered.length) return;
+          const notify = () => {
+            const latest = this.teamMountListing;
+            if (!this.cancelled && this.opts.settings.useClientPush && this.client === client && latest?.client === client
+              && latest.scope === scope && scope === this.pushScopeKey() && this.hasCurrentClientCredentials(password)
+              && discovered.some(id => latest.ids.has(id))) this.opts.onTeamMountDiscovered?.();
+          };
+          // A slow initial download must not consume the entire catch-up window while sync is busy.
+          if (this.currentRun) void this.currentRun.then(notify).catch(() => { /* best-effort catch-up */ });
+          else notify();
+        };
+      }
       this.renameTracker = null;
       this.features = features;
       this.connectedPassword = password;
@@ -667,7 +694,7 @@ export class SyncEngine {
     return !this.isBlockedByWifiOnly();
   }
 
-  /** True while a full-vault sync session or its final persistence is active. */
+  /** True while full sync, persistence, or the host's remote-mirror dialog owns the vault. */
   isSyncRunning(): boolean {
     return this.running || this.currentRun !== null || this.opts.isRemoteMirrorOpen?.() === true;
   }
@@ -679,45 +706,50 @@ export class SyncEngine {
    * context; this method never updates StateDB, so only a real full scan advances the authoritative
    * stored root ETag.
    */
-  async shouldReconcileClientPush(fileIds: readonly string[] = []): Promise<ClientPushScopeResult> {
+  async shouldReconcileClientPush(fileIds: readonly string[] = [], probeOnly?: true): Promise<ClientPushScopeResult> {
+    const unknown: ClientPushScopeResult = probeOnly ? { kind: 'ignore' } : { kind: 'full-sync' };
     // An explicit hint for a pending move must survive Wi-Fi gating and an unchanged root.
     if (this.isPendingRenamePush(fileIds)) return { kind: 'full-sync', retryOnUnchanged: true };
 
     // Preserve the existing Wi-Fi-only behavior without making a new network request on cellular.
-    if (this.isBlockedByWifiOnly()) return { kind: 'full-sync' };
+    if (this.isBlockedByWifiOnly()) return unknown;
 
     // Do not create/connect a client just for the optimization. The first ordinary sync establishes
     // the client and the root-ETag baseline; until then a push follows the original full-sync path.
     const client = this.client;
     const password = this.connectedPassword;
     if (!client || this.features?.isNextcloud !== true || !this.hasCurrentClientCredentials(password)) {
-      return { kind: 'full-sync' };
+      return unknown;
     }
     const scope = this.pushScopeKey();
 
     // A token-capable server can advance StateDB without a real full scan, while remoteRootEtag is
     // deliberately updated only by full scans. Avoid using a potentially stale baseline there.
-    if (this.opts.stateDB.getSyncToken()) return { kind: 'full-sync' };
+    if (this.opts.stateDB.getSyncToken()) return unknown;
 
     const db = this.opts.stateDB;
     const fingerprint = db.getSyncScopeFingerprint?.();
-    if (fingerprint != null && fingerprint !== computeSyncScopeFingerprint(this.opts.settings)) return { kind: 'full-sync' };
-    const stored = db.getRemoteRootEtag();
+    if (fingerprint != null && fingerprint !== computeSyncScopeFingerprint(this.opts.settings)) return unknown;
+    const listing = this.teamMountListing;
+    if (probeOnly && (!listing?.ids.size || listing.client !== client || listing.scope !== scope)) return unknown;
+    // The first sync may not yet have a stored ETag. Its own listing supplies a read-only baseline for this probe.
+    const stored = db.getRemoteRootEtag() ?? (probeOnly ? listing?.root.etag : null);
     const generation = db.getRootListingGeneration?.();
     const observed = this.observedPushRoot;
     const observedEtag = observed?.client === client && observed.scope === scope && observed.generation === generation
       ? observed.etag : null;
-    if (stored == null && observedEtag == null) return { kind: 'full-sync' };
+    if (stored == null && observedEtag == null) return unknown;
 
     const root = client.getRootInfo
       ? await client.getRootInfo()
       : { etag: await client.getRootEtag(), fileId: null };
     // Capability and root information can go stale during a password change. Let the normal
     // sync path reconnect and establish the scope before using a targeted result.
-    const expectedRoot = db.getRemoteRootFileId?.();
+    const expectedRoot = db.getRemoteRootFileId?.() ?? (probeOnly ? listing?.root.fileId : null);
     if (root.etag == null || (expectedRoot && root.fileId !== expectedRoot) || client !== this.client
+      || (probeOnly && listing !== this.teamMountListing)
       || scope !== this.pushScopeKey() || generation !== db.getRootListingGeneration?.() || !this.hasCurrentClientCredentials(password)) {
-      return { kind: 'full-sync' };
+      return unknown;
     }
     // A local move can be captured while the scope probe was in flight.
     if (this.isPendingRenamePush(fileIds)) return { kind: 'full-sync', retryOnUnchanged: true };
@@ -1280,6 +1312,7 @@ export class SyncEngine {
   // Phase 1 of termination: signal workers to stop pulling work; the run's finally block still persists state.
   requestStop(): void {
     this.cancelled = true;
+    this.teamMountListing = undefined;
   }
 
   // Waits for the run's final state save so a following reset cannot interleave with it. Never throws.

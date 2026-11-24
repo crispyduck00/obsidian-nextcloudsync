@@ -109,6 +109,7 @@ export class NextcloudClient implements IWebDAVClient {
   private readonly createdDirs = new RemoteDirCache();
   private existingRootRequired = false;
   private knownDirectories?: TrackedDirectories;
+  onTeamMountListing?: IWebDAVClient['onTeamMountListing'];
 
   constructor(
     private readonly settings: DavSyncSettings,
@@ -242,6 +243,7 @@ export class NextcloudClient implements IWebDAVClient {
   }
 
   async getFiles(path: string): Promise<RemoteFileInfo[]> {
+    const observeMounts = path === '' && this.settings.useClientPush && !!this.onTeamMountListing;
     const res = await this.reqReadonly({
       url: this.remoteUrl(path),
       method: 'PROPFIND',
@@ -251,7 +253,9 @@ export class NextcloudClient implements IWebDAVClient {
         'Content-Type': 'application/xml; charset=utf-8',
         ...NO_CACHE_HEADERS,
       },
-      body: PROPFIND_BODY,
+      body: observeMounts
+        ? PROPFIND_BODY.replace('<oc:fileid/>', '<oc:fileid/><nc:mount-type/><nc:is-mount-root/>')
+        : PROPFIND_BODY,
       throw: false,
     });
     // A 404 on the vault folder itself is NOT an empty listing (issue #50, docs/spec.md §5.2): an empty listing drives absence-based
@@ -261,7 +265,7 @@ export class NextcloudClient implements IWebDAVClient {
       return [];
     }
     if (res.status !== 207) throw new NetworkError(res.status, res.text, 'PROPFIND');
-    return await this.parsePropfindResponse(res.text, { op: 'getFiles', path, status: res.status, method: 'PROPFIND' });
+    return await this.parsePropfindResponse(res.text, { op: 'getFiles', path, status: res.status, method: 'PROPFIND' }, observeMounts);
   }
 
   // Depth:0 state of ONE file (docs/spec.md §5.7), parsed by the SAME parsePropfindResponse as the full scan so processRemoteFile
@@ -958,7 +962,10 @@ export class NextcloudClient implements IWebDAVClient {
 
   private async parsePropfindResponse(
     xml: string, ctx: { op: string; path: string; status: number; method: 'PROPFIND' | 'REPORT' },
+    observeMounts = false,
   ): Promise<RemoteFileInfo[]> {
+    const mounts = observeMounts ? new Map<string, string>() : undefined;
+    let root: RemoteRootInfo | undefined;
     const results: RemoteFileInfo[] = [];
     const responses = readMultistatus(xml, ctx);
     if (ctx.op === 'getFiles' && ctx.path === '') this.verifyListedRoot(responses);
@@ -968,7 +975,18 @@ export class NextcloudClient implements IWebDAVClient {
       const resp = responses[i];
       const prop = readProp(resp);
       if (!prop) continue;
-      if (readIsCollection(prop)) continue; // files only; parsePropfindDirectories keeps the inverse
+      if (readIsCollection(prop)) {
+        if (mounts) {
+          const path = hrefToRelative(this.baseUrl, this.remoteBase, readHref(resp));
+          if (path === '') root = { fileId: readOwncloudProps(prop).fileId, etag: readDavProps(prop).etag };
+          if (path !== null && prop.getElementsByTagNameNS(NC_NS, 'mount-type')[0]?.textContent === 'group'
+              && (path === '' || /^(true|1)$/.test(prop.getElementsByTagNameNS(NC_NS, 'is-mount-root')[0]?.textContent ?? ''))) {
+            const id = readOwncloudProps(prop).fileId;
+            if (id) mounts.set(path, id);
+          }
+        }
+        continue;
+      }
 
       const path = hrefToRelative(this.baseUrl, this.remoteBase, readHref(resp));
       if (path === null || path === '') continue; // Skip entries outside the base folder or the folder itself
@@ -978,6 +996,7 @@ export class NextcloudClient implements IWebDAVClient {
       const permissions = prop.getElementsByTagNameNS('http://owncloud.org/ns', 'permissions')[0]?.textContent?.trim();
       results.push({ path, fileId, checksum, etag, size, lastModified, creationTime, ...(permissions ? { permissions } : {}) });
     }
+    if (root?.fileId && root.etag && mounts) this.onTeamMountListing?.(root, mounts);
     return results;
   }
 

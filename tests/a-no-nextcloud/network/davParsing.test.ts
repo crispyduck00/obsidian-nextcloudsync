@@ -22,7 +22,7 @@ function settings(over: Partial<DavSyncSettings> = {}): DavSyncSettings {
 }
 
 function multistatus(...responses: string[]): string {
-  return `<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">${responses.join('')}</d:multistatus>`;
+  return `<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns">${responses.join('')}</d:multistatus>`;
 }
 
 function fileResponse(href: string, over: { size?: number; fileId?: string; checksum?: string } = {}): string {
@@ -36,12 +36,12 @@ function fileResponse(href: string, over: { size?: number; fileId?: string; chec
   </d:prop></d:propstat></d:response>`;
 }
 
-function folderResponse(href: string, fileId = '1'): string {
+function folderResponse(href: string, fileId = '1', props = ''): string {
   return `<d:response><d:href>${href}</d:href><d:propstat><d:prop>
     <d:resourcetype><d:collection/></d:resourcetype>
     <d:getetag>"folder"</d:getetag>
     <d:getlastmodified>Wed, 27 Aug 2026 01:00:00 GMT</d:getlastmodified>
-    <oc:fileid>${fileId}</oc:fileid>
+    <oc:fileid>${fileId}</oc:fileid>${props}
   </d:prop></d:propstat></d:response>`;
 }
 
@@ -92,6 +92,42 @@ describe('NextcloudClient.getFiles — keeps files, drops folders', () => {
       fileResponse('/remote.php/dav/files/user/MyVault/keep.md'),
     ));
     expect((await nextcloud('MyVault').getFiles('')).map((f) => f.path)).toEqual(['keep.md']);
+  });
+
+  it.each(['', 'true', 'false'])('observes Team Folders from the same scoped listing (vault mount flag %p)', async (rootFlag) => {
+    const base = '/remote.php/dav/files/user/Vault';
+    const group = (flag: string) => `<nc:mount-type>group</nc:mount-type><nc:is-mount-root>${flag}</nc:is-mount-root>`;
+    replyWith(multistatus(
+      folderResponse(base, '10', rootFlag ? group(rootFlag) : ''),
+      folderResponse(`${base}/ordinary`, '11'),
+      folderResponse(`${base}/Team`, '12', group('true')),
+      folderResponse(`${base}/Team/child`, '13', group('false')),
+      folderResponse(`${base}Other/Team`, '14', group('true')),
+      folderResponse(`${base}/external`, '15', '<nc:mount-type>external</nc:mount-type><nc:is-mount-root>true</nc:is-mount-root>'),
+      fileResponse(`${base}/Team/note.md`),
+    ));
+    const client = new NextcloudClient(settings({ useClientPush: true }), () => 'pw', 'Vault');
+    client.onTeamMountListing = jest.fn();
+    const files = await client.getFiles('');
+    expect(files.map(f => f.path)).toEqual(['Team/note.md']);
+    const mounts = new Map([['Team', '12']]);
+    if (rootFlag) mounts.set('', '10'); // The vault itself may sit inside a Team Folder.
+    expect(client.onTeamMountListing).toHaveBeenCalledWith({ etag: 'folder', fileId: '10' }, mounts);
+    expect(requestUrl).toHaveBeenCalledTimes(1);
+    expect(requestUrl).toHaveBeenCalledWith(expect.objectContaining({
+      method: 'PROPFIND', headers: expect.objectContaining({ Depth: 'infinity' }),
+      body: expect.stringContaining('<nc:mount-type/>'),
+    }));
+  });
+
+  it.each<[boolean, string]>([[false, ''], [true, 'sub']])('limits mount discovery to push-enabled root listings (%p, %p)', async (push, path) => {
+    const client = new NextcloudClient(settings({ useClientPush: push }), () => 'pw', 'Vault');
+    client.onTeamMountListing = jest.fn();
+    replyWith(multistatus(folderResponse('/remote.php/dav/files/user/Vault', '10')));
+    await client.getFiles(path);
+    expect(client.onTeamMountListing).not.toHaveBeenCalled();
+    expect(requestUrl).toHaveBeenCalledTimes(1);
+    expect(requestUrl).toHaveBeenCalledWith(expect.objectContaining({ body: expect.not.stringContaining('<nc:mount-type/>') }));
   });
 
   it('skips a response that carries no prop at all', async () => {
