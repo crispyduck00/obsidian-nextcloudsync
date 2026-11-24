@@ -116,6 +116,11 @@ export class ConflictApplier {
         void this.deps.logger?.log(`conflict: orphan marker detected, bypassing re-entrancy guard (self-heal) → ${path}`);
       }
       decision = resolver.decide(path, mergeBaseContent, localContent, remoteContent, ctx);
+      // Two independent creations can merge to exactly the existing remote note. Preserve its revision.
+      if (!base && decision.action === 'write' && decision.clean && decision.content === remoteContent
+          && bytesEqual(new TextEncoder().encode(decision.content).buffer, remoteData)) {
+        decision = { action: 'prefer-remote' };
+      }
       // Only a marker write overwrites both clean sides, so capture them before resolveByWrite runs; force
       // resolution later restores a clean version from them (docs/spec.md §6.4).
       if (decision.action === 'write' && !decision.clean) {
