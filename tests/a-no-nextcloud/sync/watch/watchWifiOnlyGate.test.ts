@@ -50,7 +50,7 @@ function build(opts: { blocked: boolean; running?: boolean }): Harness {
   const resolution = { dropCleanSnapshot: jest.fn() };
   const isSystemExcluded = jest.fn(() => false);
   const connect = jest.fn(async () => ({ client, uploadStrategy: {} }));
-  const reconcileFolderMove = jest.fn(async () => undefined);
+  const reconcileStructure = jest.fn(async () => undefined);
   const retryFileRename = jest.fn(async () => true);
   const isSyncRunning = jest.fn(() => opts.running === true);
   const isBlockedByWifiOnly = jest.fn(() => opts.blocked);
@@ -62,7 +62,7 @@ function build(opts: { blocked: boolean; running?: boolean }): Harness {
 
   const deps = {
     localAdapter, stateDB, historyStore, statusBar, journal, mergeBase, transfer, deletion, resolution,
-    isSystemExcluded, isPluginPath: noPluginPath, connect, retryFileRename, reconcileFolderMove, isBlockedByWifiOnly, isSyncRunning, processFile,
+    isSystemExcluded, isPluginPath: noPluginPath, connect, retryFileRename, reconcileStructure, isBlockedByWifiOnly, isSyncRunning, processFile,
     queueRetry, conflictEncounters, logger, notify,
     runNonFullSyncOperation: async <T>(fn: () => Promise<T>) => fn(),
   } as unknown as WatchDeps;
@@ -97,7 +97,7 @@ function build(opts: { blocked: boolean; running?: boolean }): Harness {
     dropCleanSnapshot: resolution.dropCleanSnapshot,
     connect,
     retryFileRename,
-    reconcileFolderMove,
+    reconcileStructure,
     isSyncRunning,
     processFile,
     queueRetry,
@@ -144,7 +144,7 @@ describe('[SPEC:MWM-2] watch mode honours "Wi-Fi only" on cellular', () => {
     await run(watch);
 
     expect(mocks.connect).toHaveBeenCalledTimes(name === 'folder-delete' || name === 'folder-rename' ? 0 : 1);
-    expect(mocks.reconcileFolderMove).toHaveBeenCalledTimes(name === 'folder-rename' ? 1 : 0);
+    expect(mocks.reconcileStructure).toHaveBeenCalledTimes(name === 'folder-rename' ? 1 : 0);
     expect(logs.filter(l => l.startsWith('watch: skipped'))).toEqual([]);
   });
 

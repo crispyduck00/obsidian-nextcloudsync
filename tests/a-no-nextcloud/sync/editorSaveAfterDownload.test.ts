@@ -85,7 +85,7 @@ test('unsaved editor changes stay protected while Watch is disabled', async () =
 test('a user rename just after a download retains intent and rechecks the renamed content', async () => {
   const h = host();
   h.events.get('rename')!(new File('new heading.md'), 'note.md');
-  await jest.advanceTimersByTimeAsync(0);
+  await jest.advanceTimersByTimeAsync(2000);
   expect(h.engine.renameSingleFile).toHaveBeenCalledWith('note.md', 'new heading.md');
   expect(h.engine.syncSingleFile).toHaveBeenCalledWith('new heading.md');
 });

@@ -6,7 +6,7 @@ import { ConflictError, NetworkError, type FileState, type RemoteFileInfo } from
 
 const original: FileState = {
   path: 'Old.md', localHash: 'hash', remoteId: 'hash', idType: 'sha256', size: 4, mtime: 1,
-  remoteFileId: 'original-id', isConflicted: false,
+  remoteFileId: 'original-id', remoteEtag: 'original-rev', isConflicted: false,
 };
 const remoteOriginal: RemoteFileInfo = {
   path: original.path, fileId: original.remoteFileId, checksum: 'hash', etag: 'original-rev', size: 4,
@@ -38,7 +38,10 @@ async function build() {
     remote.set(destination, { ...file!, path: destination });
   };
   const move = jest.fn(serverMove);
-  const client = { statFile: jest.fn(async (p: string) => remote.get(p) ?? null) } as unknown as IWebDAVClient;
+  const client = {
+    statFile: jest.fn(async (p: string) => remote.get(p) ?? null),
+    downloadFile: jest.fn(async () => new TextEncoder().encode('peer').buffer),
+  } as unknown as IWebDAVClient;
   const queueFor = (state: StateDB) => new PendingFileRenames({
     state,
     local: { isFile: async path => local.has(path) },
@@ -105,6 +108,16 @@ describe('persistent file renames', () => {
     expect(queue.list()[0].issue).toBe('conflict');
     expect(h.move).toHaveBeenCalledTimes(1);
     expect(h.remote.has('New.md')).toBe(false);
+  });
+
+  it('checks the actual revision before moving an inferred legacy source after a restore', async () => {
+    const h = await build();
+    h.db.setFile({ ...original, remoteEtag: undefined });
+    h.queue.capture('Old.md', 'New.md', 'inferred');
+    await expect(h.queue.retry(h.client)).resolves.toBe(false);
+    expect(h.client.downloadFile).toHaveBeenCalledWith('Old.md', remoteOriginal.etag);
+    expect(h.queue.list()[0].issue).toBe('conflict');
+    expect(h.move).not.toHaveBeenCalled();
   });
 
   it('holds an older, unproven cross-folder rename saved by RC.3', async () => {

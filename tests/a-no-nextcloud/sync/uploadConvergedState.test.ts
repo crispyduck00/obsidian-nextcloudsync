@@ -11,7 +11,7 @@ import { DataAdapter } from 'obsidian';
 import { SyncEngine } from '../../../src/sync/SyncEngine';
 import { StateDB } from '../../../src/data/StateDB';
 import { DEFAULT_SETTINGS, RemoteFileInfo, SyncSessionSummary } from '../../../src/types';
-import type { UploadOptions } from '../../../src/sync/upload/IUploadStrategy';
+import type { UploadOptions } from '../../../src/network/IWebDAVClient';
 import { sha256 } from '../../../src/util/hash';
 
 const enc = new TextEncoder();
@@ -176,6 +176,8 @@ describe('upload receipts survive a slow PUT and restart', () => {
     const put = jest.fn(async (_client: unknown, _path: string, data: ArrayBuffer, _mtime: number, opts: UploadOptions) => {
       server = new TextDecoder().decode(data);
       expect(opts.precomputedSha256).toBe(await sha256(data));
+      opts.onUploadedEtag?.(server);
+      opts.onCreatedFileId?.('f1');
       if (server === 'one') {
         local.files[path] = 'two';
         mtimes[path] = sameMtime ? start : start + 100;
@@ -196,7 +198,7 @@ describe('upload receipts survive a slow PUT and restart', () => {
       } else {
         const oldHash = await sha256(toBuf(server));
         first.stateDB.setFile({ path, localHash: oldHash, remoteId: oldHash, idType: 'sha256',
-          size: 3, mtime: start - 60_000, remoteFileId: 'f1', isConflicted: false });
+          size: 3, mtime: start - 60_000, remoteEtag: 'old', remoteFileId: 'f1', isConflicted: false });
         await callProcessRemote(first.engine, await listed(), makeSummary());
       }
 
@@ -222,10 +224,10 @@ describe('upload receipts survive a slow PUT and restart', () => {
       const local = makeLocalAdapter({ [path]: 'new' }, { [path]: now });
       const oldHash = await sha256(toBuf('old'));
       const newHash = await sha256(toBuf('new'));
-      const put = jest.fn(async () => 'uploaded');
+      const put = jest.fn(async (_c, _p, _d, _m, opts: UploadOptions) => { opts.onUploadedEtag?.('new'); return 'uploaded'; });
       const { engine, stateDB } = await buildEngine(local, {}, put);
       stateDB.setFile({ path, localHash: oldHash, remoteId: oldHash, idType: 'sha256',
-        size: 3, mtime: now - 60_000, remoteFileId: 'f1', isConflicted: false });
+        size: 3, mtime: now - 60_000, remoteEtag: 'old', remoteFileId: 'f1', isConflicted: false });
       await callProcessRemote(engine, remoteOf(path, 'old', { etag: 'old', checksum: oldHash }), makeSummary());
       now += 5_000;
       const remote = remoteOf(path, 'new', { etag: 'new', checksum: newHash });

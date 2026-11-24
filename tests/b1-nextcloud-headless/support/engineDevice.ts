@@ -33,7 +33,8 @@ export interface Device {
 }
 
 export function makeDevice(
-  env: LiveEnv, remoteBase: string, deviceId: string, over: Partial<DavSyncSettings> = {},
+  env: LiveEnv, remoteBase: string, deviceId: string,
+  { onTeamMountDiscovered, ...over }: Partial<DavSyncSettings> & { onTeamMountDiscovered?: () => void } = {},
   vault: FakeVault = new FakeVault(), creationTimeSupport: CreationTimeSupport = 'settable',
   readAppPassword: AppPasswordReader = () => env.appPassword,
 ): Device {
@@ -67,6 +68,7 @@ export function makeDevice(
     cleanSideStore,
     statusBar: noopStatusBar,
     webdavFactory,
+    onTeamMountDiscovered,
     readAppPassword,
     pluginDir: PLUGIN_DIR,
     configDir: CONFIG_DIR,

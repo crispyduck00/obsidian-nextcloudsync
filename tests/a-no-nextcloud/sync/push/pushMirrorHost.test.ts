@@ -29,7 +29,8 @@ function host() {
   };
   p.settings = { ...DEFAULT_SETTINGS, serverUrl: 'http://127.0.0.1/remote.php/dav/files/test/', username: 'test', useClientPush: true };
   p.syncEngine = { canRunWatchSync: () => true, isSyncRunning: () => false,
-    shouldReconcileClientPush: shouldSync, reconcileRemoteFileIds: reconcile, syncForClientPush: ordinarySync };
+    shouldReconcileClientPush: shouldSync, reconcileRemoteFileIds: reconcile, syncForClientPush: ordinarySync,
+    resumeAfterRemoteMirror: jest.fn(async () => {}), stopAutoSync: jest.fn(), requestStop: jest.fn(), flushState: jest.fn(async () => {}) };
   p.logger = { log() {} };
   p.pushStatusItem = { pulse() {}, setStatus() {}, destroy() {} };
   p.refreshMobileConflictStatus = () => {};
@@ -91,6 +92,44 @@ describe('Client Push while Mirror from remote is open', () => {
       expect(h.reconcile).toHaveBeenCalledTimes(1);
       expect(h.ordinarySync).not.toHaveBeenCalled();
     } finally { scope.resolve(changedRoot); closed.resolve(); await mirror; h.p.teardownClientPush(); }
+  });
+
+  test('does not resume a disposed engine when Obsidian unloads with the modal open', async () => {
+    const h = host(), closed = deferred<void>();
+    const engine = h.p.syncEngine as { resumeAfterRemoteMirror: jest.Mock };
+    modal.mockImplementationOnce(() => closed.promise);
+    const mirror = h.plugin.runRemoteMirror();
+    h.plugin.onunload();
+    expect(h.p.syncEngine).toBeUndefined();
+    closed.resolve();
+    await mirror;
+    expect(engine.resumeAfterRemoteMirror).not.toHaveBeenCalled();
+  });
+
+  test('wakes the current scheduler after the engine is replaced with the old modal still open', async () => {
+    const h = host(), closed = deferred<void>();
+    const original = h.p.syncEngine as { resumeAfterRemoteMirror: jest.Mock };
+    const reconcile = jest.fn(async () => 'done');
+    const replacement = { ...original, canRunWatchSync: () => true, isSyncRunning: () => false,
+      shouldReconcileClientPush: async () => changedRoot, reconcileRemoteFileIds: reconcile,
+      resumeAfterRemoteMirror: jest.fn(async () => {}) };
+    modal.mockImplementationOnce(() => closed.promise);
+    const mirror = h.plugin.runRemoteMirror();
+    try {
+      h.p.teardownClientPush();
+      h.p.syncEngine = replacement;
+      h.p.pushStatusItem = { pulse() {}, setStatus() {}, destroy() {} };
+      h.p.initClientPush(() => 'test-only-secret');
+      h.p.pushSyncScheduler.notify(native);
+      await jest.advanceTimersByTimeAsync(12000);
+      expect(reconcile).not.toHaveBeenCalled();
+      closed.resolve();
+      await mirror;
+      await jest.advanceTimersByTimeAsync(12000);
+      expect(reconcile).toHaveBeenCalledTimes(1);
+      expect(original.resumeAfterRemoteMirror).not.toHaveBeenCalled();
+      expect(replacement.resumeAfterRemoteMirror).toHaveBeenCalledTimes(1);
+    } finally { closed.resolve(); await mirror; h.p.teardownClientPush(); }
   });
 
   test('releases parked notifications when the modal fails', async () => {

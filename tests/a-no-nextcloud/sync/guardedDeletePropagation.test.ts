@@ -136,7 +136,7 @@ async function buildEngine(
     createDirectory: jest.fn(async () => undefined),
     deleteCollection: jest.fn(async (p: string) => { events.push(`deleteDir:${p}`); }),
     isRemoteDirEmpty: jest.fn(async () => true),
-    recalcChecksum: jest.fn(async (): Promise<string | null> => w.recalc),
+    recalcChecksum: jest.fn(async (_path: string): Promise<string | null> => w.recalc),
     downloadFile: jest.fn(async (p: string) => toBuf(w.bodies[p] ?? '')),
   };
   // isNextcloud drives the "the server reports checksums" assumption that keeps uploads from
@@ -209,11 +209,11 @@ async function buildEngine(
 // Records `path` as converged: the recorded hash matches the body on disk, and the stat signature
 // matches what the vault double reports. Both matter — the signature keeps the file out of the upload
 // pass, and the hash is what every deletion decision is proved against.
-async function track(stateDB: StateDB, path: string, body: string): Promise<FileState> {
+async function track(stateDB: StateDB, path: string, body: string, remoteEtag?: string): Promise<FileState> {
   const hash = await sha256(toBuf(body));
   const size = enc.encode(body).length;
   const fs: FileState = {
-    path, localHash: hash, remoteId: hash, idType: 'sha256',
+    path, localHash: hash, remoteId: hash, idType: 'sha256', remoteEtag,
     size, mtime: BASE_MTIME, remoteFileId: `fid-${path}`, isConflicted: false,
     localMtime: BASE_MTIME, localSize: size, remoteMtime: BASE_MTIME,
   };
@@ -282,10 +282,9 @@ describe('Missing shared folders and concurrent directory changes', () => {
     const inspectDirectory = jest.fn(async () => ({ protected: true, fileId: 'dir-Shared' }));
     const moveFile = jest.fn();
     Object.assign(h.client, { inspectDirectory, moveFile });
-    await track(h.stateDB, note.path, 'a');
+    await track(h.stateDB, note.path, 'a', note.etag);
     trackDir(h.stateDB, 'Shared');
 
-    h.engine.rememberFolderDeletion('Shared');
     if (operation === 'sync') await h.sync();
     if (operation === 'watch delete') await h.engine.deleteSingleFile(note.path);
     if (operation === 'watch move') {
@@ -307,7 +306,7 @@ describe('Missing shared folders and concurrent directory changes', () => {
     const h = await buildEngine({}, ['Shared'], world({ listing: [note], dirs: [remoteDir('Shared')], stat: () => note }));
     const inspectDirectory = jest.fn(async () => ({ protected: true, fileId: 'dir-Shared' }));
     Object.assign(h.client, { inspectDirectory });
-    await track(h.stateDB, note.path, 'a');
+    await track(h.stateDB, note.path, 'a', note.etag);
     trackDir(h.stateDB, 'Shared');
 
     await h.engine.deleteSingleFile(note.path);
@@ -321,7 +320,7 @@ describe('Missing shared folders and concurrent directory changes', () => {
     const h = await buildEngine({}, ['Shared'], world({ stat: () => note }));
     Object.assign(h.app.vault.adapter, { stat: async () => null });
     Object.assign(h.client, { inspectDirectory: async () => ({ protected: true, fileId: 'dir-Shared' }) });
-    await track(h.stateDB, note.path, 'a');
+    await track(h.stateDB, note.path, 'a', note.etag);
     trackDir(h.stateDB, 'Shared');
 
     await h.engine.deleteSingleFile(note.path);
@@ -636,7 +635,7 @@ describe('[SPEC:GDP-23] a path the server has EDITED is not a deletion at all', 
 
     const summary = await h.sync();
 
-    expect(h.client.downloadFile).toHaveBeenCalledWith(path);
+    expect(h.client.downloadFile).toHaveBeenCalledWith(path, remote.etag ?? undefined);
     expect(h.client.deleteFile).not.toHaveBeenCalled();
     expect(h.client.uploadFile).not.toHaveBeenCalled();
     expect(h.vault[path]).toBe('new local draft');
@@ -768,10 +767,10 @@ describe('[SPEC:GDP-29] the added round trip is bounded', () => {
   });
 });
 
-
 describe('Observed local folder deletion intent', () => {
   function inspectFolders(h: Awaited<ReturnType<typeof buildEngine>>): void {
     Object.assign(h.client, {
+      statFolderMovePath: jest.fn(async (path: string) => ({ directoryId: `dir-${path}` })),
       inspectDirectory: jest.fn(async (path: string) => ({ protected: false, fileId: `dir-${path}` })),
     });
   }
@@ -804,6 +803,7 @@ describe('Observed local folder deletion intent', () => {
     trackDir(h.stateDB, 'Gone/sub');
     h.engine.rememberFolderDeletion('Gone');
     inspectFolders(h);
+    h.client.recalcChecksum.mockImplementation(async (path: string) => path === changed.path ? changed.checksum : unchanged.checksum);
     const write = h.localAdapter.atomicWriteBinary.getMockImplementation()!;
     h.localAdapter.atomicWriteBinary.mockImplementation(async (path: string, data: ArrayBuffer) => {
       await write(path, data);

@@ -132,7 +132,7 @@ describe('CreationTimeAligner', () => {
     it.each([
       ['with', true],
       ['without', false],
-    ])('applied %s a base: clears the record and preserves the content signature', async (_n, hasBase) => {
+    ])('applied %s a base: clears the record and keeps the content signature', async (_n, hasBase) => {
       const h = makeHarness({ base: hasBase ? { ctimeLocalAttempt: 42, ctimeRemoteAttempt: 43 } : null, localResult: 'applied' });
       await h.aligner.align(h.client, remote(OLD), stOf(NEW));
       expect(h.setLocal).toHaveBeenCalledWith(PATH, OLD * 1000);

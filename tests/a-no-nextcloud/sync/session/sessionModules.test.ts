@@ -305,7 +305,7 @@ describe('VersionService', () => {
     const service = new VersionService({
       localAdapter: {
         stat: async () => ({ size: 13, mtime: 777 }),
-        readBinary: async () => new TextEncoder().encode('existing body').buffer,
+        readBinary: async () => new TextEncoder().encode('original body').buffer,
         atomicWriteBinary: async (p: string) => { calls.wrote.push(p); },
       } as never,
       stateDB: {

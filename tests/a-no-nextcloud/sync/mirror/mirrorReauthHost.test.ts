@@ -1,11 +1,11 @@
-import Plugin from '../../../src/main';
-import { NextcloudSyncSettingTab } from '../../../src/settings/SettingTab';
-import { LoginFlowV2 } from '../../../src/auth/LoginFlowV2';
-import { DEFAULT_SETTINGS, type LoginFlowResult } from '../../../src/types';
-import { WatchOperations, type WatchDeps } from '../../../src/sync/watch/WatchOperations';
-import { openMirrorFromRemoteModal } from '../../../src/ui/MirrorFromRemoteModal';
+import Plugin from '../../../../src/main';
+import { NextcloudSyncSettingTab } from '../../../../src/settings/SettingTab';
+import { LoginFlowV2 } from '../../../../src/auth/LoginFlowV2';
+import { DEFAULT_SETTINGS, type LoginFlowResult } from '../../../../src/types';
+import { WatchOperations, type WatchDeps } from '../../../../src/sync/watch/WatchOperations';
+import { openMirrorFromRemoteModal } from '../../../../src/ui/MirrorFromRemoteModal';
 
-jest.mock('../../../src/ui/MirrorFromRemoteModal', () => ({ openMirrorFromRemoteModal: jest.fn() }));
+jest.mock('../../../../src/ui/MirrorFromRemoteModal', () => ({ openMirrorFromRemoteModal: jest.fn() }));
 const modal = jest.mocked(openMirrorFromRemoteModal);
 
 function deferred<T>() {

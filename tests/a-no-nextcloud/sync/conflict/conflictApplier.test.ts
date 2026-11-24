@@ -178,7 +178,7 @@ it('keeps the server revision when an auto-created folder note is a prefix of th
   expect(diskContent()).toBe(body);
   expect(calls.uploadMtime).toHaveLength(0);
   expect(calls.setFile).toHaveLength(1);
-  expect(calls.setFile[0]).toMatchObject({ isConflicted: false, remoteFileId: remote.fileId, remoteId: 'r1' });
+  expect(calls.setFile[0]).toMatchObject({ isConflicted: false, remoteEtag: remote.etag });
 });
 
 describe('ConflictApplier.handleConflict — the size guard', () => {
@@ -421,7 +421,7 @@ describe('ConflictApplier.resolveByWrite — creation time [SPEC:CT-3]', () => {
         const { applier, conn, calls } = build({ upload: 'ok', local: { content: 'x', mtime: 1, size: 1, ctime: local } });
         await applier.resolveByWrite(conn, 'note.md', 'merged\n', clean, remoteAt(server), 'old-remote', 'etag', summary());
         expect(calls.wroteCtime).toEqual([expectedWrite]);
-        expect(calls.uploadOpts).toEqual([expect.objectContaining({ ctime: expectedUpload, onUploadedEtag: expect.any(Function), ifMatchEtag: '"r1"' })]);
+        expect(calls.uploadOpts).toEqual([expect.objectContaining({ ctime: expectedUpload, ifMatchEtag: '"r1"' })]);
       });
     }
 

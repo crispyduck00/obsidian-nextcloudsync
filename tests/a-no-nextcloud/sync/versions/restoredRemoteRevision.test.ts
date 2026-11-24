@@ -1,3 +1,4 @@
+import { matchesTrackedRemote } from '../../../../src/sync/push/matchesTrackedRemote';
 import { sha256 } from '../../../../src/util/hash';
 import { buildEngine, callProcessRemote, makeLocalAdapter, makeSummary, remoteOf, toBuf } from '../../support/engineHarness';
 
@@ -21,6 +22,8 @@ it.each(['etag', 'mtime'] as const)('reads a restored body even when Nextcloud r
   if (evidence === 'etag') {
     await callProcessRemote(engine, prior, makeSummary());
     expect(downloadFile).not.toHaveBeenCalled();
+    expect(matchesTrackedRemote([rollback], [], [prior], [], () => false)).toBe(false);
+    expect(matchesTrackedRemote([{ ...prior, checksum: 'different' }], [], [prior], [], () => false)).toBe(false);
   }
 
   await callProcessRemote(engine, rollback, makeSummary());
@@ -83,7 +86,7 @@ it('rechecks a legacy checksum before a watch deletion can remove a same-size re
   const recalcChecksum = jest.fn(async () => sha256(toBuf('other')));
   const local = makeLocalAdapter({});
   const { engine, stateDB } = await buildEngine(local, {
-    statFile: async () => file, recalcChecksum,
+    statFile: async () => file, inspectDirectory: async () => null, recalcChecksum,
     downloadFile: async () => toBuf('other'), deleteFile,
   });
   Object.assign(engine, { features: { isNextcloud: true } });
@@ -91,9 +94,7 @@ it('rechecks a legacy checksum before a watch deletion can remove a same-size re
     mtime: 1000, remoteFileId: file.fileId, isConflicted: false });
   // Drive the same operation used after the watch handler's guarded Depth:0 stat.
   const deletion = Reflect.get(engine, 'deletion');
-  const client = Reflect.get(engine, 'client');
-  Object.assign(client, { inspectDirectory: async () => null });
-  await deletion.applyLocalDeletion(client, file, stateDB.getFile(path), advertised, 'sha256', makeSummary());
+  await deletion.deleteLocallyMissing(Reflect.get(engine, 'client'), path, stateDB.getFile(path), makeSummary());
   expect(recalcChecksum).toHaveBeenCalledWith(path);
   expect(deleteFile).not.toHaveBeenCalled();
   expect(local.files[path]).toBe('other');

@@ -172,25 +172,25 @@ describe('TransferService.uploadFile', () => {
     const s = summary();
     await transfer.uploadFile(client, uploadStrategy, remote(), s);
     expect(s.uploadedCount).toBe(1);
-    expect(calls.setFile[0]).toMatchObject({ remoteId: await sha256(new TextEncoder().encode('local body').buffer), idType: 'sha256', isConflicted: false });
+    const uploadedHash = await sha256(new TextEncoder().encode('local body').buffer);
+    expect(calls.setFile[0]).toMatchObject({ remoteId: uploadedHash, idType: 'sha256', isConflicted: false });
     expect(calls.history).toEqual(['uploaded:note.md']);
     expect(calls.mergeBase).toEqual(['note.md']);
   });
 
-  it('stamps the post-write stat signature so the next sync can skip re-hashing', async () => {
+  it('stamps the local input signature so the next sync can skip re-hashing', async () => {
     const { transfer, client, uploadStrategy, calls } = build();
     await transfer.uploadFile(client, uploadStrategy, remote(), summary());
     expect(calls.setFile[0]).toMatchObject({ localMtime: 1234 });
   });
 
-  it.each(['local-hash', 'peer-hash'])('records a newly created Nextcloud ID only for the uploaded revision (%s)', async checksum => {
+  it.each([true, false])('records a newly created Nextcloud ID only for the uploaded revision (match: %s)', async confirmed => {
     const { transfer, client, uploadStrategy, calls } = build();
-    client.statFile = jest.fn(async () => remote({ fileId: 'server-id', checksum, lastModified: 3000 }));
-    await transfer.uploadFile(client, uploadStrategy, 'note.md', 'local-hash', 'local-hash', 'sha256',
-      remote({ fileId: null, etag: null }), summary(), true);
-    const confirmed = checksum === 'local-hash';
+    const uploadedHash = await sha256(new TextEncoder().encode('local body').buffer);
+    client.statFile = jest.fn(async () => remote({ fileId: 'server-id', checksum: confirmed ? uploadedHash : 'peer-hash', lastModified: 3000 }));
+    await transfer.uploadFile(client, uploadStrategy, remote({ fileId: null, etag: null }), summary(), true);
     expect(calls.setFile[0]).toMatchObject({
-      remoteId: 'local-hash',
+      remoteId: uploadedHash,
       remoteFileId: confirmed ? 'server-id' : null,
       remoteMtime: confirmed ? 3000 : 2000,
     });
@@ -467,7 +467,7 @@ describe('[SPEC:CT-4] uploadFile sends the creation time with the PUT', () => {
     return calls.uploadOpts[0];
   }
 
-  it('sends the content checksum, revision and creation time together', async () => {
+  it('passes the conditional ETag, ctime and revision callback', async () => {
     const opts = await optsOf(T_OLD, { etag: '"r9"', creationTime: T_NEW });
     expect(opts).toEqual({ precomputedSha256: expect.any(String), ifMatchEtag: '"r9"', ctime: T_OLD, onUploadedEtag: expect.any(Function) });
   });

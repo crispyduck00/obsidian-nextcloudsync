@@ -64,7 +64,8 @@ describe('SyncEngine first upload creation time (executePlan, C4)', () => {
     expect(args[3]).toBe(MTIME);
     expect(args[4]).toEqual({
       ifMatchEtag: null, precomputedSha256: expect.any(String), ctime: LOCAL_CTIME, onlyIfAbsent: true,
-      onCreatedFileId: expect.any(Function), onUploadedEtag: expect.any(Function),
+      onCreatedFileId: expect.any(Function),
+      onUploadedEtag: expect.any(Function),
     });
   });
 

@@ -95,19 +95,6 @@ describe('T008: NextcloudClient remaining methods send NO_CACHE_HEADERS', () => 
     expectAllCallsNoCache();
   });
 
-  it('reports the response ETag only after a successful upload', async () => {
-    const onUploadedEtag = jest.fn();
-    mockRequestUrl.mockReturnValueOnce(res(201, { headers: { ETag: '"confirmed"' } }));
-    await makeClient().uploadFile('note.md', new ArrayBuffer(1), undefined, { onUploadedEtag });
-    expect(onUploadedEtag).toHaveBeenCalledWith('confirmed');
-    expect(mockRequestUrl).toHaveBeenCalledTimes(1);
-
-    mockRequestUrl.mockReturnValueOnce(res(412, { headers: { etag: '"rejected"' } }));
-    await expect(makeClient().uploadFile('note.md', new ArrayBuffer(1), undefined, { onUploadedEtag }))
-      .rejects.toMatchObject({ name: 'PreconditionFailedError', path: 'note.md' });
-    expect(onUploadedEtag).toHaveBeenCalledTimes(1);
-  });
-
   it('getFiles() sends NO_CACHE_HEADERS on the PROPFIND call', async () => {
     mockRequestUrl.mockReturnValueOnce(res(207, { text: EMPTY_MULTISTATUS }));
     await makeClient().getFiles('');

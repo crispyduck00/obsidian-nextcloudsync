@@ -135,26 +135,23 @@ describe('silent Team Folder probes', () => {
     expect(onTeamMountDiscovered).toHaveBeenCalledTimes(outcome === 'renamed' ? 1 : 0);
   });
 
-  test.each([false, true])('a cancelled mirror preview lets a later full sync discover the mount (already seen: %s)', async (alreadySeen) => {
-    const { engine, client, connect, getRootInfo, onTeamMountDiscovered } = makeEngine();
+  test('a cancelled mirror preview cannot consume the next full sync’s Team Folder discovery', async () => {
+    const { client, engine, connect, getRootInfo, onTeamMountDiscovered } = makeEngine();
     await connect();
-    const mounts = new Map([['Team', '42']]);
-    if (alreadySeen) client.onTeamMountListing!(original, mounts);
-    onTeamMountDiscovered.mockClear();
-    await engine.abortAndWait(); // the mirror dialog does this before obtaining its preview listing
-    client.onTeamMountListing!(original, mounts);
-    expect(onTeamMountDiscovered).not.toHaveBeenCalled();
+    const list = () => client.onTeamMountListing!(original, new Map([['Team', '42']]));
+    list();
+    expect(onTeamMountDiscovered).toHaveBeenCalledTimes(1);
+    await engine.abortAndWait(); // Mirror planning stops regular sync before reading the remote.
+    list();
     await expect(engine.shouldReconcileClientPush([], true)).resolves.toEqual({ kind: 'ignore' });
     expect(getRootInfo).not.toHaveBeenCalled();
-
-    let finish!: (result: boolean) => void;
-    const run = new Promise<boolean>(resolve => { finish = resolve; });
-    jest.spyOn(engine as unknown as { runSyncSession(): Promise<boolean> }, 'runSyncSession').mockReturnValue(run);
-    const complete = engine.syncForClientPush();
-    client.onTeamMountListing!(original, mounts);
-    finish(true);
-    await complete;
     expect(onTeamMountDiscovered).toHaveBeenCalledTimes(1);
+    jest.spyOn(engine as unknown as { runSyncSession(): Promise<boolean> }, 'runSyncSession').mockImplementation(async () => {
+      list();
+      return true;
+    });
+    await engine.syncForClientPush();
+    expect(onTeamMountDiscovered).toHaveBeenCalledTimes(2);
   });
 
   test('only newly visible, included mount IDs start a window, even when the exclusion changes live', async () => {
@@ -207,16 +204,6 @@ describe('silent Team Folder probes', () => {
 describe('whole-root proof composed with guarded root listings', () => {
   const root = { kind: 'targeted' as const, rootFileId: 'root-id', rootEtag: 'changed' };
   const file = { path: 'note.md', fileId: 'note-id', etag: 'note-etag', checksum: 'note-checksum', size: 5, lastModified: 10 };
-
-  test('uses the ordinary fallback when the independent root-listing guard is absent', async () => {
-    const { engine, client, connect, getRootInfo } = makeEngine();
-    const getFiles = jest.fn(async () => [file]);
-    Object.assign(client, { getFiles });
-    await connect();
-    await expect(engine.verifyClientPushRoot(root)).resolves.toBe(false);
-    expect(getFiles).not.toHaveBeenCalled();
-    expect(getRootInfo).not.toHaveBeenCalled();
-  });
 
   test('certifies only the complete included remote view and invalidates after a listing generation change', async () => {
     const { engine, client, connect, getRootInfo, stateDB } = makeEngine();

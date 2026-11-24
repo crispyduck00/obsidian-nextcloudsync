@@ -5,6 +5,12 @@ import { LocalAdapter } from '../../../src/data/LocalAdapter';
 import { DEFAULT_SETTINGS } from '../../../src/types';
 import { Platform, requestUrl } from 'obsidian';
 
+jest.mock('../../../src/ui/MobileSyncStatusItem', () => ({
+  MobileSyncStatusItem: jest.fn(() => ({
+    setNetworkAvailable() {}, setConflictCount() {}, setRealtimeState() {}, destroy() {},
+  })),
+}));
+
 function deferred() {
   let resolve!: () => void;
   const promise = new Promise<void>(done => { resolve = done; });
@@ -15,12 +21,13 @@ function host() {
   const adapter = { exists: jest.fn(async () => false) };
   const plugin = new Plugin({ vault: { configDir: '.obsidian', getName: () => 'Test', adapter }, workspace: {} } as never,
     { id: 'fast-nextcloud-sync' } as never);
-  plugin.settings = { ...DEFAULT_SETTINGS, deviceId: 'test-device', startupSyncDelaySeconds: 1 };
-  const internals = plugin as unknown as { logger: unknown };
+  plugin.settings = { ...DEFAULT_SETTINGS, deviceId: 'test-device', useClientPush: true, startupSyncDelaySeconds: 1 };
+  const internals = plugin as unknown as { logger: unknown; initClientPush(): void };
   internals.logger = { log() {} };
+  const push = jest.spyOn(internals, 'initClientPush').mockImplementation(() => {});
   const interval = jest.spyOn(plugin, 'applyAutoSyncInterval').mockImplementation(() => {});
   const settings = jest.spyOn(plugin, 'addSettingTab').mockImplementation(() => {});
-  return { plugin, adapter, interval, settings };
+  return { plugin, adapter, push, interval, settings };
 }
 
 async function untilStarted(started: () => boolean): Promise<void> {
@@ -49,6 +56,7 @@ describe('unload during asynchronous plugin initialization', () => {
     h.plugin.onunload();
     await init;
     expect(h.plugin.syncEngine).toBeUndefined();
+    expect(h.push).not.toHaveBeenCalled();
     expect(h.interval).not.toHaveBeenCalled();
     expect(jest.getTimerCount()).toBe(0);
     expect(requestUrl).not.toHaveBeenCalled();
@@ -67,6 +75,7 @@ describe('unload during asynchronous plugin initialization', () => {
     await init;
     expect(h.plugin.syncEngine).toBeUndefined();
     expect(dispose).toHaveBeenCalled();
+    expect(h.push).not.toHaveBeenCalled();
     expect(h.interval).not.toHaveBeenCalled();
     expect(jest.getTimerCount()).toBe(0);
     expect(requestUrl).not.toHaveBeenCalled();
@@ -78,12 +87,14 @@ describe('unload during asynchronous plugin initialization', () => {
     await h.plugin.initSyncEngine();
     expect(h.plugin.syncEngine).toBeUndefined();
     expect(h.adapter.exists).not.toHaveBeenCalled();
+    expect(h.push).not.toHaveBeenCalled();
   });
 
   test('initializes an active instance normally and runs its startup sync once', async () => {
     const h = host();
     await h.plugin.initSyncEngine();
     expect(h.plugin.syncEngine).toBeDefined();
+    expect(h.push).toHaveBeenCalledTimes(1);
     expect(h.interval).toHaveBeenCalledTimes(1);
     const sync = jest.spyOn(h.plugin.syncEngine!, 'syncManual').mockResolvedValue();
     await jest.advanceTimersByTimeAsync(1000);
@@ -116,6 +127,7 @@ describe('unload during asynchronous plugin initialization', () => {
     await startup;
     expect(h.settings).not.toHaveBeenCalled();
     expect(h.plugin.syncEngine).toBeUndefined();
+    expect(h.push).not.toHaveBeenCalled();
     expect(requestUrl).not.toHaveBeenCalled();
   });
 });
