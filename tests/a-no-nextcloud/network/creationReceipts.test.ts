@@ -63,7 +63,11 @@ describe('first-creation identity receipts', () => {
     const c = client();
     const finished = jest.fn();
     const begin = jest.fn(() => finished);
-    c.trackKnownDirectories({ getDir: () => undefined }, begin);
+    c.trackKnownDirectories({
+      getDir: () => undefined,
+      getRemoteRootFileId: () => null,
+      setRemoteRootFileId: () => undefined,
+    }, begin);
     await c.createDirectory('new folder').catch(() => undefined);
     expect(begin.mock.calls).toEqual([['new folder']]);
     expect(finished.mock.calls).toEqual([[status === 201 ? '61' : null]]);
