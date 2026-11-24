@@ -57,9 +57,9 @@ async function buildEngine(localAdapter: Record<string, unknown>, client: Record
 const callDownload = (e: SyncEngine, r: RemoteFileInfo) =>
   (e as unknown as { downloadFile: (r: RemoteFileInfo, id: string, t: string, s: SyncSessionSummary) => Promise<void> })
     .downloadFile(r, 'e', 'etag', makeSummary());
-const callUpload = (e: SyncEngine, path: string, r: RemoteFileInfo) =>
-  (e as unknown as { uploadFile: (p: string, h: string, id: string, t: string, r: RemoteFileInfo, s: SyncSessionSummary) => Promise<void> })
-    .uploadFile(path, 'lh', 'e', 'etag', r, makeSummary());
+const callUpload = (e: SyncEngine, r: RemoteFileInfo) =>
+  (e as unknown as { uploadFile: (r: RemoteFileInfo, s: SyncSessionSummary) => Promise<void> })
+    .uploadFile(r, makeSummary());
 
 describe('[SPEC:MB-5] download records base (Auto Merge File text)', () => {
   it('stores the downloaded body as base for a .md file', async () => {
@@ -95,7 +95,7 @@ describe('[SPEC:MB-6] upload records base', () => {
       readBinary: jest.fn(async () => toBuf('world')),
     };
     const { engine, baseStore } = await buildEngine(localAdapter, {});
-    await callUpload(engine, 'note.md', remoteOf('note.md', 5));
+    await callUpload(engine, remoteOf('note.md', 5));
     expect(baseStore.set).toHaveBeenCalledWith('note.md', 'world');
   });
 });

@@ -126,20 +126,43 @@ describe('TransferService.uploadFile', () => {
   it('does nothing when the local file has vanished', async () => {
     const { transfer, client, uploadStrategy, calls, setLocal } = build();
     setLocal(null);
-    await transfer.uploadFile(client, uploadStrategy, 'note.md', 'h', 'r', 'etag', remote(), summary());
+    await transfer.uploadFile(client, uploadStrategy, remote(), summary());
     expect(calls.put).toEqual([]);
   });
 
   it('sends the known remote etag as a precondition so a changed remote is rejected', async () => {
     const { transfer, client, uploadStrategy, calls } = build();
-    await transfer.uploadFile(client, uploadStrategy, 'note.md', 'h', 'r', 'etag', remote({ etag: '"r9"' }), summary());
+    await transfer.uploadFile(client, uploadStrategy, remote({ etag: '"r9"' }), summary());
     expect(calls.put).toEqual([{ path: 'note.md', ifMatch: '"r9"' }]);
   });
 
   it('sends no precondition for a file that is not on the server yet', async () => {
     const { transfer, client, uploadStrategy, calls } = build();
-    await transfer.uploadFile(client, uploadStrategy, 'new.md', 'h', 'r', 'etag', remote({ etag: null }), summary());
+    await transfer.uploadFile(client, uploadStrategy, remote({ path: 'new.md', etag: null }), summary());
     expect(calls.put[0].ifMatch).toBeNull();
+  });
+
+  it('keeps a later same-size edit pending while the previous PUT is in flight', async () => {
+    let mtime = 1000;
+    let body = 'first';
+    const { transfer, client, calls } = build({}, {
+      localAdapter: {
+        stat: async () => ({ size: 5, mtime }),
+        readBinary: async () => new TextEncoder().encode(body).buffer,
+        atomicWriteBinary: jest.fn(),
+      },
+    });
+    const upload: IUploadStrategy['upload'] = async (_client, _path, sent, _mtime, options) => {
+      expect(new TextDecoder().decode(sent)).toBe('first');
+      expect(options?.precomputedSha256).toBe(await sha256(sent));
+      body = 'later';
+      mtime = 5000;
+      return 'uploaded';
+    };
+    await transfer.uploadFile(client, { upload }, remote(), summary());
+    expect(calls.setFile[0]).toMatchObject({
+      localSize: 5, localMtime: 1000, localHash: await sha256(new TextEncoder().encode('first').buffer),
+    });
   });
 
   it('records the hash of what the server now holds, not what it held before', async () => {
@@ -147,16 +170,16 @@ describe('TransferService.uploadFile', () => {
     // we had just uploaded, forever.
     const { transfer, client, uploadStrategy, calls } = build();
     const s = summary();
-    await transfer.uploadFile(client, uploadStrategy, 'note.md', 'local-hash', 'OLD-REMOTE', 'etag', remote(), s);
+    await transfer.uploadFile(client, uploadStrategy, remote(), s);
     expect(s.uploadedCount).toBe(1);
-    expect(calls.setFile[0]).toMatchObject({ remoteId: 'local-hash', idType: 'sha256', isConflicted: false });
+    expect(calls.setFile[0]).toMatchObject({ remoteId: await sha256(new TextEncoder().encode('local body').buffer), idType: 'sha256', isConflicted: false });
     expect(calls.history).toEqual(['uploaded:note.md']);
     expect(calls.mergeBase).toEqual(['note.md']);
   });
 
   it('stamps the post-write stat signature so the next sync can skip re-hashing', async () => {
     const { transfer, client, uploadStrategy, calls } = build();
-    await transfer.uploadFile(client, uploadStrategy, 'note.md', 'h', 'r', 'etag', remote(), summary());
+    await transfer.uploadFile(client, uploadStrategy, remote(), summary());
     expect(calls.setFile[0]).toMatchObject({ localMtime: 1234 });
   });
 
@@ -177,7 +200,7 @@ describe('TransferService.uploadFile', () => {
   it('records nothing when the strategy skipped the upload [SPEC:OSN-1]', async () => {
     const { transfer, client, uploadStrategy, calls } = build({ upload: 'skipped' });
     const s = summary();
-    await transfer.uploadFile(client, uploadStrategy, 'note.md', 'h', 'r', 'etag', remote(), s);
+    await transfer.uploadFile(client, uploadStrategy, remote(), s);
     expect(s.uploadedCount).toBe(0);
     expect(calls.setFile).toEqual([]);
     expect(calls.retries).toEqual([]); // a size skip is permanent, not transient
@@ -195,7 +218,7 @@ describe('TransferService.uploadFile', () => {
       upload: async () => { throw new Error('PUT failed'); },
     } as unknown as IUploadStrategy;
     await expect(
-      transfer.uploadFile(client, failing, 'note.md', 'h', 'r', 'etag', remote(), summary()),
+      transfer.uploadFile(client, failing, remote(), summary()),
     ).rejects.toThrow('PUT failed');
     expect(calls.setFile).toEqual([]);
     expect(calls.history).toEqual([]);
@@ -210,7 +233,7 @@ describe('TransferService — locking is fixed OFF, and that is the point', () =
 
   it('issues no lock request even when the server advertises the capability', async () => {
     const { transfer, client, uploadStrategy, calls } = build({ hasLocking: true });
-    await transfer.uploadFile(client, uploadStrategy, 'note.md', 'h', 'r', 'etag', remote(), summary());
+    await transfer.uploadFile(client, uploadStrategy, remote(), summary());
     expect(calls.lockAttempts).toBe(0);
     expect(calls.unlocked).toEqual([]);
     expect(calls.put).toHaveLength(1); // the upload still happens, guarded by If-Match instead
@@ -439,19 +462,19 @@ describe('[SPEC:CT-4] uploadFile sends the creation time with the PUT', () => {
 
   async function optsOf(localCtime: number | undefined, over: Partial<RemoteFileInfo>) {
     const { transfer, client, uploadStrategy, calls } = build({ localCtime });
-    await transfer.uploadFile(client, uploadStrategy, 'note.md', 'h', 'r', 'etag', remote(over), summary());
+    await transfer.uploadFile(client, uploadStrategy, remote(over), summary());
     expect(calls.uploadOpts).toHaveLength(1);
     return calls.uploadOpts[0];
   }
 
-  it('passes exactly { ifMatchEtag, ctime } as the fifth argument', async () => {
+  it('sends the content checksum, revision and creation time together', async () => {
     const opts = await optsOf(T_OLD, { etag: '"r9"', creationTime: T_NEW });
-    expect(opts).toEqual({ ifMatchEtag: '"r9"', ctime: T_OLD });
+    expect(opts).toEqual({ precomputedSha256: expect.any(String), ifMatchEtag: '"r9"', ctime: T_OLD });
   });
 
   it('sends ctime undefined when the server value is unknown', async () => {
     const opts = await optsOf(T_OLD, { creationTime: undefined });
-    expect(opts).toEqual({ ifMatchEtag: '"e1"', ctime: undefined });
+    expect(opts).toEqual({ precomputedSha256: expect.any(String), ifMatchEtag: '"e1"', ctime: undefined });
   });
 
   it('sends the local value when the server holds 0 and the local value is valid', async () => {

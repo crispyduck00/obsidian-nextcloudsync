@@ -9,7 +9,7 @@ import { IWebDAVClient } from '../../network/IWebDAVClient';
 import { IUploadStrategy, type UploadOutcome } from '../upload/IUploadStrategy';
 import { SyncJournal } from '../session/SyncJournal';
 import { MergeBaseRecorder } from '../session/MergeBaseRecorder';
-import { withLocalSignature } from '../../data/localSignature';
+import { localReadSignature, withLocalSignature } from '../../data/localSignature';
 import { FileLogger } from '../../util/FileLogger';
 import { FIXED } from '../../util/fixedSyncConfig';
 import { isAnomalousRemoteContent, isOverFileSizeLimit } from '../../util/limits';
@@ -54,15 +54,18 @@ export class TransferService {
 
   async uploadFile(
     client: IWebDAVClient, uploadStrategy: IUploadStrategy,
-    path: string, localHash: string, remoteId: string,
-    idType: FileState['idType'], remote: RemoteFileInfo,
+    remote: RemoteFileInfo,
     summary: SyncSessionSummary, onlyIfAbsent = false,
   ): Promise<void> {
+    const { path } = remote;
     if (this.deps.isRenameHeld?.(path)) return;
     const stat = await this.deps.localAdapter.stat(path);
     if (!stat) return;
 
+    const observedAt = Date.now();
     const data = await this.deps.localAdapter.readBinary(path);
+    const signature = localReadSignature(stat, observedAt, data.byteLength);
+    const localHash = await sha256(data);
 
     // A path locked by someone else is skipped and queued for retry.
     let token: string | null;
@@ -87,7 +90,7 @@ export class TransferService {
         // (PreconditionFailedError, a conflict). A new path must still be absent to create it.
         finish = onlyIfAbsent ? this.deps.beginFirstUpload?.(path) : undefined;
         outcome = await uploadStrategy.upload(client, path, data, stat.mtime, {
-          ifMatchEtag: remote.etag,
+          precomputedSha256: localHash, ifMatchEtag: remote.etag,
           ...(remote.checksum ? { expectedRemoteChecksum: remote.checksum } : {}),
           ...(onlyIfAbsent ? { onlyIfAbsent, onCreatedFileId: (id: string) => { createdFileId = id; } } : {}),
           ctime: uploadCreationTimeMs(stat.ctime, remote.creationTime),
@@ -112,8 +115,8 @@ export class TransferService {
       let uploadedRemoteId = localHash;
       let uploadedIdType: FileState['idType'] = 'sha256';
       let uploadedFileId = createdFileId ?? remote.fileId;
-      let uploadedRemoteMtime = remote.lastModified;
       const reportsChecksums = this.deps.clientReportsChecksums();
+      let uploadedRemoteMtime = remote.lastModified;
       if (!reportsChecksums || (onlyIfAbsent && !uploadedFileId)) {
         try {
           const fresh = await client.statFile(path);
@@ -132,14 +135,16 @@ export class TransferService {
       }
       this.deps.journal.recordHistory(path, 'uploaded', undefined, {
         localHash, remoteId: uploadedRemoteId, remoteIdType: uploadedIdType,
-        localSize: stat.size, remoteSize: remote.size,
+        localSize: data.byteLength, remoteSize: remote.size,
       });
 
-      this.deps.stateDB.setFile(await withLocalSignature(this.deps.localAdapter, {
+      // A later stat may already describe the user's next edit while the PUT was in flight.
+      this.deps.stateDB.setFile({
         path, localHash, remoteId: uploadedRemoteId, idType: uploadedIdType,
-        size: stat.size, mtime: stat.mtime,
+        size: data.byteLength, mtime: stat.mtime, ...signature,
         remoteFileId: uploadedFileId, isConflicted: false,
-      }, uploadedRemoteMtime));
+        remoteMtime: uploadedRemoteMtime,
+      });
       // The remote now equals the uploaded body, so it is the new merge base.
       this.deps.mergeBase.recordBytes(path, data);
       recorded = outcome;

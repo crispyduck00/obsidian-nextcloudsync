@@ -1,6 +1,6 @@
 import { App, Notice, Platform, TFolder, apiVersion } from 'obsidian';
+import { hashLocalFile } from '../data/localSignature';
 import { CreationTimeAligner } from './ctime/CreationTimeAligner';
-import { uploadCreationTimeMs } from '../util/creationTime';
 import {
   DavSyncSettings,
   FileState,
@@ -39,7 +39,6 @@ import { RemoteListingSource, type FullScanListing } from './scan/RemoteListingS
 import { SyncJournal } from './session/SyncJournal';
 import { OversizeSkipNotifier } from './session/OversizeSkipNotifier';
 import { MergeBaseRecorder } from './session/MergeBaseRecorder';
-import { withLocalSignature } from '../data/localSignature';
 import { TransferService } from './transfer/TransferService';
 import { VersionService, VersionComparison } from './versions/VersionService';
 import { LineHistoryResult } from './versions/lineHistory';
@@ -1210,10 +1209,6 @@ export class SyncEngine {
     return effectiveMassDeleteLimit(this.opts.settings.massDeleteLimit, tracked);
   }
 
-  private recordMergeBase(path: string, body: ArrayBuffer): void {
-    this.mergeBase.recordBytes(path, body);
-  }
-
   private dropMergeBase(path: string): void {
     this.mergeBase.drop(path);
   }
@@ -1693,10 +1688,6 @@ export class SyncEngine {
     });
   }
 
-  private withLocalSignature(fs: FileState, remoteMtime?: number | null): Promise<FileState> {
-    return withLocalSignature(this.opts.localAdapter, fs, remoteMtime);
-  }
-
   // Concurrency is capped by networkConcurrency AND by in-flight bytes (ByteSemaphore): requestUrl buffers whole bodies,
   // so a count-only cap would OOM on large files. With serializeByDir, same-directory workers run sequentially to avoid
   // directory-lock 423s. Workers must handle their own errors and never reject the batch (docs/plan.md §11).
@@ -1751,8 +1742,7 @@ export class SyncEngine {
       // Skip reading/hashing while the post-write stat signature still matches; unlike on-disk mtime, it is valid on mobile
       // (docs/plan.md §4).
       if (base.checkAfterFolderMove || !this.isLocallyUnchanged(base, localStat)) {
-        const buf = await this.opts.localAdapter.readBinary(remote.path);
-        localHash = await sha256(buf);
+        localHash = await hashLocalFile(this.opts.localAdapter, this.opts.stateDB, remote.path, localStat, base);
         localChanged = localHash !== base.localHash;
       }
     } else if (localStat) {
@@ -1784,7 +1774,7 @@ export class SyncEngine {
         try { state.isConflicted = hasCompleteMarkerSet(await this.opts.localAdapter.read(remote.path)); }
         catch { state.isConflicted = true; }
       }
-      this.opts.stateDB.setFile(await this.withLocalSignature(state, remote.lastModified));
+      this.opts.stateDB.setFile({ ...state, localMtime: localStat.mtime, localSize: localStat.size, remoteMtime: remote.lastModified });
       await this.creationTime.align(this.client!, remote, localStat);
       return;
     }
@@ -1836,7 +1826,7 @@ export class SyncEngine {
     }
 
     if (localChanged && !remoteChanged) {
-      await this.uploadOrConflict(remote, base, localHash, remoteId, idType, summary);
+      await this.uploadOrConflict(remote, base, remoteId, idType, summary);
     } else if (!localChanged && remoteChanged) {
       if (this.deferIfBeingEdited(remote.path, 'download')) return;
       await this.downloadFile(remote, remoteId, idType, summary, { stat: localStat, hash: localStat ? localHash : undefined });
@@ -1848,7 +1838,7 @@ export class SyncEngine {
 
   // If-Match 412: the remote changed between PROPFIND and PUT, so treat it as a conflict instead of overwriting (docs/spec.md §6.5).
   private async uploadOrConflict(
-    remote: RemoteFileInfo, base: FileState | undefined, localHash: string,
+    remote: RemoteFileInfo, base: FileState | undefined,
     remoteId: string, idType: FileState['idType'], summary: SyncSessionSummary,
   ): Promise<void> {
     try {
@@ -1864,7 +1854,7 @@ export class SyncEngine {
         }
         remote = current;
       }
-      await this.uploadFile(remote.path, localHash, remoteId, idType, remote, summary);
+      await this.uploadFile(remote, summary);
     } catch (err) {
       if (!(err instanceof PreconditionFailedError)) throw err;
       void this.opts.logger?.log(`upload: If-Match 412 (remote changed during sync) → conflict → ${remote.path}`);
@@ -1894,7 +1884,7 @@ export class SyncEngine {
         }
         return true;
       case 'upload':
-        await this.uploadOrConflict(remote, base, side.localHash, side.remoteId, side.idType, summary);
+        await this.uploadOrConflict(remote, base, side.remoteId, side.idType, summary);
         return true;
       case 'hold':
         await this.handleConflict(remote.path, base, remote, side.remoteId, side.idType, summary);
@@ -1933,12 +1923,10 @@ export class SyncEngine {
 
 
   private uploadFile(
-    path: string, localHash: string, remoteId: string,
-    idType: FileState['idType'], remote: RemoteFileInfo,
-    summary: SyncSessionSummary, onlyIfAbsent = false,
+    remote: RemoteFileInfo, summary: SyncSessionSummary, onlyIfAbsent = false,
   ): Promise<void> {
     return this.transfer.uploadFile(
-      this.client!, this.uploadStrategy!, path, localHash, remoteId, idType, remote, summary, onlyIfAbsent,
+      this.client!, this.uploadStrategy!, remote, summary, onlyIfAbsent,
     );
   }
 
@@ -2079,22 +2067,16 @@ export class SyncEngine {
       ([, st]) => st.size,
       async ([path, st]) => {
         const base = this.opts.stateDB.getFile(path);
-        const data = await this.opts.localAdapter.readBinary(path);
-        const localHash = await sha256(data);
-        if (base && localHash === base.localHash) return;
+        if (base && await hashLocalFile(this.opts.localAdapter, this.opts.stateDB, path, st, base) === base.localHash) return;
         const absentParent = isFullScan && missingParentOf(path);
         if (isFullScan && (base || absentParent)) {
           reportLocalChanges(absentParent || path, base);
           return;
         }
-        // For new files, use the local hash as remoteId (= the server checksum after upload).
-        const remoteId = base?.remoteId ?? localHash;
-        const idType: FileState['idType'] = base?.idType ?? 'sha256';
         void this.opts.logger?.log(`upload: ${path} (${base ? 'modified, re-upload' : 'new local file'})`);
         try {
           if (this.client!.inspectDirectory) await assertTrackedParentReadable(this.client!, this.opts.stateDB, path);
           await this.uploadFile(
-            path, localHash, remoteId, idType,
             { path, fileId: base?.remoteFileId ?? null, checksum: null, etag: null, size: st.size, lastModified: st.mtime, creationTime: 0 },
             summary, !base,
           );
@@ -2258,45 +2240,14 @@ export class SyncEngine {
       (path) => path,
       (path) => localFiles.get(path)?.size ?? 0,
       async (path) => {
-        let finish: ReturnType<SyncEngine['beginFirstUpload']> | undefined;
-        let recorded: 'uploaded' | 'skipped' | undefined;
-        let createdFileId: string | undefined;
         try {
           const lf = localFiles.get(path);
           if (!lf || this.isPathHeld(path)) return;
-          const data = await this.opts.localAdapter.readBinary(path);
-          // Hash from the bytes just read; reused for the OC-Checksum upload header so the client does not hash twice.
-          const localHash = await sha256(data);
-          // The local creation time is read before the upload; a server value for the same path is honoured (docs/spec.md §9.7).
-          const before = await this.opts.localAdapter.stat(path);
-          const ctime = uploadCreationTimeMs(before?.ctime, remoteMap.get(path)?.creationTime ?? 0);
-          if (!before || this.isPathHeld(path)) return;
-          finish = this.beginFirstUpload(path);
-          const outcome = await this.uploadStrategy!.upload(this.client!, path, data, lf.mtime, {
-            precomputedSha256: localHash, ctime, onlyIfAbsent: true,
-            onCreatedFileId: id => { createdFileId = id; },
-          });
-          if (outcome === 'skipped') {
-            recorded = outcome;
-            // Over the size limit: counted for the end-of-sync notice (docs/spec.md §9.4a). This batch bypasses uploadFile.
-            this.journal.recordOversizeSkip(summary, {
-              path, sizeBytes: data.byteLength, limitMB: this.opts.settings.maxFileSizeMB, direction: 'upload',
-            });
-            this.tickProgress();
-            return;
-          }
-          summary.uploadedCount++;
-          this.recordHistory(path, 'uploaded');
-          const stat = await this.opts.localAdapter.stat(path);
-          this.opts.stateDB.setFile(await this.withLocalSignature({
-            path, localHash, remoteId: localHash, idType: 'sha256', size: lf.size, mtime: stat?.mtime ?? 0,
-            remoteFileId: createdFileId ?? null, isConflicted: false,
-          }));
-          // This batch bypasses uploadFile, so it seeds its own merge base; without it a later concurrent edit duplicates shared blocks.
-          this.recordMergeBase(path, data);
-          recorded = outcome;
+          await this.uploadFile({
+            path, fileId: null, checksum: null, etag: null, size: lf.size, lastModified: 0,
+            creationTime: remoteMap.get(path)?.creationTime ?? 0,
+          }, summary, true);
         } catch (err) { this.recordError(summary, path, err); this.retryQueue.push(path); }
-        finally { finish?.(recorded, createdFileId); }
         this.tickProgress();
       },
       true,
@@ -2315,10 +2266,11 @@ export class SyncEngine {
       if (!lf || !remote) continue;
       const mtime = remote.lastModified || lf.mtime;
       // Classified unchanged only after localHash === remote.checksum, so the checksum is the content hash for both sides.
-      this.opts.stateDB.setFile(await this.withLocalSignature({
+      this.opts.stateDB.setFile({
         path, localHash: remote.checksum!, remoteId: remote.checksum!, idType: 'sha256',
         size: lf.size, mtime, remoteFileId: remote.fileId, isConflicted: false,
-      }, remote.lastModified));
+        localMtime: lf.mtime, localSize: lf.size, remoteMtime: remote.lastModified,
+      });
       await this.creationTime.align(this.client!, remote);
     }
 

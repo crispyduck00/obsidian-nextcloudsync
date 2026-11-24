@@ -26,7 +26,7 @@ import { DeletionService } from '../deletion/DeletionService';
 import { ResolutionService } from '../resolution/ResolutionService';
 import { isLocallyUnchanged } from '../policy';
 import { FileLogger } from '../../util/FileLogger';
-import { sha256 } from '../../util/hash';
+import { hashLocalFile } from '../../data/localSignature';
 import { AsyncMutex } from '../../util/AsyncMutex';
 import { assertTrackedParentReadable, type RemoteFolderGuard } from '../directory/RemoteFolderGuard';
 
@@ -43,7 +43,7 @@ export type RemoteFileReconcileResult = 'done' | 'deferred' | 'plugin-pending' |
 
 export interface WatchDeps {
   localAdapter: Pick<LocalAdapter, 'stat' | 'readBinary'>;
-  stateDB: Pick<StateDB, 'getFile' | 'deleteFile' | 'getDir' | 'setDir' | 'deleteDir' | 'requestSave' | 'getLastSyncTime'>
+  stateDB: Pick<StateDB, 'getFile' | 'setFile' | 'deleteFile' | 'getDir' | 'setDir' | 'deleteDir' | 'requestSave' | 'getLastSyncTime'>
     & Partial<Pick<StateDB, 'getRemoteRootFileId'>>;
   historyStore?: Pick<SyncHistoryStore, 'save'>;
   statusBar: IStatusBar;
@@ -246,9 +246,7 @@ export class WatchOperations {
     // Decide "nothing changed" from LOCAL data only, before touching the network: the stat-signature fast path
     // answers most saves without reading the file, and a miss falls back to hashing.
     if (base && this.locallyUnchanged(base, stat)) return;
-    const data = await this.deps.localAdapter.readBinary(path);
-    const localHash = await sha256(data);
-    if (base && localHash === base.localHash) return; // content unchanged (e.g. mtime-only touch)
+    if (base && await hashLocalFile(this.deps.localAdapter, this.deps.stateDB, path, stat, base) === base.localHash) return; // content unchanged (e.g. mtime-only touch)
 
     // A real summary: its counters decide whether to notify the user, and processFile maintains them as in a full sync.
     const summary = this.deps.journal.newSummary();
@@ -271,7 +269,6 @@ export class WatchOperations {
         void this.deps.logger?.log(`watch: not on remote → upload as new ${path}`);
         await this.deps.transfer.uploadFile(
           conn.client, conn.uploadStrategy,
-          path, localHash, localHash, 'sha256',
           { path, fileId: null, checksum: null, etag: null, size: stat.size, lastModified: stat.mtime, creationTime: 0 },
           summary, true,
         );

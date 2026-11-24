@@ -158,7 +158,7 @@ type Scenario = 'S1' | 'S2' | 'S3' | 'S4' | 'S5' | 'S6' | 'S7';
 const SCENARIOS: Scenario[] = ['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7'];
 
 interface EngineInternals {
-  uploadFile(p: string, h: string, id: string, t: string, r: RemoteFileInfo, s: SyncSessionSummary): Promise<void>;
+  uploadFile(r: RemoteFileInfo, s: SyncSessionSummary): Promise<void>;
   downloadFile(r: RemoteFileInfo, id: string, t: string, s: SyncSessionSummary): Promise<void>;
   handleConflict(p: string, b: undefined, r: RemoteFileInfo, id: string, t: string, s: SyncSessionSummary): Promise<void>;
   resolveByPreferLocal(p: string, r: RemoteFileInfo, s: SyncSessionSummary): Promise<void>;
@@ -188,7 +188,7 @@ async function runScenario(scenario: Scenario, path: string, throwOnDecode: bool
 
   const drive = (): Promise<void> => {
     switch (scenario) {
-      case 'S1': return e.uploadFile(path, 'lh', 'e', 'etag', remoteOf(path, body), summary);
+      case 'S1': return e.uploadFile(remoteOf(path, body), summary);
       case 'S2': return e.downloadFile(remote, 'e', 'etag', summary);
       case 'S3': return e.downloadFile(remote, 'e', 'etag', summary);
       case 'S4': return e.handleConflict(path, undefined, remote, 'e', 'etag', summary);
