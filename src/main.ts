@@ -1,5 +1,5 @@
 import { isUnderPluginsDir } from './sync/plugins/pluginPaths';
-import { App, Plugin, Notice, Platform, TFile, TFolder, TAbstractFile, debounce } from 'obsidian';
+import { App, Plugin, Notice, Platform, TFile, TFolder, TAbstractFile } from 'obsidian';
 import { AppPasswordReader, DavSyncSettings, DEFAULT_SETTINGS, FeatureUnsupportedError } from './types';
 import { NextcloudSyncSettingTab } from './settings/SettingTab';
 import { SyncEngine } from './sync/SyncEngine';
@@ -37,12 +37,12 @@ import { NextcloudPushClient } from './network/push/NextcloudPushClient';
 import { PushSyncScheduler } from './sync/push/PushSyncScheduler';
 import { ClientPushStatusItem } from './ui/ClientPushStatusItem';
 import { MobileWatchLifecycle } from './sync/watch/MobileWatchLifecycle';
+import { WatchFileQueue } from './sync/watch/WatchFileQueue';
+import { SLIDER_LIMITS } from './settings/sliderLimits';
 
 const MIN_OBSIDIAN_VERSION = '1.13.0';
 
-// How long after a keystroke a file counts as "being edited". Shared by the upload debounce and the
-// write-deferral guard and must stay one number: a shorter guard would reopen the window the guard
-// exists to close (docs/spec.md §5.7b).
+// Protect the editor from a remote write soon after a local save (docs/spec.md §5.7b).
 const EDIT_WINDOW_MS = 2000;
 
 export default class ObsidianNextcloudsync extends Plugin {
@@ -66,6 +66,7 @@ export default class ObsidianNextcloudsync extends Plugin {
   logger!: FileLogger;
   /** Android-only lifecycle state for opt-in foreground Watch mode. */
   private mobileWatch?: MobileWatchLifecycle;
+  private watchQueue?: WatchFileQueue;
   /** Compact Android sync-status item in the active view action strip. */
   private mobileSyncStatusItem?: import('./ui/MobileSyncStatusItem').MobileSyncStatusItem;
   /**
@@ -249,7 +250,6 @@ export default class ObsidianNextcloudsync extends Plugin {
 
       // Filter before the Android lifecycle can turn an irrelevant structural event into recovery.
       const isPluginEvent = (path: string): boolean => isUnderPluginsDir(path, this.app.vault.configDir);
-      const pendingUploads = new Set<string>();
       const mobileWatch = Platform.isMobile && !Platform.isIosApp
         ? new MobileWatchLifecycle({
             isEnabled: watchOn,
@@ -273,27 +273,25 @@ export default class ObsidianNextcloudsync extends Plugin {
         : null;
       this.mobileWatch = mobileWatch ?? undefined;
 
-      const queuePendingUpload = (path: string): void => {
-        if (mobileWatch) mobileWatch.queueFile(path);
-        else pendingUploads.add(path);
+      const watchQueue = new WatchFileQueue(
+        () => this.settings.watchDebounceSeconds * 1000,
+        () => watchOn() && (!mobileWatch || !document.hidden),
+        (paths) => {
+          if (mobileWatch) {
+            for (const path of paths) mobileWatch.queueFile(path);
+            if (!document.hidden) void mobileWatch.flushFiles();
+          } else {
+            for (const path of paths) void this.syncEngine?.syncSingleFile(path);
+          }
+        },
+      );
+      this.watchQueue = watchQueue;
+      const takePendingUpload = (path: string): boolean => {
+        const queued = watchQueue.take(path);
+        return (mobileWatch?.takePendingFile(path) ?? false) || queued;
       };
-      const takePendingUpload = (path: string): boolean =>
-        mobileWatch ? mobileWatch.takePendingFile(path) : pendingUploads.delete(path);
-
-      const flushPendingUploads = (): void => {
-        if (mobileWatch) {
-          void mobileWatch.flushFiles();
-          return;
-        }
-        const paths = [...pendingUploads];
-        pendingUploads.clear();
-        for (const path of paths) void this.syncEngine?.syncSingleFile(path);
-      };
-
-      const debouncedUpload = debounce(flushPendingUploads, EDIT_WINDOW_MS, true);
       const queueDebouncedFile = (path: string): void => {
-        queuePendingUpload(path);
-        if (!mobileWatch || !document.hidden) debouncedUpload();
+        if (watchOn()) watchQueue.add(path);
       };
 
       const guard = (file: TAbstractFile): file is TFile =>
@@ -378,6 +376,7 @@ export default class ObsidianNextcloudsync extends Plugin {
         const recheckContent = hadPendingUpload || this.localAdapter?.shouldIgnore(oldPath) === true;
 
         if (file instanceof TFolder) {
+          watchQueue.rebaseFolder(oldPath, file.path);
           this.syncEngine?.rememberFolderRename(oldPath, file.path);
           if (!watchOn()) return;
           runStructural(
@@ -402,7 +401,7 @@ export default class ObsidianNextcloudsync extends Plugin {
         if (!engine) {
           if (mobileWatch) {
             mobileWatch.markStructuralDirty(`rename file ${oldPath} → ${newPath} arrived before sync engine was ready`);
-            if (recheckContent) mobileWatch.queueFile(newPath);
+            if (recheckContent) queueDebouncedFile(file.path);
           }
           return;
         }
@@ -410,7 +409,7 @@ export default class ObsidianNextcloudsync extends Plugin {
         if (mobileWatch) {
           if (engine.isSyncRunning()) {
             mobileWatch.markStructuralDirty(`rename file ${oldPath} → ${newPath} arrived during full sync`, true);
-            if (recheckContent) mobileWatch.queueFile(newPath);
+            if (recheckContent) queueDebouncedFile(file.path);
             mobileWatch.onVisible(); // await the current full run, then reconcile the final structure
             return;
           }
@@ -420,7 +419,7 @@ export default class ObsidianNextcloudsync extends Plugin {
             () => engine.syncRememberedFileRenameForMobileWatch(oldPath, newPath),
             `rename file ${oldPath} → ${newPath}`,
           ).then((ran) => {
-              if (recheckContent) mobileWatch.queueFile(newPath);
+              if (recheckContent) queueDebouncedFile(file.path);
               if (!ran) {
                 mobileWatch.onVisible();
                 return;
@@ -433,7 +432,7 @@ export default class ObsidianNextcloudsync extends Plugin {
         const renamePromise = engine.syncRememberedFileRename(oldPath, newPath);
         if (recheckContent) {
           void renamePromise.then(
-            () => { void engine.syncSingleFile(newPath); },
+            () => queueDebouncedFile(file.path),
             () => undefined,
           );
         }
@@ -442,10 +441,14 @@ export default class ObsidianNextcloudsync extends Plugin {
       if (mobileWatch) {
         this.registerDomEvent(document, 'visibilitychange', () => {
           if (document.hidden) {
+            watchQueue.flushBeforeHide();
             mobileWatch.onHidden();
             return;
           }
-          queueMicrotask(() => mobileWatch.onVisible());
+          queueMicrotask(() => {
+            watchQueue.refresh();
+            mobileWatch.onVisible();
+          });
         });
         this.registerDomEvent(window, 'online', () => mobileWatch.onNetworkChanged());
         this.registerDomEvent(window, 'offline', () => mobileWatch.onNetworkChanged());
@@ -465,8 +468,15 @@ export default class ObsidianNextcloudsync extends Plugin {
 
   /** Re-evaluate Android Watch after a live Watch/Wi-Fi-only setting change. */
   reevaluateMobileWatchPolicy(): void {
+    if (!isWatchModeActive(this.settings.watchOnChangeEnabled, Platform.isMobile, Platform.isIosApp)) {
+      this.watchQueue?.clear();
+    }
     this.mobileWatch?.onNetworkChanged();
     this.pushSyncScheduler?.onNetworkChanged();
+  }
+
+  refreshWatchTiming(): void {
+    this.watchQueue?.refresh();
   }
 
   /**
@@ -735,6 +745,7 @@ export default class ObsidianNextcloudsync extends Plugin {
   // Without this on re-login/account switch, the old engine's auto-sync timer keeps running, its
   // status-bar item is never removed, and two engines read/write the same StateDB concurrently.
   private teardownSyncEngine(): void {
+    this.watchQueue?.clear();
     this.teardownClientPush();
     this.syncEngine?.stopAutoSync();
     // Order matters: signal an in-flight sync to stop pulling new work, then flush pending debounced
@@ -753,6 +764,10 @@ export default class ObsidianNextcloudsync extends Plugin {
   async loadSettings(): Promise<void> {
     const saved = (await this.loadData() ?? {}) as Partial<DavSyncSettings>;
     this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
+    const watchDelay = this.settings.watchDebounceSeconds;
+    this.settings.watchDebounceSeconds = Number.isFinite(watchDelay)
+      ? Math.max(0, Math.min(SLIDER_LIMITS.watchDebounce.max, watchDelay))
+      : DEFAULT_SETTINGS.watchDebounceSeconds;
 
     // Migrations below must run before pruneObsoleteSettings drops the keys they read.
     this.settings.configSync = { ...DEFAULT_SETTINGS.configSync };

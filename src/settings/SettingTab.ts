@@ -50,6 +50,10 @@ export class NextcloudSyncSettingTab extends PluginSettingTab implements Setting
     return buildSettingDefinitions(this);
   }
 
+  refreshWatchTiming(): void {
+    this.plugin.refreshWatchTiming();
+  }
+
   // Resolved by key path (dotted keys address nested values, e.g. configSync.bookmarks) so a `key` cannot drift
   // from its stored value without the layer-a integrity check noticing.
   getControlValue(key: string): unknown {

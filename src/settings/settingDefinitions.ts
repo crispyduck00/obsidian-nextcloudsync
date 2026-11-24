@@ -29,6 +29,7 @@ export interface SettingDefinitionsHost {
   syncTargetUrl(): string;
   /** Current Client Push runtime state, including the detected/overridden endpoint when known. */
   clientPushStatusSummary(): string;
+  refreshWatchTiming?(): void;
 
   runSyncNow(): unknown;
   runRemoteMirror(): unknown;
@@ -86,6 +87,7 @@ export const RENDER_ONLY_ROWS = {
     'syncIntervalMinutes',
     'networkTimeoutSeconds',
     'networkConcurrency',
+    'watchDebounceSeconds',
     'maxFileSizeMB',
     'excludedFolders',         // list plus an add row with its own folder picker
     'autoMergeFileTypes',      // string[] shown comma-joined; needs a parse/format round-trip
@@ -102,7 +104,7 @@ const CONFLICT_STRATEGY_OPTIONS = {
 
 // Called on every render (obsidian.d.ts:6577-6583), so the row set is dynamic: one row per excluded folder, and two
 // config-category rows, the community plugin warning, one row per synced plugin and `Choose plugins…` only while the master toggle is on.
-// The count is 30 + excludedFolders.length + (syncConfigFolder ? 2 + 2 + syncedCommunityPlugins.length : 0).
+// Exclusions and the config-folder group add their rows at render time.
 export function buildSettingDefinitions(host: SettingDefinitionsHost): SettingDefinitionItem[] {
   return [
     topGroup(host),
@@ -328,6 +330,16 @@ function syncGroup(host: SettingDefinitionsHost): SettingDefinitionGroup {
       aliases: ['watch', 'auto sync', 'realtime', 'live', 'on save'],
       control: { type: 'toggle', key: 'watchOnChangeEnabled', disabled: () => host.isIosApp },
     },
+    slider(
+      host,
+      'Watch delay after an edit (seconds)',
+      'Wait this long after the last change to each file before Sync on file change uploads it.',
+      ['debounce', 'delay', 'watch'],
+      SLIDER_LIMITS.watchDebounce,
+      () => s.watchDebounceSeconds,
+      (v) => { s.watchDebounceSeconds = v; },
+      () => host.refreshWatchTiming?.(),
+    ),
     slider(
       host,
       'Maximum file size (MB)',

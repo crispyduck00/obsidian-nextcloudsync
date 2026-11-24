@@ -48,6 +48,7 @@ const BASELINE: { heading: string | null; rows: string[] }[] = [
       'Network concurrency',
       'Sync on Wi-Fi only',
       'Sync on file change',
+      'Watch delay after an edit (seconds)',
       'Maximum file size (MB)',
     ],
   },
@@ -68,7 +69,7 @@ const BASELINE: { heading: string | null; rows: string[] }[] = [
   { heading: 'Maintenance', rows: ['Reset vault index', 'Mirror from remote', 'Last session summary'] },
 ];
 
-const STATIC_ROW_COUNT = BASELINE.reduce((n, s) => n + s.rows.length, 0); // 30
+const STATIC_ROW_COUNT = BASELINE.reduce((n, s) => n + s.rows.length, 0);
 
 function makeHost(over: Partial<SettingDefinitionsHost> = {}): SettingDefinitionsHost {
   return {
@@ -186,7 +187,7 @@ describe('[SPEC:DSD-2] row count is dynamic, not a constant', () => {
     { syncConfigFolder: true, syncedCommunityPlugins: [] },
     { syncConfigFolder: true, syncedCommunityPlugins: ['a', 'b'] },
     { syncConfigFolder: true, syncedCommunityPlugins: ['a', 'b'], excludedFolders: ['x', 'y', 'z'] },
-  ])('counts 27 + excluded + (master ? 4 + plugins : 0) rows for %j', (s) => {
+  ])('counts static and enabled dynamic rows for %j', (s) => {
     expect(countRows(s)).toBe(expected(s));
   });
 

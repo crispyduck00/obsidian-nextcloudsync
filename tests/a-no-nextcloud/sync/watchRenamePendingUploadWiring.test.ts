@@ -36,7 +36,7 @@ describe('watch rename preserves a pending debounced edit', () => {
 
     const rename = desktop.indexOf('const renamePromise = engine.syncRememberedFileRename(oldPath, newPath);');
     const pendingGuard = desktop.indexOf('if (recheckContent)', rename);
-    const reconcile = desktop.indexOf('void engine.syncSingleFile(newPath);', pendingGuard);
+    const reconcile = desktop.indexOf('queueDebouncedFile(file.path)', pendingGuard);
 
     expect(rename).toBeGreaterThanOrEqual(0);
     expect(pendingGuard).toBeGreaterThan(rename);
