@@ -1,4 +1,4 @@
-import { App, Notice, Platform, apiVersion } from 'obsidian';
+import { App, Notice, Platform, TFolder, apiVersion } from 'obsidian';
 import { CreationTimeAligner } from './ctime/CreationTimeAligner';
 import { uploadCreationTimeMs } from '../util/creationTime';
 import {
@@ -55,6 +55,7 @@ import { IStatusBar } from '../ui/StatusBarItem';
 import { WebDAVFactory } from '../network/WebDAVFactory';
 import { IWebDAVClient } from '../network/IWebDAVClient';
 import { RenameTracker } from './RenameTracker';
+import { ancestorsOf } from '../network/RemoteDirCache';
 import { ConfigSyncResolver } from './ConfigSyncResolver';
 import { PluginSyncCoordinator } from './plugins/PluginSyncCoordinator';
 import { partitionPluginManifestsLast, pluginDirPath } from './plugins/pluginPaths';
@@ -155,6 +156,7 @@ export class SyncEngine {
   // Summary counters cannot say: conflicts settled by a deterministic strategy count as plain uploads/downloads.
   private conflictEncounters = 0;
   private renameTracker: RenameTracker | null = null;
+  private readonly observedFolderDeletes = new Map<string, { scope: string; fileId: string | null }>();
   // Single source of truth for which config-folder paths sync (shared by isSystemExcluded, the remote filter
   // and the remote-deletion scope guard).
   private readonly configSync: ConfigSyncResolver;
@@ -229,6 +231,7 @@ export class SyncEngine {
     this.versions = new VersionService({ localAdapter: opts.localAdapter, stateDB: opts.stateDB });
     this.remoteFolders = new RemoteFolderGuard(opts.app, opts.stateDB);
     this.deletion = new DeletionService({
+      canDeleteMissingChild: (path, summary) => this.canDeleteMissingChild(path, summary),
       app: opts.app,
       localAdapter: opts.localAdapter,
       isBeingEdited: opts.isBeingEdited,
@@ -366,6 +369,16 @@ export class SyncEngine {
       });
     }
     return this.renameTracker;
+  }
+
+  private fileRenameScope(): string {
+    const { serverUrl, username } = this.opts.settings;
+    let endpoint = serverUrl ?? '';
+    try {
+      const url = new URL(endpoint);
+      endpoint = url.origin + url.pathname.replace(/\/+$/, '');
+    } catch { endpoint = ''; }
+    return JSON.stringify([endpoint, username, this.opts.app.vault?.getName?.()]);
   }
 
   /** Lists community plugins on this device and (when reachable) the server for the picker. */
@@ -584,6 +597,53 @@ export class SyncEngine {
     return this.watch.deleteSingleFile(path);
   }
 
+  rememberFolderDeletion(path: string): void {
+    const base = this.opts.stateDB.getDir(path);
+    if (base) {
+      this.observedFolderDeletes.set(path, { scope: this.fileRenameScope(), fileId: base.remoteFileId });
+    }
+  }
+
+  forgetFolderDeletion(path: string): void {
+    for (const previous of this.observedFolderDeletes.keys()) {
+      if (previous === path || previous.startsWith(path + '/') || path.startsWith(previous + '/')) this.observedFolderDeletes.delete(previous);
+    }
+  }
+
+  private async canDeleteMissingChild(path: string, summary: SyncSessionSummary): Promise<boolean> {
+    return this.canDeleteFromMissingFolder(parentDirOf(path), summary);
+  }
+
+  private async canDeleteFromMissingFolder(
+    folder: string, summary: SyncSessionSummary, listedDirectoryId?: string,
+  ): Promise<boolean> {
+    let missing: string | undefined;
+    for (let parent = folder; parent; parent = parentDirOf(parent)) {
+      const dir = this.opts.stateDB.getDir(parent);
+      if (!dir) continue;
+      if (await this.opts.localAdapter.isFolder(parent)) {
+        this.observedFolderDeletes.delete(parent);
+        break;
+      }
+      missing = parent;
+      const observed = this.observedFolderDeletes.get(parent);
+      if (observed?.fileId === dir.remoteFileId && observed.scope === this.fileRenameScope()) {
+        // Record the verified missing descendant before a sibling download can recreate the
+        // ancestor locally. Subsequent file work still has to prove each individual deletion.
+        if (listedDirectoryId && parent !== folder
+            && this.opts.stateDB.getDir(folder)?.remoteFileId === listedDirectoryId) {
+          this.observedFolderDeletes.set(folder, { scope: observed.scope, fileId: listedDirectoryId });
+        }
+        return true;
+      }
+    }
+    if (!missing) return true;
+    if (!summary.errors.some(error => error.path === missing)) {
+      this.recordError(summary, missing, new Error('This local folder disappeared without a recorded move or deletion. Its Nextcloud files were kept. Review both sides before deleting or moving the folder in Nextcloud.'));
+    }
+    return false;
+  }
+
   renameSingleFile(oldPath: string, newPath: string): Promise<void> {
     return this.watch.renameSingleFile(oldPath, newPath);
   }
@@ -593,10 +653,12 @@ export class SyncEngine {
   }
 
   deleteSingleFolder(path: string): Promise<void> {
+    this.rememberFolderDeletion(path);
     return this.watch.deleteSingleFolder(path);
   }
 
   renameSingleFolder(oldPath: string, newPath: string): Promise<void> {
+    this.forgetFolderDeletion(newPath);
     return this.watch.renameSingleFolder(oldPath, newPath);
   }
 
@@ -940,16 +1002,29 @@ export class SyncEngine {
     }
 
     const replaced = replacedRemoteFolders(remoteDirs ?? [], this.opts.stateDB, path => this.isSystemExcluded(path));
-    const isHeld = (path: string): boolean => replaced.size > 0
-      && (replaced.has(path) || ancestorMatching(path, parent => replaced.has(parent)) !== undefined);
+    const missingLocally = new Set<string>();
+    const isHeld = (path: string): boolean => replaced.has(path) || missingLocally.has(path)
+      || ((replaced.size > 0 || missingLocally.size > 0)
+        && ancestorMatching(path, parent => replaced.has(parent) || missingLocally.has(parent)) !== undefined);
     for (const path of replaced) {
       if (ancestorMatching(path, parent => replaced.has(parent))) continue;
       this.recordError(summary, path, new Error('A different Nextcloud folder is now at this path. Local files and sync tracking were kept.'));
     }
 
+    if (isFullScan && remoteDirs?.length && client.inspectDirectory) {
+      const vault = this.opts.app.vault as App['vault'] & { getAllFolders?: () => TFolder[] };
+      const local = new Set(vault.getAllFolders?.().map(folder => folder.path));
+      const trackedParents = new Set(this.opts.stateDB.getAllFiles().flatMap(file => ancestorsOf(file.path)));
+      for (const dir of remoteDirs) {
+        if (!dir.fileId || !trackedParents.has(dir.path) || local.has(dir.path) || isHeld(dir.path) || this.isSystemExcluded(dir.path)
+          || this.opts.stateDB.getDir(dir.path)?.remoteFileId !== dir.fileId) continue;
+        if (!await this.canDeleteFromMissingFolder(dir.path, summary, dir.fileId)) missingLocally.add(dir.path);
+      }
+    }
+
     summary.retriedFiles = this.retryQueue.splice(0);
 
-    const scopeFiles = replaced.size > 0 ? remoteFiles.filter(f => !isHeld(f.path)) : remoteFiles;
+    const scopeFiles = remoteFiles.filter(f => !isHeld(f.path));
     await this.preparePluginSession(client, scopeFiles);
     const eligible = scopeFiles.filter(f => !this.isSystemExcluded(f.path));
     this.syncProgress = { processed: 0, total: eligible.length };

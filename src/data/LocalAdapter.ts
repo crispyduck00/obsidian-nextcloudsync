@@ -183,6 +183,18 @@ export class LocalAdapter {
       // Mark the parent folder as our own write BEFORE creating it, so watch mode does not propagate the folder-create
       // back to the server as a spurious MKCOL.
       this.ignore(dir);
+      // mkdir can also create missing ancestors. Their create events must not cancel the
+      // user's earlier folder deletion while a download is restoring part of that tree.
+      const parents = dir.split('/');
+      parents.pop();
+      if (parents.length && !await this.adapter.exists(dir)) {
+        while (parents.length) {
+          const parent = parents.join('/');
+          if (await this.adapter.exists(parent)) break;
+          this.ignore(parent);
+          parents.pop();
+        }
+      }
       await this.adapter.mkdir(dir);
     }
   }
@@ -268,6 +280,10 @@ export class LocalAdapter {
 
   async readBinary(path: string): Promise<ArrayBuffer> {
     return this.adapter.readBinary(normalizePath(path));
+  }
+
+  async isFolder(path: string): Promise<boolean> {
+    return (await this.adapter.stat(normalizePath(path)))?.type === 'folder';
   }
 
   async exists(path: string): Promise<boolean> {

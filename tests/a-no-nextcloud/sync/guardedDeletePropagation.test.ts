@@ -105,6 +105,7 @@ async function buildEngine(
     list: jest.fn(async () => ({ files: [], folders: [] })), // no dot paths in these vaults
     stat: jest.fn(async (p: string) => (p in vault ? { size: sizeOf(p), mtime: BASE_MTIME } : null)),
     exists: jest.fn(async (p: string) => p in vault),
+    isFolder: jest.fn(async (p: string) => folders.includes(p)),
     read: jest.fn(async (p: string) => vault[p] ?? ''),
     readBinary: jest.fn(async (p: string) => toBuf(vault[p] ?? '')),
     atomicWrite: jest.fn(async (p: string, d: string) => { vault[p] = d; }),
@@ -185,8 +186,9 @@ async function buildEngine(
   const logger = { log: jest.fn(async (m: string) => { logs.push(m); }) };
   const statusBar = { setStatus: jest.fn(), setSyncComplete: jest.fn(), setProgress: jest.fn() };
 
+  const settings = { ...DEFAULT_SETTINGS, syncOnWifiOnly: false };
   const engine = new SyncEngine({
-    app, settings: { ...DEFAULT_SETTINGS, syncOnWifiOnly: false },
+    app, settings,
     localAdapter, stateDB, statusBar, webdavFactory: { createClient }, logger,
     pluginDir: PLUGIN_DIR, configDir: '.obsidian',
   } as never);
@@ -198,7 +200,7 @@ async function buildEngine(
   };
 
   return {
-    engine, stateDB, localAdapter, client, app, trashed, logs, events, sync, vault, folders,
+    engine, stateDB, localAdapter, client, app, trashed, logs, events, sync, vault, folders, settings,
     failTrash: () => { trashFails = true; },
   };
 }
@@ -281,6 +283,7 @@ describe('Missing shared folders and concurrent directory changes', () => {
     await track(h.stateDB, note.path, 'a');
     trackDir(h.stateDB, 'Shared');
 
+    h.engine.rememberFolderDeletion('Shared');
     if (operation === 'sync') await h.sync();
     if (operation === 'watch delete') await h.engine.deleteSingleFile(note.path);
     if (operation === 'watch move') {
@@ -736,5 +739,73 @@ describe('[SPEC:GDP-29] the added round trip is bounded', () => {
     expect(h.client.statFile).toHaveBeenCalledTimes(3);
     expect(h.events.filter(e => e.startsWith('stat:')).sort())
       .toEqual(['stat:one.md', 'stat:three.md', 'stat:two.md']);
+  });
+});
+
+
+describe('Observed local folder deletion intent', () => {
+  function inspectFolders(h: Awaited<ReturnType<typeof buildEngine>>): void {
+    Object.assign(h.client, {
+      inspectDirectory: jest.fn(async (path: string) => ({ protected: false, fileId: `dir-${path}` })),
+    });
+  }
+
+  it('keeps an unexplained disappearance instead of deleting remote children', async () => {
+    const note = { ...await listed('Gone/a.md', 'a'), etag: 'a-revision' };
+    const h = await buildEngine({}, [], world({ listing: [note], dirs: [remoteDir('Gone')], stat: () => note }));
+    await track(h.stateDB, note.path, 'a');
+    trackDir(h.stateDB, 'Gone');
+    inspectFolders(h);
+
+    const result = await h.sync();
+
+    expect(h.client.deleteFile).not.toHaveBeenCalled();
+    expect(h.client.createDirectory).not.toHaveBeenCalled();
+    expect(h.stateDB.getFile(note.path)).toBeDefined();
+    expect(result.errors).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'Gone' })]));
+  });
+
+  it('carries an observed ancestor deletion into a missing descendant before a sibling restores the parent', async () => {
+    const changed = { ...await listed('Gone/first.md', 'new'), etag: 'changed' };
+    const unchanged = { ...await listed('Gone/sub/last.md', 'old'), etag: 'same' };
+    const w = world({ listing: [changed, unchanged], dirs: [remoteDir('Gone'), remoteDir('Gone/sub')],
+      bodies: { 'Gone/first.md': 'new' }, stat: path => path === changed.path ? changed : unchanged });
+    const h = await buildEngine({}, [], w);
+    h.settings.networkConcurrency = 1;
+    await track(h.stateDB, changed.path, 'old');
+    await track(h.stateDB, unchanged.path, 'old');
+    trackDir(h.stateDB, 'Gone');
+    trackDir(h.stateDB, 'Gone/sub');
+    h.engine.rememberFolderDeletion('Gone');
+    inspectFolders(h);
+    const write = h.localAdapter.atomicWriteBinary.getMockImplementation()!;
+    h.localAdapter.atomicWriteBinary.mockImplementation(async (path: string, data: ArrayBuffer) => {
+      await write(path, data);
+      h.folders.push('Gone');
+    });
+
+    const result = await h.sync();
+
+    expect(h.vault[changed.path]).toBe('new');
+    expect(h.client.deleteFile).toHaveBeenCalledTimes(1);
+    expect(h.client.deleteFile).toHaveBeenCalledWith(unchanged.path, unchanged.checksum, unchanged.etag);
+    expect(result.errors).toEqual([]);
+  });
+
+  it.each(['account', 'recreated', 'replaced'])('does not reuse recorded intent after %s changed', async change => {
+    const note = { ...await listed('Gone/a.md', 'a'), etag: 'a-revision' };
+    const h = await buildEngine({}, [], world({ listing: [note], dirs: [remoteDir('Gone')], stat: () => note }));
+    await track(h.stateDB, note.path, 'a');
+    trackDir(h.stateDB, 'Gone');
+    h.engine.rememberFolderDeletion('Gone');
+    if (change === 'account') h.settings.username = 'another-account';
+    if (change === 'recreated') h.engine.forgetFolderDeletion('Gone');
+    if (change === 'replaced') h.stateDB.setDir({ path: 'Gone', remoteFileId: 'another-folder' });
+    inspectFolders(h);
+
+    await h.sync();
+
+    expect(h.client.deleteFile).not.toHaveBeenCalled();
+    expect(h.stateDB.getFile(note.path)).toBeDefined();
   });
 });
