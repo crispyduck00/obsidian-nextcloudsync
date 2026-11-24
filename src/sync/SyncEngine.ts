@@ -1398,7 +1398,7 @@ export class SyncEngine {
   }
 
   private assertFileRenameSettled(path: string): void {
-    if (this.isRenameHeld(path)) throw new Error('Resolve the pending rename in Sync status before changing this path.');
+    if (this.isRenameHeld(path)) throw Object.assign(new Error('Resolve the pending rename in Sync status before changing this path.'), { requiresManualResolution: true });
   }
 
   private textEligible(path: string): boolean {

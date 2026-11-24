@@ -174,8 +174,11 @@ export class PendingFileRenames {
       const sameSource = original !== null && this.matchesOriginal(original, base);
       const arrived = [target, attempted].find(remote => remote !== null && rename.fileId && remote.fileId === rename.fileId);
       // An acknowledged or discovered MOVE may leave a new object at the old path. Its different identity is safe to leave alone.
-      if (!sameSource && arrived) {
-        await this.finishMove(rename, arrived.path, base);
+      const normalizedArrival = arrived && source !== arrived.path
+        && source.normalize('NFC') === arrived.path.normalize('NFC')
+        && !await this.deps.local.isFile(source) && await this.deps.local.isFile(arrived.path);
+      if ((!sameSource || normalizedArrival) && arrived) {
+        await this.finishMove(rename, arrived.path, normalizedArrival ? { ...base, localMtime: undefined, localSize: undefined } : base);
         return true;
       }
       if (!sameSource || !original?.etag || target) return this.recordIssue(source, 'conflict');
