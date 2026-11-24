@@ -93,11 +93,34 @@ it('still queues a normal note when plugin events are noisy', async () => {
   expect(h.engine.syncForWatchRecovery).not.toHaveBeenCalled();
 });
 
-it('protects a note as soon as the editor changes, before any file-modify event', () => {
+it('protects unsaved edits even immediately after a download, then checks the saved note', async () => {
   const h = host({ ignoredPath: 'notes/downloaded.md' });
-  const edited = h.editorEvents.get('editor-change')!;
-  edited(undefined, { file: new File('notes/downloaded.md') });
-  edited(undefined, { file: new File('notes/unsaved.md') });
-  expect([...h.edits.keys()]).toEqual(['notes/unsaved.md']);
+  const downloaded = new File('notes/downloaded.md');
+  // Our vault write alone must not schedule work.
+  h.events.get('modify')!(downloaded);
+  await jest.advanceTimersByTimeAsync(0);
   expect(h.engine.syncSingleFileForMobileWatch).not.toHaveBeenCalled();
+  const edited = h.editorEvents.get('editor-change')!;
+  edited(undefined, { file: downloaded });
+  edited(undefined, { file: new File('notes/unsaved.md') });
+  expect([...h.edits.keys()]).toEqual(['notes/downloaded.md', 'notes/unsaved.md']);
+  await jest.advanceTimersByTimeAsync(0);
+  // The first check may have run before Obsidian saved. Its later modify must still reach watch.
+  h.events.get('modify')!(downloaded);
+  await jest.advanceTimersByTimeAsync(100);
+  expect(h.engine.syncSingleFileForMobileWatch.mock.calls).toEqual([[downloaded.path], [downloaded.path]]);
+  h.events.get('modify')!(downloaded);
+  await jest.advanceTimersByTimeAsync(100);
+  expect(h.engine.syncSingleFileForMobileWatch).toHaveBeenCalledTimes(2);
+});
+
+it.each(['editor-first', 'save-first'])('coalesces overlapping editor and vault notifications after a download (%s)', async order => {
+  const file = new File('notes/downloaded.md');
+  const h = host({ ignoredPath: file.path });
+  const edit = () => h.editorEvents.get('editor-change')!(undefined, { file });
+  const save = () => h.events.get('modify')!(file);
+  for (const notify of (order === 'editor-first' ? [edit, save] : [save, edit])) notify();
+  await jest.advanceTimersByTimeAsync(1);
+  expect(h.engine.syncSingleFileForMobileWatch.mock.calls).toEqual([[file.path]]);
+  expect(h.engine.syncForWatchRecovery).not.toHaveBeenCalled();
 });
