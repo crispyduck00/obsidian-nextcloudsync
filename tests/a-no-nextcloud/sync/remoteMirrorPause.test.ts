@@ -24,12 +24,14 @@ test.each(['completed', 'failed', 'replaced'])('releases only the active engine 
   const mirror = plugin.runRemoteMirror();
   expect(host.mirrorInProgress).toBe(true);
   expect(resume).not.toHaveBeenCalled();
-  if (outcome === 'replaced') host.syncEngine = {};
+  const currentResume = jest.fn(async () => {});
+  if (outcome === 'replaced') host.syncEngine = { resumeAfterRemoteMirror: currentResume };
   if (outcome === 'failed') wait.reject(new Error('plan failed'));
   else wait.resolve();
   await mirror;
   expect(host.mirrorInProgress).toBe(false);
   expect(resume).toHaveBeenCalledTimes(outcome === 'replaced' ? 0 : 1);
+  expect(currentResume).toHaveBeenCalledTimes(outcome === 'replaced' ? 1 : 0);
 });
 
 test('parks ordinary sync and Watch until the host closes Mirror', async () => {

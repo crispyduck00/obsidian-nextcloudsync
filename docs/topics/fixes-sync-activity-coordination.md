@@ -13,7 +13,7 @@ Retain writer-preferred shared/exclusive coordination and upstream per-path lock
 - Previous 1.0.13 topic head: `2ec3c490c93437fbbcfc6cfc8363d6e14e3a0619` (parent of the archived Beta.1 integration).
 - Applies directly to upstream. Client Push routes its per-path operation through the shared gate when composed.
 
-Remote Mirror pauses ordinary full sync and Watch while its preview or apply dialog remains open. Closing or failing that dialog resumes deferred work on the same active engine. Disposing the host clears its engine reference, so an old dialog cannot revive a replaced engine.
+Remote Mirror pauses ordinary full sync and Watch while its preview or apply dialog remains open. Closing or failing that dialog resumes deferred work on the current active engine. Disposing the host clears its engine reference, so an old dialog cannot revive a replaced engine.
 
 The size-notice regression test now checks that a manual sync waits for active Watch work and counts only its own skips.
 
@@ -24,3 +24,5 @@ TypeScript build checks, ESLint and the changed/added Nextcloud-independent test
 Live Group Folder/internal-share, Nextcloud version-count and Windows/Android checks remain required for stable promotion. Existing 0.1.1 real-device tests are the preserved baseline; they are not claimed as tests of this new candidate.
 
 Watch structural events arriving after a full scan has inspected their path request one fresh ordinary scan when the run finishes. The follow-up rechecks current state, coalesces bursts, and preserves pending work through cancellation without replaying stale individual DELETE, MOVE or MKCOL requests.
+
+Plugin unload invalidates pending asynchronous initialization and startup callbacks. A Mirror plan or confirmation belongs to its captured engine, so a browser login completing while that dialog is open retires the old plan before it can be applied. The current engine resumes deferred work when the dialog closes.
