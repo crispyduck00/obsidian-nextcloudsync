@@ -105,4 +105,50 @@ describeLive('First upload delay on Nextcloud', getEnv => {
       await cleanupWorkspace(writer, ws);
     }
   });
+
+  it.each(['file', 'folder'])('retargets an existing %s moved into a newly created folder that is renamed during its grace period', async kind => {
+    const env = getEnv();
+    const { client: writer, ws } = await setupWorkspace(env);
+    const d = makeDevice(env, ws.remoteBase, 'new-parent-pending-move', { newItemDelaySeconds: 60 });
+    try {
+      const source = kind === 'file' ? 'Existing.md' : 'Existing/Child.md';
+      await writer.uploadFile(source, textBuf('already synced'));
+      const originalId = (await writer.statFile(source))?.fileId;
+      await d.sync();
+      d.vault.seedFolder('Untitled');
+      d.engine.rememberLocalCreation('Untitled', true);
+      await d.vault.adapter.rename(source, `Untitled/${source}`);
+      if (kind === 'file') d.engine.rememberFileRename(source, `Untitled/${source}`);
+      else {
+        d.vault.deleteLocalTree('Existing');
+        d.engine.rememberFolderRename('Existing', 'Untitled/Existing');
+      }
+
+      await d.vault.adapter.rename(`Untitled/${source}`, `Project/${source}`);
+      d.vault.deleteLocalTree('Untitled');
+      // This is the same early-return condition as main.ts uses for a rename of a new local folder.
+      if (!d.engine.retargetLocalCreation('Untitled', 'Project', true)) {
+        d.engine.rememberFolderRename('Untitled', 'Project');
+      }
+      const expectedPath = kind === 'file' ? 'Project/Existing.md' : 'Project/Existing';
+      const report = d.engine.getStatusReport();
+      const moves = kind === 'file' ? report.pendingFileRenames : report.pendingFolderMoves;
+      expect(moves?.[0]?.destination).toBe(expectedPath);
+
+      await d.engine.syncForClientPush();
+      expect(await writer.statFolderMovePath('Project')).toBeNull();
+      await d.sync();
+      expect(await writer.statFolderMovePath('Untitled')).toBeNull();
+      if (kind === 'folder' && d.engine.getStatusReport().pendingFolderMoves?.length) {
+        // Folder MOVE requires a proven destination parent. A first pass can create the parent.
+        expect(await writer.statFolderMovePath('Project')).not.toBeNull();
+        await d.sync();
+      }
+      expect(await writer.statFile(source)).toBeNull();
+      expect((await writer.statFile(`Project/${source}`))?.fileId).toBe(originalId);
+    } finally {
+      await cleanupWorkspace(writer, ws);
+    }
+  });
+
 });
