@@ -49,6 +49,7 @@ const EDIT_WINDOW_MS = 2000;
 export default class ObsidianNextcloudsync extends Plugin {
   settings!: DavSyncSettings;
   syncEngine?: SyncEngine;
+  private unloading = false;
 
   // Guards against double-invocation of the Pull-mirror.
   private mirrorInProgress = false;
@@ -92,6 +93,7 @@ export default class ObsidianNextcloudsync extends Plugin {
   private pushStatusItem?: ClientPushStatusItem;
 
   async onload(): Promise<void> {
+    if (this.unloading) return;
     const currentVersion = (this.app as App & { appVersion?: string }).appVersion ?? '';
     if (currentVersion && this.compareVersions(currentVersion, MIN_OBSIDIAN_VERSION) < 0) {
       new Notice(
@@ -102,12 +104,14 @@ export default class ObsidianNextcloudsync extends Plugin {
     }
 
     await this.loadSettings();
+    if (this.unloading) return;
 
     this.statusFilterState.checked = deserializeFilter(this.settings.statusFilter).checked;
 
     if (!this.settings.deviceId) {
       this.settings.deviceId = uuidv4();
       await this.saveSettings();
+      if (this.unloading) return;
     }
 
     // The file is named with this device's host token so multiple devices never collide. A failed
@@ -278,7 +282,7 @@ export default class ObsidianNextcloudsync extends Plugin {
 
       const watchQueue = new WatchFileQueue(
         () => this.settings.watchDebounceSeconds * 1000,
-        () => watchOn() && (!mobileWatch || !document.hidden),
+        () => !this.mirrorInProgress && watchOn() && (!mobileWatch || !document.hidden),
         (paths) => {
           if (mobileWatch) {
             for (const path of paths) mobileWatch.queueFile(path);
@@ -345,7 +349,7 @@ export default class ObsidianNextcloudsync extends Plugin {
       };
       const newFolderQueue = new WatchFileQueue(
         () => 0,
-        () => watchOn() && (!mobileWatch || !document.hidden),
+        () => !this.mirrorInProgress && watchOn() && (!mobileWatch || !document.hidden),
         (paths) => { for (const path of paths) createFolder(path, true); },
         (path) => this.localCreations.readyAt(path),
       );
@@ -687,6 +691,9 @@ export default class ObsidianNextcloudsync extends Plugin {
       return;
     }
     if (this.mirrorInProgress) return;
+    const assertCurrentEngine = (): void => {
+      if (this.syncEngine !== engine) throw new Error('The sync account or plugin changed. Close this dialog and open Mirror from remote again.');
+    };
     this.mirrorInProgress = true;
     try {
       // The dialog opens immediately and plans/confirms/applies inside it, so the network-heavy planning
@@ -694,16 +701,30 @@ export default class ObsidianNextcloudsync extends Plugin {
       // if dismissed mid-apply.
       await openMirrorFromRemoteModal(this.app, {
         plan: async (onPhase) => {
+          assertCurrentEngine();
           onPhase('Stopping the current sync…');
           await engine.abortAndWait();
-          return engine.planRemoteMirror(onPhase);
+          assertCurrentEngine();
+          const plan = await engine.planRemoteMirror(onPhase);
+          assertCurrentEngine();
+          return plan;
         },
-        apply: (plan, onProgress) => engine.applyRemoteMirror(plan, onProgress),
+        apply: (plan, onProgress) => {
+          assertCurrentEngine();
+          return engine.applyRemoteMirror(plan, onProgress);
+        },
       });
     } catch (err) {
       new Notice(`❌ Mirror from remote failed: ${(err as Error).message}`, 8000);
     } finally {
       this.mirrorInProgress = false;
+      if (this.syncEngine) await this.syncEngine.resumeAfterRemoteMirror();
+      if (this.syncEngine) {
+        this.watchQueue?.refresh();
+        this.newFolderQueue?.refresh();
+        this.mobileWatch?.onVisible();
+        this.pushSyncScheduler?.onNetworkChanged();
+      }
     }
   }
 
@@ -807,6 +828,7 @@ export default class ObsidianNextcloudsync extends Plugin {
   }
 
   onunload(): void {
+    this.unloading = true;
     this.teardownSyncEngine();
   }
 
@@ -829,6 +851,7 @@ export default class ObsidianNextcloudsync extends Plugin {
     this.mobileSyncStatusItem = undefined;
     this.statusBarEl?.remove();
     this.statusBarEl = undefined;
+    this.syncEngine = undefined;
   }
 
   async loadSettings(): Promise<void> {
@@ -921,6 +944,7 @@ export default class ObsidianNextcloudsync extends Plugin {
   // Re-entrant-safe: a call arriving during an in-flight init awaits that same promise. A fresh init
   // first tears down any existing engine (see teardownSyncEngine).
   async initSyncEngine(): Promise<void> {
+    if (this.unloading) return;
     if (this.initializingEngine) return this.initializingEngine;
     const promise = this.doInitSyncEngine().finally(() => {
       this.initializingEngine = undefined;
@@ -941,6 +965,7 @@ export default class ObsidianNextcloudsync extends Plugin {
     const { MobileSyncStatusItem } = await import('./ui/MobileSyncStatusItem');
     const { WebDAVFactory } = await import('./network/WebDAVFactory');
     const { loadAppPassword } = await import('./settings/SettingTab');
+    if (this.unloading) return;
 
     const pluginDir = `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
     const localAdapter = new LocalAdapter(
@@ -964,6 +989,10 @@ export default class ObsidianNextcloudsync extends Plugin {
     this.cleanSideStore = cleanSideStore;
     const historyStore = new SyncHistoryStore(this.app.vault.adapter, pluginDir);
     await historyStore.load();
+    if (this.unloading) {
+      localAdapter.dispose();
+      return;
+    }
 
     // Desktop keeps its native status bar. Android gets a compact clickable indicator in the
     // active view action strip; iOS retains the established Notice surface.
@@ -1001,6 +1030,7 @@ export default class ObsidianNextcloudsync extends Plugin {
       configDir: this.app.vault.configDir,
       isLocalVaultAvailable: () => localAdapter.isFolder(pluginDir),
       localCreationGrace: this.localCreations,
+      isRemoteMirrorOpen: () => this.mirrorInProgress,
       pluginsAwaitingRestart: this.pluginsAwaitingRestart,
       // Evaluated live from the same settings and host token as the logger, so it follows the logging
       // toggle (docs/spec.md §9.1).
@@ -1033,7 +1063,10 @@ export default class ObsidianNextcloudsync extends Plugin {
     // 0 = no startup sync; 1-10 = seconds to wait.
     if (this.settings.startupSyncDelaySeconds > 0) {
       const delayMs = this.settings.startupSyncDelaySeconds * 1000;
-      window.setTimeout(() => { void this.syncEngine?.syncManual(); }, delayMs);
+      const engine = this.syncEngine;
+      window.setTimeout(() => {
+        if (!this.unloading && this.syncEngine === engine) void engine.syncManual();
+      }, delayMs);
     }
   }
 
