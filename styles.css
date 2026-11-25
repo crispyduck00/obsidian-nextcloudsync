@@ -439,3 +439,38 @@
 .ncs-compare-mismatch {
   color: var(--color-red);
 }
+
+
+/* Compact Client Push indicator next to the normal Nextcloud Sync status.
+ * Fixed width prevents layout shifts while connection state changes. */
+.ncs-client-push-status {
+  width: 24px;
+  min-width: 24px;
+  max-width: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  opacity: 0.65;
+  user-select: none;
+  overflow: hidden;
+}
+
+.ncs-client-push-status.is-connected { opacity: 1; }
+.ncs-client-push-status.is-reconnecting {
+  opacity: 0.55;
+  animation: ncs-client-push-reconnecting 1.6s ease-in-out infinite;
+}
+.ncs-client-push-status.is-offline { opacity: 0.35; }
+.ncs-client-push-status.is-unavailable { opacity: 0.3; }
+.ncs-client-push-status.is-push-received { animation: ncs-client-push-received 0.7s ease-out 1; }
+
+@keyframes ncs-client-push-received {
+  0% { transform: scale(1); }
+  35% { transform: scale(1.35); }
+  100% { transform: scale(1); }
+}
+@keyframes ncs-client-push-reconnecting {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 0.75; }
+}
