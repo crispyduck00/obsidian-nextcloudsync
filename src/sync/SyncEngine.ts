@@ -2160,9 +2160,13 @@ export class SyncEngine {
   ): Promise<boolean> {
     const remotePathSet = new Set(remoteFiles.map(f => f.path));
     const remoteDirPaths = new Set(remoteDirs?.map(dir => dir.path.replace(/\/+$/, '')));
+    // A successful first PUT can start tracking its newly created parent during this batch.
+    // Only parents already missing before the uploads are evidence of lost access.
+    const missingRemoteParents = new Set(this.opts.stateDB.getAllDirs()
+      .filter(dir => !remoteDirPaths.has(dir.path)).map(dir => dir.path));
     const heldPaths = new Set<string>();
     const missingParentOf = (path: string): string | undefined => ancestorMatching(path,
-      parent => !!this.opts.stateDB.getDir(parent) && !remoteDirPaths.has(parent));
+      parent => missingRemoteParents.has(parent));
     const reportLocalChanges = (path: string, base?: FileState): void => {
       // A held edit can have the same size and mtime. Re-read it when access returns.
       if (base?.localMtime != null) this.opts.stateDB.setFile({ ...base, localMtime: undefined });

@@ -223,6 +223,25 @@ const trackDir = (stateDB: StateDB, path: string): void =>
   stateDB.setDir({ path, remoteFileId: `dir-${path}` });
 
 describe('Missing shared folders and concurrent directory changes', () => {
+  it('uploads siblings when the first upload starts tracking their new parent', async () => {
+    const anchor = await listed('Anchor.md', 'base');
+    const h = await buildEngine({ 'Anchor.md': 'base', 'Fresh/a.md': 'a', 'Fresh/b.md': 'b' }, ['Fresh'],
+      world({ listing: [anchor], exists: true }));
+    await track(h.stateDB, anchor.path, 'base');
+    // Nextcloud's successful MKCOL callback records the new identity during the first PUT.
+    h.client.uploadFile.mockImplementation(async () => { trackDir(h.stateDB, 'Fresh'); });
+
+    const summary = await h.sync();
+
+    expect(summary.errors).toEqual([]);
+    expect(summary.uploadedCount).toBe(2);
+    expect(h.client.uploadFile).toHaveBeenNthCalledWith(1, 'Fresh/a.md', expect.anything(), expect.any(Number), expect.anything());
+    expect(h.client.uploadFile).toHaveBeenNthCalledWith(2, 'Fresh/b.md', expect.anything(), expect.any(Number), expect.anything());
+    expect(h.stateDB.getFile('Fresh/a.md')).toBeDefined();
+    expect(h.stateDB.getFile('Fresh/b.md')).toBeDefined();
+    expect(h.trashed).toEqual([]);
+  });
+
   it('refreshes the file revision before uploading an edit against a cached listing', async () => {
     const cached = await listed('note.md', 'old');
     const current = { ...cached, etag: 'live-etag' };
