@@ -61,6 +61,40 @@ async function diskFixture() {
 }
 
 describe('Guarded local file publication', () => {
+  it.each([
+    ['active', false], ['active', true], ['deferred', false], ['deferred', true],
+  ] as const)('holds an open %s binary before any unsafe write (binary original=%s)', async (leaf, binaryOriginal) => {
+    const disk = await diskFixture();
+    const original = binaryOriginal ? new Uint8Array([255, 0, 128]).buffer : bytes('original text');
+    const updated = binaryOriginal ? bytes('incoming text') : new Uint8Array([255, 1, 128]).buffer;
+    const file = { path: note } as TFile;
+    const view = Object.create(FileView.prototype) as FileView;
+    view.file = file;
+    let open = true;
+    const workspace = { iterateAllLeaves: (fn: (item: unknown) => void) => {
+      if (open) fn(leaf === 'active' ? { view } : { view: {}, isDeferred: true, getViewState: () => ({ state: { file: note } }) });
+    } } as unknown as Workspace;
+    const modifyBinary = jest.fn(async () => { await disk.write('partial'); throw new Error('ENOSPC'); });
+    const vault = { getAbstractFileByPath: () => file, getFileByPath: () => file, modifyBinary } as unknown as Vault;
+    const local = new LocalAdapter(disk.adapter, vault, workspace);
+    try {
+      await writeFile(disk.absolute(note), Buffer.from(original));
+      const expected = { stat: (await local.stat(note))!, hash: await sha256(original), beforeCommit: jest.fn() };
+      await expect(local.atomicWriteBinary(note, updated, undefined, undefined, expected)).rejects.toMatchObject({
+        requiresManualResolution: true, message: expect.stringContaining('Close'),
+      });
+      expect(await disk.adapter.readBinary(note)).toEqual(original);
+      expect(modifyBinary).not.toHaveBeenCalled();
+      expect(disk.adapter.writeBinary).not.toHaveBeenCalled();
+      expect(expected.beforeCommit).not.toHaveBeenCalled();
+      // Closing the preview reuses the ordinary guarded replacement; no new queue/state is needed.
+      open = false;
+      await local.atomicWriteBinary(note, updated, undefined, undefined, expected);
+      expect(await disk.adapter.readBinary(note)).toEqual(updated);
+      expect(expected.beforeCommit).toHaveBeenCalledTimes(1);
+    } finally { local.dispose(); await disk.dispose(); }
+  });
+
   it.each(['text', 'binary'] as const)('updates a closed UTF-8 file without renaming the indexed note (%s)', async mode => {
     const disk = await diskFixture();
     const previous = '\uFEFFfirst line\r\n', updated = '\uFEFFremote line\r\n';

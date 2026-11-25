@@ -22,6 +22,17 @@ The complete integration composes the same editor and rename checks with plugin/
 
 ## Validation
 
+### Open binary previews (RC18 follow-up)
+
+RC17's open `Vault.modifyBinary` branch had no verified recovery copy. A native partial write could
+be uploaded as a local edit after restart. Guarded updates now stop before mutation whenever an open
+active or deferred preview cannot use the safe UTF-8 callback. The visible error asks to close all
+previews of that file and run Sync now; the existing closed-file replacement then completes normally.
+Text updates keep their callback/recovery behavior. No queue, timer or persisted field is added.
+The real-filesystem regressions cover binary incoming bytes and binary previous bytes, both active
+and deferred leaves, unchanged original bytes on hold, and successful retry after closing the preview.
+The legacy unguarded API remains covered separately; production downloads/Restore use expectations.
+
 The earlier standalone validation passed 401 focused tests in 22 suites. The add-on compatibility follow-up passes 281 focused tests in 23 suites. These include real-filesystem regressions for closed text files, same-moment edits and renames, invalid UTF-8, damaged snapshots, partial writes and restart recovery, plus binary recovery naming, independent same-basename attachments, legacy recovery and the long-name safety stop. The live regression follows a failed write through a fresh engine and checks that no damaged bytes reach Nextcloud. Full composed-runtime and released-add-on acceptance is recorded separately after the integration gate.
 
 Deletion regressions exercise real host event wiring and LocalAdapter timers, own-trash partial failures, text/binary removal failures before and after unlink, a genuine delete after successful replacement, file/subtree rename supersession, engine/account changes, and disposal during asynchronous inspection. The implementation adds no separate timer, persistent state, or reconciliation queue.

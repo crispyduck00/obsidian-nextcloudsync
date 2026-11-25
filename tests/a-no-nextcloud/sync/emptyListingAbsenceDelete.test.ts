@@ -45,6 +45,7 @@ function makeLocalAdapter(files: Record<string, string>) {
   const sizeOf = (p: string): number => enc.encode(files[p]).length;
   return {
     files,
+    ignore: jest.fn(),
     listVaultFiles: jest.fn(() =>
       Object.keys(files).map(p => ({ path: p, size: sizeOf(p), mtime: BASE_MTIME }))),
     list: jest.fn(async (parent: string) => localListing(parent, Object.keys(files))),
