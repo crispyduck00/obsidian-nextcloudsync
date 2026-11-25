@@ -4,7 +4,7 @@ import coerce from 'semver/functions/coerce';
 import { isOverFileSizeLimit } from '../../util/limits';
 import { compareSemver } from '../../util/version';
 import { checksumProvesIdentical } from '../identity/contentIdentity';
-import { remoteIdOf } from '../remoteIdentity';
+import { remoteRevisionChanged } from '../remoteIdentity';
 
 export type PluginIgnoreReason =
   | 'desktop-only'
@@ -114,5 +114,5 @@ export function shouldFetchRemoteManifest(input: {
   const { remoteManifest, localHash, base } = input;
   if (remoteManifest === null) return false;
   if (localHash !== null && checksumProvesIdentical(remoteManifest, localHash)) return false;
-  return localHash === null || base === null || remoteIdOf(remoteManifest).remoteId !== base.remoteId;
+  return localHash === null || remoteRevisionChanged(remoteManifest, base ?? undefined);
 }

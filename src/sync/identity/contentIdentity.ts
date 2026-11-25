@@ -25,5 +25,6 @@ export function convergedState(
     size: localStat.size, mtime: remote.lastModified || localStat.mtime,
     remoteFileId: remote.fileId, isConflicted: false,
     remoteEtag: remote.etag ?? undefined,
+    remoteChecksum: remote.reportedChecksum ?? remote.checksum ?? undefined,
   };
 }

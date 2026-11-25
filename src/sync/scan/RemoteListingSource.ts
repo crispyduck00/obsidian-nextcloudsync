@@ -65,6 +65,7 @@ export class RemoteListingSource {
       path: fs.path,
       fileId: fs.remoteFileId,
       checksum: fs.idType === 'sha256' ? fs.remoteId : null,
+      reportedChecksum: fs.remoteChecksum,
       etag: fs.idType === 'etag' ? fs.remoteId : verifyRevision ? fs.remoteEtag ?? null : null,
       size: fs.size,
       lastModified: fs.remoteMtime ?? fs.mtime,

@@ -54,6 +54,7 @@ export class VersionService {
       mtime: remote.lastModified || stat?.mtime || Date.now(),
       remoteFileId: remote.fileId ?? fileId,
       remoteEtag: remote.etag ?? undefined,
+      remoteChecksum: remote.checksum ?? undefined,
       isConflicted: false,
     }, remote.lastModified));
     this.deps.mergeBase?.recordBytes(path, data);

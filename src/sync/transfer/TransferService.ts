@@ -170,6 +170,7 @@ export class TransferService {
         path: remote.path, localHash: sameHash, remoteId, idType,
         size: remote.size, mtime: remote.lastModified || localStat.mtime,
         remoteFileId: remote.fileId, isConflicted, remoteEtag: remote.etag ?? undefined,
+        remoteChecksum: remote.reportedChecksum ?? remote.checksum ?? undefined,
         localSize: localStat.size, localMtime: localStat.mtime, remoteMtime: remote.lastModified,
       });
       if (!isConflicted) this.deps.mergeBase.recordBytes(remote.path, data);
@@ -193,6 +194,7 @@ export class TransferService {
       size: remote.size, mtime,
       remoteFileId: remote.fileId, isConflicted: false,
       remoteEtag: remote.etag ?? undefined,
+      remoteChecksum: remote.reportedChecksum ?? remote.checksum ?? undefined,
     }, remote.lastModified));
     // Local now equals the remote body, so it is the new merge base.
     this.deps.mergeBase.recordBytes(remote.path, data);

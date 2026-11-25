@@ -268,6 +268,7 @@ export class ConflictApplier {
       size: stat?.size ?? 0, mtime: mergeMtime,
       remoteFileId: remote.fileId,
       remoteEtag: uploaded ? uploadedEtag : remote.etag ?? undefined,
+      remoteChecksum: uploaded ? undefined : remote.reportedChecksum ?? remote.checksum ?? undefined,
       // Stays true after a failed upload even for a clean merge, or the next sync reads the state as converged.
       isConflicted: !clean || !uploaded,
     };
@@ -379,6 +380,7 @@ export class ConflictApplier {
       size: remote.size, mtime,
       remoteFileId: remote.fileId, isConflicted: false,
       remoteEtag: remote.etag ?? undefined,
+      remoteChecksum: remote.reportedChecksum ?? remote.checksum ?? undefined,
     }, remote.lastModified));
     this.deps.mergeBase.recordBytes(path, remoteData);
     if (client) await this.deps.creationTime?.align(client, remote);

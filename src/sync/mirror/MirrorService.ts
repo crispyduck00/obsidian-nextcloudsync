@@ -5,7 +5,7 @@ import { TFolder, Vault, App, normalizePath } from 'obsidian';
 import { RemoteFileInfo, RemoteDirInfo, SyncSessionSummary } from '../../types';
 import { buildMirrorPlan, MirrorPlan, MirrorResult, LocalFileEntry } from '../mirrorPlan';
 import { planStateConvergence, planDirConvergence, leftoverFileState } from './convergence';
-import { remoteIdOf, withTrustedChecksum } from '../remoteIdentity';
+import { remoteIdOf, remoteRevisionChanged, withTrustedChecksum } from '../remoteIdentity';
 import { convergedState } from '../identity/contentIdentity';
 import { LocalAdapter } from '../../data/LocalAdapter';
 import { StateDB } from '../../data/StateDB';
@@ -109,7 +109,7 @@ export class MirrorService {
     remoteFiles = remoteFiles.map(remote => {
       const base = this.deps.stateDB.getFile(remote.path);
       const checked = withTrustedChecksum(remote, base, true);
-      if (!checked.checksum && base?.idType === 'etag' && !base.isConflicted && remote.etag === base.remoteId
+      if (!checked.checksum && base?.idType === 'etag' && !base.isConflicted && !remoteRevisionChanged(checked, base)
           && remote.size === base.size && remote.fileId === base.remoteFileId) {
         knownHashes.set(remote.path, base.localHash);
       }

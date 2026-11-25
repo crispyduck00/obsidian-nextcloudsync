@@ -1,6 +1,6 @@
 import type { FileState, RemoteFileInfo } from '../../types';
 import { checksumProvesIdentical } from '../identity/contentIdentity';
-import { remoteIdOf } from '../remoteIdentity';
+import { remoteRevisionChanged } from '../remoteIdentity';
 import { compareSemver } from '../../util/version';
 
 export type BundleDirection = 'local' | 'remote' | 'hold' | null;
@@ -44,7 +44,7 @@ export function fileSameContent(input: {
   const { localHash, remote, base, localChanged } = input;
   if (localHash === null || remote === null) return false;
   if (checksumProvesIdentical(remote, localHash)) return true;
-  return base !== null && !localChanged && remoteIdOf(remote).remoteId === base.remoteId;
+  return base !== null && !localChanged && !remoteRevisionChanged(remote, base);
 }
 
 function newerSide(local: ManifestSide, remote: ManifestSide): BundleDirection {

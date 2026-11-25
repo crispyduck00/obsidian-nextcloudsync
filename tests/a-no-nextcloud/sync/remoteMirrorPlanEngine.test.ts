@@ -87,7 +87,7 @@ describe('[SPEC:MIR-1] SyncEngine.planRemoteMirror — connects on demand', () =
     expect(plan.skipCount).toBe(1);
   });
 
-  it.each(['missed revision', 'legacy state', 'fresh device', 'unchanged revision', 'verified read-only revision'] as const)(
+  it.each(['missed revision', 'legacy state', 'fresh device', 'unchanged revision', 'verified read-only revision', 'changed reported checksum'] as const)(
     'checks a cached same-size checksum against the remote revision (%s)', async (scenario) => {
       const content = new TextEncoder().encode('B');
       const hash = await sha256(content.buffer as ArrayBuffer);
@@ -98,8 +98,9 @@ describe('[SPEC:MIR-1] SyncEngine.planRemoteMirror — connects on demand', () =
         remoteEtag: scenario === 'legacy state' ? undefined : 'previous',
       };
       if (scenario === 'unchanged revision') Object.assign(tracked, { localHash: hash, remoteId: hash, remoteEtag: listed.etag });
-      if (scenario === 'verified read-only revision') {
-        Object.assign(tracked, { idType: 'etag', localHash: hash, remoteEtag: listed.etag, remoteId: listed.etag });
+      if (scenario === 'verified read-only revision' || scenario === 'changed reported checksum') {
+        Object.assign(tracked, { idType: 'etag', localHash: hash, remoteEtag: listed.etag, remoteId: listed.etag,
+          remoteChecksum: scenario === 'verified read-only revision' ? 'incorrect-cached-checksum' : 'previous-checksum' });
         listed.checksum = 'incorrect-cached-checksum';
       }
       const recalcChecksum = jest.fn(async () => null); // e.g. a read-only share cannot persist a new checksum
@@ -113,7 +114,7 @@ describe('[SPEC:MIR-1] SyncEngine.planRemoteMirror — connects on demand', () =
         expect(plan.skipCount).toBe(1);
       } else {
         expect(recalcChecksum).toHaveBeenCalledTimes(1);
-        expect(plan.downloads).toEqual([{ ...listed, checksum: null }]);
+        expect(plan.downloads).toEqual([{ ...listed, checksum: null, reportedChecksum: listed.checksum }]);
       }
     },
   );

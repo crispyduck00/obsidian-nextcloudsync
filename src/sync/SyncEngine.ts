@@ -39,7 +39,7 @@ import { MergeBaseRecorder } from './session/MergeBaseRecorder';
 import { withLocalSignature } from '../data/localSignature';
 import { TransferService } from './transfer/TransferService';
 import { VersionService } from './versions/VersionService';
-import { remoteIdOf, withTrustedChecksum } from './remoteIdentity';
+import { remoteIdOf, remoteRevisionChanged, withTrustedChecksum } from './remoteIdentity';
 import { checksumProvesIdentical, convergedState } from './identity/contentIdentity';
 import { DeletionService } from './deletion/DeletionService';
 import { ResolutionService } from './resolution/ResolutionService';
@@ -1006,7 +1006,7 @@ export class SyncEngine {
     const localStat = await this.opts.localAdapter.stat(remote.path);
     const { remoteId, idType } = remoteIdOf(remote);
 
-    const remoteChanged = !base || base.remoteId !== remoteId;
+    const remoteChanged = remoteRevisionChanged(remote, base);
     let localChanged = false;
     let localHash = base?.localHash ?? '';
 
