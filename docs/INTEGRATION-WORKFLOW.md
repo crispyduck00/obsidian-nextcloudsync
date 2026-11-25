@@ -4,44 +4,36 @@
 
 ## Current candidate status
 
-**RC17 passed the automated gate. RC15 and RC16 remain withdrawn.** A fresh replay found a real
-Folder Notes integration failure in RC16: replacing a closed note temporarily renamed its indexed
-path, and the released add-on interpreted that event as a request to rename the containing folder.
-The same root cause affects binary attachments with the folder's basename. Earlier RC16 passing
-claims below are historical and are superseded by this finding; they are not installation approval.
+**RC18 passed the complete automated gate and is ready for a controlled test-vault run. RC17, RC16 and RC15 are withdrawn.** The independent RC17
+review reproduced an unsafe open-binary write followed by corrupt upload after restart. Its
+follow-up also reproduced a changed remote checksum/body silently skipped under a reused ETag.
+Earlier passing RC17 gates are historical evidence, not installation approval.
 
-RC17 keeps the correction in `fixes/guard-local-download`, directly on the existing upstream-based
-topic. It uses atomic text callbacks with verified recovery snapshots and a basename-preserving
-binary recovery extension. It adds no feature, scheduler, queue or persisted-state schema.
-The standalone plugin repository and BRAT rollout remain unchanged.
+Both corrections remain in their existing independent upstream-based owners:
+`fixes/guard-local-download` and `fixes/version-restore-state-convergence`. Open binary previews
+stop visibly before mutation and resume through the existing safe replacement after closing.
+An observed checksum checkpoint distinguishes new evidence from an unchanged stale checksum;
+normal reconciliation, Mirror, plugin bundles and revision-proof snapshots share the decision.
+No new feature, dependency, scheduler, queue or recovery journal is introduced.
 
-### RC17 gate (2026-11-25)
+The composed runtime is `9e926e0f04cdf4bfad0eea802b34d3fbee1233a3`, tree
+`4404c944168783e365568ca80b8c6316af64e4eb`. Subsequent test-fixture/documentation commits do not
+change runtime/build inputs. The full unit run passes 3,820 cases with six existing private-mockup
+skips; explicit unit type checks, build, lint and secret scan pass. The two original real NC35
+reproductions now pass; fourteen native method/filesystem cases and two actual-package upgrade
+cases pass. The complete NC35 run passes 350 cases (15 existing skips); 15 released-add-on/template
+cases, seven Apache DAV cases and the real Push burst plus 330-second connected idle pass.
+The idle records zero DAV requests, mutations, scans, hashes, snapshots and additional full runs.
 
-The final composed runtime passes 3,807 default tests (six existing optional-fixture skips),
-350 standard Nextcloud cases (fifteen existing skips), twelve separately reported add-on/failure
-acceptance cases, six installed-native-method protocol cases and seven Apache DAV cases.
-A twelve-case live download/Restore subset is repeated after the add-on run and is not added to
-the standard total. The standalone owner passes 281 focused tests in 23 suites plus its own
-production build/types, lint and secret scan. All 3,796 previous unit cases and all 364 previous
-standard live cases retain their multiplicity and result status. Seventeen unit cases and one
-standard live case are added. All 605 tracked source files and fifteen external fixture files
-remain pinned throughout the final runs.
+The local tested runtime commit is `cc99daf3443efe8e68effc4eb742e746eb611c1b`; its public
+commit has exactly the same Git tree. Local/public commit mapping is retained in the evidence.
+The final change from RC17 is 35 added and 16 removed runtime lines (net 19), in 13 files.
+The manual candidate keeps the Fast Nextcloud Sync product identity and version `0.2.0-rc.18`.
+The standalone repository, stable release and BRAT rollout remain unchanged. Native Windows and
+physical Android acceptance remains the user's controlled test after automated acceptance.
 
-The single RC17 runtime correction is a net 57 TypeScript lines in `LocalAdapter.ts`. Its public
-owner commit is `eb797a6c3e6595538ef2737fff1aa56f84d81a3f`. The composed runtime commit
-`e07fd45ad87287df41adf4e5bc4a896203991222` has tested tree
-`ab95078187e5dbafa8801ab6bcd455ba9759a287`; the final merge adds only the maintained fork
-documentation. The canonical owner branches remain independent upstream-based topics. Pending
-RC16 topic heads are fast-forwarded to their already integrated commits; no published history is
-rewritten. Draft PR #33 owns this correction and #43 exposes the separate general rename fix.
-
-The manual RC17 ZIP is 232,157 bytes with SHA-256
-`3501b61274144c566ff8c30cc1c7352530753ee9930a972a62812d9b2f7794f1`.
-Its Fast Nextcloud Sync manifest is unchanged from the prior installed identity except version
-`0.2.0-rc.17`. Install only the three plugin files and preserve settings, credentials, device ID,
-tracking, pending moves and history. Resolve recovery holds before any rollback to older builds.
-Native Windows and physical Android acceptance remains open; inspect the public integration CI
-for this source before installation. There is no GitHub Release, stable tag or BRAT promotion.
+[Selected and historical topic inventory](TOPIC-INVENTORY.md) separates the 28 maintained topics
+from seven historical/superseded feature/fix refs; no published history is rewritten.
 
 
 ## Purpose
