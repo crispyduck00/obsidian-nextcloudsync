@@ -4,36 +4,29 @@ The manual candidates use upstream tag **1.0.18**, commit `21f89023fdaee58068276
 
 ## Current candidate status
 
-**RC18 passed the complete automated gate and is ready for a controlled test-vault run. RC17, RC16 and RC15 are withdrawn.** The independent RC17
-review reproduced an unsafe open-binary write followed by corrupt upload after restart. Its
-follow-up also reproduced a changed remote checksum/body silently skipped under a reused ETag.
-Earlier passing RC17 gates are historical evidence, not installation approval.
+**RC19 passed the daily-use follow-up and is ready for a controlled test-vault run. RC18 and earlier candidates are withdrawn.** The follow-up found one additional RC18 composition defect: after the first upload created and recorded a new parent, the earlier directory listing made a later sibling look inaccessible. The sibling stayed local with a visible error; there was no demonstrated data loss.
 
-Both corrections remain in their existing independent upstream-based owners:
-`fixes/guard-local-download` and `fixes/version-restore-state-convergence`. Open binary previews
-stop visibly before mutation and resume through the existing safe replacement after closing.
-An observed checksum checkpoint distinguishes new evidence from an unchanged stale checksum;
-normal reconciliation, Mirror, plugin bundles and revision-proof snapshots share the decision.
-No new feature, dependency, scheduler, queue or recovery journal is introduced.
+The correction stays in `fixes/guarded-folder-reconciliation`, head `c1b6d36a84f45edb9bf8d8bd6e8914c08c586b81` (Draft PR #36), independently based on pristine upstream 1.0.18. It snapshots the missing tracked parents before upload workers run. Current parent identity/access and conditional file writes remain guarded. The runtime delta from RC18 is one file, five added lines and one removed line. No dependency, setting, queue or scheduler was added.
 
-The composed runtime is `9e926e0f04cdf4bfad0eea802b34d3fbee1233a3`, tree
-`4404c944168783e365568ca80b8c6316af64e4eb`. Subsequent test-fixture/documentation commits do not
-change runtime/build inputs. The full unit run passes 3,820 cases with six existing private-mockup
-skips; explicit unit type checks, build, lint and secret scan pass. The two original real NC35
-reproductions now pass; fourteen native method/filesystem cases and two actual-package upgrade
-cases pass. The complete NC35 run passes 350 cases (15 existing skips); 15 released-add-on/template
-cases, seven Apache DAV cases and the real Push burst plus 330-second connected idle pass.
-The idle records zero DAV requests, mutations, scans, hashes, snapshots and additional full runs.
+Fresh validation on the corrected composition:
 
-The local tested runtime commit is `cc99daf3443efe8e68effc4eb742e746eb611c1b`; its public
-commit has exactly the same Git tree. Local/public commit mapping is retained in the evidence.
-The final change from RC17 is 35 added and 16 removed runtime lines (net 19), in 13 files.
-The manual candidate keeps the Fast Nextcloud Sync product identity and version `0.2.0-rc.18`.
-The standalone repository, stable release and BRAT rollout remain unchanged. Native Windows and
-physical Android acceptance remains the user's controlled test after automated acceptance.
+| Group | Passed | Failed | Skipped |
+| --- | ---: | ---: | ---: |
+| Full unit discovery, Node 26, 249 suites | 3,821 | 0 | 6 existing private-HTML cases |
+| Complete owner guard test file (overlaps unit total) | 34 | 0 | 0 |
+| Focused daily/server/add-on/package gate, 9 suites | 31 | 0 | 0 |
 
-[Selected and historical topic inventory](TOPIC-INVENTORY.md) separates the 28 maintained topics
-from seven historical/superseded feature/fix refs; no published history is rewritten.
+Source and unit type checks, production build, lint, secret scan and the unit open-handle check pass. The 31-case gate uses isolated Nextcloud 35.0.2.2, Group Folders 23.0.2 and two users. It includes a connected daily journey with 13 verified checkpoints; new/existing-parent sibling uploads; observed directory-deletion safety; released Folder Notes/Heading Sync hooks; templates; the repeated-ETag regression; and two tests loading the actual RC19 bundle with existing upgrade settings. Both published add-on bundle hashes match the RC18 evidence.
+
+Daily checks cover rapid edits, zero-byte notes, Unicode names, rename and nested MOVE with stable IDs, edits from the second user, restart with unsent local text, separated-edit auto-merge, visible adjacent-line conflicts, manual resolution, valid same-basename PNG/PDF uploads and replacement, deletion without resurrection, and convergence without repeated remote mutations.
+
+The tested local runtime is `14c36dc5e9a254060290bcf40ceaf18deac5e233`; the public equivalent is `431b721e8c6c6a844896a6e7fd8e69b03a04583a`. Both have tree `bab0499e143597f21f51f883cb55c75769484a8c`. Subsequent documentation changes do not alter runtime/build inputs. The manual package preserves the Fast Nextcloud Sync identity, uses version `0.2.0-rc.19`, and changes only the version in the RC18 product manifest.
+
+A test-environment failure interrupted an earlier follow-up run. Its unfinished results are not counted; the complete unit and 31-case gate above were rerun after recovery. RC18's historical full 350-case NC35 gate, native-method/filesystem tests, Apache DAV tests and 330-second Push idle measurement remain in the next section as prior evidence, not fresh RC19 runs. This focused follow-up does not claim a new full server/platform matrix. Native Windows and physical Android acceptance remain the user's controlled test.
+
+Replace only `main.js`, `manifest.json` and `styles.css` in the test plugin directory while Obsidian is closed. Preserve settings, secret references, device IDs, state and pending moves. Use the same RC19 package on both test devices. The standalone repository, stable release and BRAT rollout remain unchanged.
+
+[Fix details](NEW-FOLDER-SIBLINGS.md) · [Selected topic inventory](TOPIC-INVENTORY.md)
 
 ## RC18 final acceptance — 2026-11-25
 

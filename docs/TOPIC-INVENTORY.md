@@ -18,7 +18,7 @@ The exact integrated set is established by Git ancestry and the candidate, not b
 | `fixes/compare-markdown-diff` | `8f1b64c6c5d012d9aaa3ff89406acd348e871719` | #7 |
 | `fixes/conflict-marker-state` | `c7fc1a5d2beb4c13f51f732d1d5deb74cd340f92` | #8 |
 | `fixes/guard-local-download` | `6a15b511b5dcfd6470e8fc70ff104acff5a68b91` | #33 |
-| `fixes/guarded-folder-reconciliation` | `dfa9bfba8e138e4e0f7e130d4d09253534290350` | #36 |
+| `fixes/guarded-folder-reconciliation` | `c1b6d36a84f45edb9bf8d8bd6e8914c08c586b81` | #36 |
 | `fixes/local-vault-availability` | `6ad8e13df168d706ca34a85ac2c73d6a420e3692` | #37 |
 | `fixes/optional-settings-mockup-test` | `b2d9524ee1ffc0d4d8335631d7db890e6a24816f` | #9 |
 | `fixes/oversize-root-etag` | `4908a8551a90741c00208612edb88ee716bf98a9` | #32 |
