@@ -61,6 +61,162 @@ async function diskFixture() {
 }
 
 describe('Guarded local file publication', () => {
+  it.each(['text', 'binary'] as const)('updates a closed UTF-8 file without renaming the indexed note (%s)', async mode => {
+    const disk = await diskFixture();
+    const previous = '\uFEFFfirst line\r\n', updated = '\uFEFFremote line\r\n';
+    disk.adapter.process = jest.fn(async (_path, transform) => {
+      const result = transform(await disk.read());
+      await disk.write(result);
+      return result;
+    });
+    try {
+      const expected = await disk.remember(previous);
+      if (mode === 'text') await disk.local.atomicWrite(note, updated, undefined, undefined, expected);
+      else await disk.local.atomicWriteBinary(note, bytes(updated), undefined, undefined, expected);
+      expect(await disk.read()).toBe(updated);
+      expect(disk.adapter.process).toHaveBeenCalledTimes(1);
+      expect(disk.adapter.rename).not.toHaveBeenCalled();
+      expect(await disk.adapter.exists('Project/Deep/.Note.md.ncs.previous.ncs.tmp')).toBe(false);
+    } finally { await disk.dispose(); }
+  });
+
+  it.each(['edit', 'editor', 'rename'] as const)('keeps a local %s arriving at the atomic text callback', async change => {
+    const disk = await diskFixture();
+    const file = { path: note } as TFile;
+    const local = new LocalAdapter(disk.adapter, { getAbstractFileByPath: () => file } as unknown as Vault);
+    let canWrite = true;
+    const beforeCommit = jest.fn();
+    disk.adapter.process = jest.fn(async (_path, transform) => {
+      if (change === 'edit') await disk.write(draft);
+      if (change === 'editor') canWrite = false;
+      if (change === 'rename') file.path = 'Project/Elsewhere.md';
+      const result = transform(await disk.read());
+      await disk.write(result);
+      return result;
+    });
+    try {
+      const expected = { ...await disk.remember('common baseline'), canWrite: () => canWrite, beforeCommit };
+      await expect(local.atomicWriteBinary(note, bytes(incoming), undefined, undefined, expected)).rejects.toBeInstanceOf(LocalFileChangedError);
+      expect(await disk.read()).toBe(change === 'edit' ? draft : 'common baseline');
+      expect(beforeCommit).not.toHaveBeenCalled();
+      expect(disk.adapter.rename).not.toHaveBeenCalled();
+      expect(await disk.adapter.exists('Project/Deep/.Note.md.ncs.previous.ncs.tmp')).toBe(false);
+    } finally { local.dispose(); await disk.dispose(); }
+  });
+
+  it.each(['reject', 'truncate', 'remove', 'silent truncation'] as const)('keeps recovery bytes after an in-place write can %s', async failure => {
+    const disk = await diskFixture();
+    const restarted = new LocalAdapter(disk.adapter);
+    disk.adapter.process = jest.fn(async (_path, transform) => {
+      const result = transform(await disk.read());
+      if (failure === 'remove') await disk.adapter.remove(note);
+      if (failure === 'truncate' || failure === 'silent truncation') await disk.write(result.slice(0, 3));
+      if (failure !== 'silent truncation') throw new Error('volume write failure');
+      return result;
+    });
+    try {
+      const expected = await disk.remember('recoverable original');
+      let retained: string | undefined;
+      try {
+        await disk.local.atomicWriteBinary(note, bytes(incoming), undefined, undefined, expected);
+        throw new Error('The broken write was accepted');
+      } catch (err) {
+        if (!(err instanceof LocalFileChangedError)) throw err;
+        expect(err.requiresManualResolution).toBe(true);
+        retained = err.retainedCopy;
+      }
+      expect(retained).toBeTruthy();
+      expect(await disk.read(retained)).toBe('recoverable original');
+      if (failure === 'remove') {
+        expect(await restarted.stat(note)).not.toBeNull();
+        expect(await disk.read()).toBe('recoverable original');
+      } else {
+        await expect(restarted.stat(note)).rejects.toMatchObject({ retainedCopy: retained, requiresManualResolution: true });
+        expect(await disk.read()).toBe(failure === 'reject' ? 'recoverable original' : incoming.slice(0, 3));
+      }
+    } finally { restarted.dispose(); await disk.dispose(); }
+  });
+
+  it('rejects a damaged recovery snapshot before changing the note', async () => {
+    const disk = await diskFixture();
+    disk.adapter.process = jest.fn();
+    disk.hooks.afterWrite = async path => { if (path.endsWith('.ncs.previous.ncs.tmp')) await writeFile(disk.absolute(path), 'broken'); };
+    try {
+      const expected = await disk.remember('original');
+      await expect(disk.local.atomicWriteBinary(note, bytes(incoming), undefined, undefined, expected)).rejects.toThrow('Recovery copy verification failed');
+      expect(await disk.read()).toBe('original');
+      expect(disk.adapter.process).not.toHaveBeenCalled();
+      expect(await disk.adapter.exists('Project/Deep/.Note.md.ncs.previous.ncs.tmp')).toBe(false);
+    } finally { await disk.dispose(); }
+  });
+
+  it.each([false, true])('keeps non-UTF-8 data on the binary replacement path (original=%s)', async originalBinary => {
+    const disk = await diskFixture();
+    const original = originalBinary ? new Uint8Array([255, 0, 128]).buffer : bytes('original');
+    const updated = originalBinary ? bytes('remote') : new Uint8Array([255, 1, 128]).buffer;
+    disk.adapter.process = jest.fn();
+    try {
+      await writeFile(disk.absolute(note), Buffer.from(original));
+      const expected = { stat: (await disk.local.stat(note))!, hash: await sha256(original) };
+      await disk.local.atomicWriteBinary(note, updated, undefined, undefined, expected);
+      expect(new Uint8Array(await disk.adapter.readBinary(note))).toEqual(new Uint8Array(updated));
+      expect(disk.adapter.process).not.toHaveBeenCalled();
+      expect(disk.adapter.rename).toHaveBeenCalled();
+    } finally { await disk.dispose(); }
+  });
+
+  it('keeps same-basename binary attachments independent during parallel replacement', async () => {
+    const disk = await diskFixture();
+    const paths = ['Project/Deep/Note.png', 'Project/Deep/Note.pdf'];
+    const original = new Uint8Array([255, 0, 1]).buffer, updated = new Uint8Array([255, 3, 4, 5]).buffer;
+    try {
+      for (const path of paths) await writeFile(disk.absolute(path), Buffer.from(original));
+      await Promise.all(paths.map(async path => disk.local.atomicWriteBinary(path, updated, undefined, undefined, {
+        stat: await disk.local.stat(path), hash: await sha256(original),
+      })));
+      for (const path of paths) expect(new Uint8Array(await disk.adapter.readBinary(path))).toEqual(new Uint8Array(updated));
+      const backups = (disk.adapter.rename as jest.Mock).mock.calls.filter(([from]) => paths.includes(from));
+      expect(backups.map(([, to]) => to).sort()).toEqual(['Project/Deep/Note.ncs-previous-1-pdf', 'Project/Deep/Note.ncs-previous-1-png']);
+    } finally { await disk.dispose(); }
+  });
+
+  it.each(['Project/Deep/.Note.md.ncs.previous.ncs.tmp', 'Project/Deep/Note.ncs-previous-1-md'])('recovers and protects the retained copy %s', async copy => {
+    const disk = await diskFixture();
+    try {
+      await writeFile(disk.absolute(copy), 'recoverable bytes');
+      await disk.local.removeTmp(copy);
+      expect(await disk.adapter.exists(copy)).toBe(true);
+      expect(await disk.local.stat(note)).not.toBeNull();
+      expect(await disk.read()).toBe('recoverable bytes');
+    } finally { await disk.dispose(); }
+  });
+
+  it('requires a manual choice when both recovery formats exist', async () => {
+    const disk = await diskFixture();
+    const copies = ['Project/Deep/.Note.md.ncs.previous.ncs.tmp', 'Project/Deep/Note.ncs-previous-1-md'];
+    try {
+      for (let index = 0; index < copies.length; index++) await writeFile(disk.absolute(copies[index]), `copy ${index}`);
+      await expect(disk.local.stat(note)).rejects.toMatchObject({ requiresManualResolution: true });
+      expect(disk.adapter.rename).not.toHaveBeenCalled();
+      for (let index = 0; index < copies.length; index++) expect(await disk.read(copies[index])).toBe(`copy ${index}`);
+    } finally { await disk.dispose(); }
+  });
+
+  it('holds an existing long binary filename before an unsafe backup rename', async () => {
+    const disk = await diskFixture();
+    const path = 'Project/Deep/' + 'x'.repeat(247) + '.png';
+    const original = new Uint8Array([255, 0]).buffer, updated = new Uint8Array([255, 1]).buffer;
+    try {
+      await writeFile(disk.absolute(path), Buffer.from(original));
+      await expect(disk.local.atomicWriteBinary(path, updated, undefined, undefined, {
+        stat: await disk.local.stat(path), hash: await sha256(original),
+      })).rejects.toMatchObject({ requiresManualResolution: true });
+      expect(new Uint8Array(await disk.adapter.readBinary(path))).toEqual(new Uint8Array(original));
+      expect(disk.adapter.rename).not.toHaveBeenCalled();
+      expect(await disk.adapter.exists(tmpPathFor(path))).toBe(false);
+    } finally { await disk.dispose(); }
+  });
+
   it.each(['temporary write', 'publication'])('keeps a new file saved during %s', async phase => {
     const disk = await diskFixture();
     try {

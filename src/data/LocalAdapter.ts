@@ -16,10 +16,13 @@ export interface LocalWriteExpectation {
 }
 
 export class LocalFileChangedError extends Error {
+  readonly requiresManualResolution: boolean;
+
   constructor(path: string, readonly retainedCopy?: string) {
     super(retainedCopy
       ? `Local file changed during sync: ${path}. The previous copy is in ${retainedCopy}.`
       : `Local file changed during sync: ${path}.`);
+    this.requiresManualResolution = retainedCopy !== undefined;
   }
 }
 
@@ -31,6 +34,7 @@ export type CreationTimeSupportSource = () => Promise<CreationTimeSupport>;
 const TMP_SUFFIX = '.ncs.tmp';
 const LEGACY_TMP_SUFFIX = '.nextcloudsync.tmp';
 const PREVIOUS_SUFFIX = '.ncs.previous.ncs.tmp';
+const BINARY_PREVIOUS_PATTERN = /\.ncs-previous-(?:0|1-[^./]*)$/;
 const NAME_MAX_BYTES = 255;
 const IGNORE_TIMEOUT_MS = 5000;
 // A stored creation time further than this from the requested one is treated as not applied (docs/spec.md §9.7).
@@ -81,6 +85,15 @@ async function previousPathFor(path: string): Promise<string> {
     : '.' + await sha256(new TextEncoder().encode(fileName).buffer) + PREVIOUS_SUFFIX);
 }
 
+// A single backup extension preserves basename-based folder-note hooks during binary renames.
+function binaryPreviousPathFor(path: string): string | undefined {
+  const slash = path.lastIndexOf('/') + 1, dot = path.lastIndexOf('.');
+  const name = path.slice(slash, dot >= slash ? dot : undefined);
+  const extension = dot >= slash ? '1-' + path.slice(dot + 1) : '0';
+  const backup = name + '.ncs-previous-' + extension;
+  return utf8ByteLength(backup) <= NAME_MAX_BYTES ? path.slice(0, slash) + backup : undefined;
+}
+
 // Rewrites a raw write error when the target's final name itself exceeds NAME_MAX (unstorable); other errors pass through
 // unmasked. Only consulted from a catch block.
 function translateNameTooLong(err: unknown, targetPath: string): unknown {
@@ -96,7 +109,7 @@ function translateNameTooLong(err: unknown, targetPath: string): unknown {
 
 // This plugin's own atomic-write temp files (current and legacy suffix), never user content.
 export function isSyncTmpPath(path: string): boolean {
-  return path.endsWith(TMP_SUFFIX) || path.endsWith(LEGACY_TMP_SUFFIX);
+  return path.endsWith(TMP_SUFFIX) || path.endsWith(LEGACY_TMP_SUFFIX) || BINARY_PREVIOUS_PATTERN.test(path);
 }
 
 // Uses the Adapter API rather than the Vault API: it gives tmp-write -> rename atomicity, reaches paths the Vault index
@@ -258,26 +271,29 @@ export class LocalAdapter {
     if (openFile && !expected) {
       this.ignore(targetPath);
       await this.vault!.modify(openFile, content, ...writeOptionsArgs(mtime, effCtime));
-    } else if (!(openFile && expected && await this.processOpenNote(openFile, targetPath, content, expected, mtime, effCtime))) {
+    } else if (!(expected && await this.processTextFile(openFile, targetPath, content, expected, mtime, effCtime))) {
       await this.stageWrite(targetPath, tmp => this.adapter.write(tmp, content, ...writeOptionsArgs(mtime, effCtime)),
         expected, expected ? utf8ByteLength(content) : undefined);
     }
     await this.correctTunneling(targetPath, effCtime);
   }
 
-  // Preserve open leaves, using Obsidian's atomic text update when the saved note can round-trip as UTF-8.
+  // Text updates keep the indexed path stable for editor leaves and other plugins' rename hooks.
   async atomicWriteBinary(targetPath: string, data: ArrayBuffer, mtime?: number, ctime?: number, expected?: LocalWriteExpectation): Promise<LocalStat | void> {
     targetPath = normalizePath(targetPath);
     const effCtime = await this.effectiveCtime(ctime);
     const openFile = this.findOpenTFile(targetPath);
+    const text = expected ? this.decodeUtf8(data) : undefined;
+    if (expected && text !== undefined && await this.processTextFile(openFile, targetPath, text, expected, mtime, effCtime)) {
+      const written = await this.adapter.stat(targetPath);
+      await this.correctTunneling(targetPath, effCtime);
+      return written ?? undefined;
+    }
     if (openFile) {
-      const note = expected && targetPath.toLowerCase().endsWith('.md') ? this.decodeUtf8(data) : undefined;
-      if (!(expected && note !== undefined && await this.processOpenNote(openFile, targetPath, note, expected, mtime, effCtime))) {
-        if (expected) await this.readExpectedTarget(targetPath, expected);
-        expected?.beforeCommit?.();
-        this.ignore(targetPath);
-        await this.vault!.modifyBinary(openFile, data, ...writeOptionsArgs(mtime, effCtime));
-      }
+      if (expected) await this.readExpectedTarget(targetPath, expected);
+      expected?.beforeCommit?.();
+      this.ignore(targetPath);
+      await this.vault!.modifyBinary(openFile, data, ...writeOptionsArgs(mtime, effCtime));
       const written = expected ? await this.adapter.stat(targetPath) : null;
       await this.correctTunneling(targetPath, effCtime);
       return written ?? undefined;
@@ -333,20 +349,45 @@ export class LocalAdapter {
     catch { return undefined; }
   }
 
-  private async processOpenNote(
-    file: TFile, path: string, incoming: string, expected: LocalWriteExpectation, mtime?: number, ctime?: number,
+  private async processTextFile(
+    file: TFile | null, path: string, incoming: string, expected: LocalWriteExpectation, mtime?: number, ctime?: number,
   ): Promise<boolean> {
+    if (!file && typeof this.adapter.process !== 'function') return false;
     const bytes = await this.readExpectedTarget(path, expected, true);
     const original = bytes && this.decodeUtf8(bytes);
     if (original === undefined) return false;
-    await this.vault!.process(file, current => {
-      if (file.path !== path || current !== original || expected.canWrite?.() === false) {
-        throw new LocalFileChangedError(path);
+    const previous = await previousPathFor(path);
+    const retained = await this.retainedCopyFor(path);
+    if (retained) throw new LocalFileChangedError(path, retained);
+    const indexed = file ?? this.vault?.getAbstractFileByPath?.(path);
+    let writing = false, completed = false;
+    try {
+      // Keep recovery bytes without exposing a rename of the user's note to other plugins.
+      this.ignore(previous);
+      await this.adapter.writeBinary(previous, bytes!, ...writeOptionsArgs(expected.stat?.mtime,
+        await this.effectiveCtime(expected.stat?.ctime)));
+      if (await sha256(await this.adapter.readBinary(previous)) !== (expected.hash ?? await sha256(bytes!))) {
+        throw new Error(`Recovery copy verification failed: ${path}.`);
       }
-      expected.beforeCommit?.();
-      this.ignore(path);
-      return incoming;
-    }, ...writeOptionsArgs(mtime, ctime));
+      const replace = (current: string): string => {
+        if ((indexed && indexed.path !== path) || current !== original || expected.canWrite?.() === false) {
+          throw new LocalFileChangedError(path);
+        }
+        expected.beforeCommit?.();
+        this.ignore(path);
+        writing = true;
+        return incoming;
+      };
+      if (file) await this.vault!.process(file, replace, ...writeOptionsArgs(mtime, ctime));
+      else await this.adapter.process(path, replace, ...writeOptionsArgs(mtime, ctime));
+      await this.verifyWrite(path, utf8ByteLength(incoming));
+      completed = true;
+    } catch (err) {
+      if (writing) throw new LocalFileChangedError(path, previous);
+      throw err;
+    } finally {
+      if ((!writing || completed) && await this.adapter.exists(previous)) await this.adapter.remove(previous);
+    }
     return true;
   }
 
@@ -368,8 +409,12 @@ export class LocalAdapter {
   }
 
   private async commitGuardedWrite(tmp: string, target: string, expected: LocalWriteExpectation): Promise<void> {
-    const previous = expected.stat === null ? null : await previousPathFor(target);
-    if (previous && await this.adapter.exists(previous)) throw new LocalFileChangedError(target, previous);
+    const previous = expected.stat === null ? null : binaryPreviousPathFor(target);
+    if (previous === undefined) {
+      throw Object.assign(new Error(`Shorten the filename before replacing ${target}: its safe binary recovery name exceeds ${NAME_MAX_BYTES} bytes.`), { requiresManualResolution: true });
+    }
+    const retained = await this.retainedCopyFor(target);
+    if (retained) throw new LocalFileChangedError(target, retained);
     await this.readExpectedTarget(target, { ...expected, hash: undefined });
     this.ignore(target);
     if (!previous) {
@@ -419,15 +464,27 @@ export class LocalAdapter {
     return (await this.adapter.stat(normalizePath(path)))?.type === 'file';
   }
 
+  private async retainedCopyFor(path: string): Promise<string | undefined> {
+    let found: string | undefined;
+    for (const copy of [await previousPathFor(path), binaryPreviousPathFor(path)]) {
+      if (!copy || !await this.adapter.exists(copy)) continue;
+      if (found) throw new LocalFileChangedError(path, found);
+      found = copy;
+    }
+    return found;
+  }
+
   /** adapter.stat plus `ctime` only when trusted (support !== 'untrusted') and valid. null when absent. */
   async stat(path: string): Promise<LocalStat | null> {
     const normalized = normalizePath(path);
     let st = await this.adapter.stat(normalized);
-    if (!st && !isSyncTmpPath(normalized)) {
-      // An interrupted replace can leave the previous bytes parked with the live path vacant.
-      // Restore them before the sync engine can classify the absence as a user deletion.
-      const previous = await previousPathFor(normalized);
-      if ((await this.adapter.stat(previous))?.type === 'file') {
+    if (!isSyncTmpPath(normalized)) {
+      // Recover a vacant target; a remaining snapshot beside a live file needs a manual decision.
+      // Neither state may be classified as a new edit or deletion after a failed replacement.
+      const previous = await this.retainedCopyFor(normalized);
+      if (previous) {
+        if (st) throw new LocalFileChangedError(normalized, previous);
+        if ((await this.adapter.stat(previous))?.type !== 'file') return null;
         this.ignore(normalized);
         try { await this.adapter.rename(previous, normalized); }
         catch { if (!await this.adapter.exists(normalized)) throw new LocalFileChangedError(normalized, previous); }
@@ -447,7 +504,7 @@ export class LocalAdapter {
 
   // Tmp files only: never call remove on user files.
   async removeTmp(tmpPath: string): Promise<void> {
-    if (isSyncTmpPath(tmpPath) && !tmpPath.endsWith(PREVIOUS_SUFFIX) && await this.adapter.exists(tmpPath)) {
+    if (isSyncTmpPath(tmpPath) && !tmpPath.endsWith(PREVIOUS_SUFFIX) && !BINARY_PREVIOUS_PATTERN.test(tmpPath) && await this.adapter.exists(tmpPath)) {
       await this.adapter.remove(tmpPath);
     }
   }
