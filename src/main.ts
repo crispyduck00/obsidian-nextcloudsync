@@ -185,20 +185,24 @@ export default class ObsidianNextcloudsync extends Plugin {
       // Folders propagate immediately via single-folder ops; files use the debounced upload.
       const watchOn = (): boolean => this.settings.watchOnChangeEnabled;
       this.registerEvent(this.app.vault.on('create', (file: TAbstractFile) => {
-        if (!watchOn() || isOwnSyncEvent(file.path)) return;
+        if (isOwnSyncEvent(file.path)) return;
+        if (file instanceof TFolder) this.syncEngine?.forgetFolderDeletion(file.path);
+        if (!watchOn()) return;
         if (file instanceof TFolder) { void this.syncEngine?.createSingleFolder(file.path); return; }
         if (!(file instanceof TFile)) return;
         pendingUploads.add(file.path);
         debouncedUpload();
       }));
       this.registerEvent(this.app.vault.on('delete', (file: TAbstractFile) => {
-        if (!watchOn()) return;
         pendingUploads.delete(file.path);
         if (isOwnSyncEvent(file.path)) return; // e.g. atomic write replacing the old copy
+        if (file instanceof TFolder) this.syncEngine?.rememberFolderDeletion(file.path);
+        if (!watchOn()) return;
         if (file instanceof TFolder) { void this.syncEngine?.deleteSingleFolder(file.path); return; }
         void this.syncEngine?.deleteSingleFile(file.path);
       }));
       this.registerEvent(this.app.vault.on('rename', (file: TAbstractFile, oldPath: string) => {
+        if (!isOwnSyncEvent(oldPath) && !isOwnSyncEvent(file.path) && file instanceof TFolder) this.syncEngine?.forgetFolderDeletion(file.path);
         if (!watchOn()) return;
         pendingUploads.delete(oldPath);
         // tmp -> target renames are the tail of the plugin's own atomic writes.
@@ -230,7 +234,7 @@ export default class ObsidianNextcloudsync extends Plugin {
       new Notice('Configure the server settings first.');
       return;
     }
-    await this.syncEngine.syncManual({ manual: true });
+    await this.syncEngine.syncManual({ manual: true, refreshRemote: true });
   }
 
   // Desktop-only: on mobile the OS suspends background timers, so the timer is always stopped there.

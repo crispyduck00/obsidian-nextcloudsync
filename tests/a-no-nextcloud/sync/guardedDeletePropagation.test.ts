@@ -17,6 +17,7 @@ import {
   DEFAULT_SETTINGS, FileState, RemoteDirInfo, RemoteFileInfo, SyncSessionSummary, NetworkError,
 } from '../../../src/types';
 import { sha256 } from '../../../src/util/hash';
+import { computeSyncScopeFingerprint } from '../../../src/sync/plugins/scopeFingerprint';
 import { TFile, TFolder } from '../support/obsidian';
 
 const enc = new TextEncoder();
@@ -104,6 +105,7 @@ async function buildEngine(
     list: jest.fn(async () => ({ files: [], folders: [] })), // no dot paths in these vaults
     stat: jest.fn(async (p: string) => (p in vault ? { size: sizeOf(p), mtime: BASE_MTIME } : null)),
     exists: jest.fn(async (p: string) => p in vault),
+    isFolder: jest.fn(async (p: string) => folders.includes(p)),
     read: jest.fn(async (p: string) => vault[p] ?? ''),
     readBinary: jest.fn(async (p: string) => toBuf(vault[p] ?? '')),
     atomicWrite: jest.fn(async (p: string, d: string) => { vault[p] = d; }),
@@ -145,7 +147,19 @@ async function buildEngine(
   const app = {
     vault: {
       adapter: {
-        exists: jest.fn(async (p: string) => p in vault),
+        exists: jest.fn(async (p: string) => p in vault || folders.includes(p)),
+        list: async (p: string) => ({
+          files: Object.keys(vault).filter(path => path.startsWith(`${p}/`)),
+          folders: folders.filter(path => path.startsWith(`${p}/`)),
+        }),
+        rmdir: async (p: string, recursive: boolean) => {
+          if (trashFails || recursive) throw new Error('EACCES');
+          if ([...Object.keys(vault), ...folders].some(path => path.startsWith(`${p}/`))) throw new Error('ENOTEMPTY');
+          events.push(`trash:${p}`);
+          trashed.push(p);
+          folders.splice(folders.indexOf(p), 1);
+        },
+        stat: async (p: string) => folders.includes(p) ? { type: 'folder' } : null,
         remove: jest.fn(async (p: string) => { delete vault[p]; }),
         mkdir: jest.fn(async (p: string) => { if (!folders.includes(p)) folders.push(p); }),
       },
@@ -172,8 +186,9 @@ async function buildEngine(
   const logger = { log: jest.fn(async (m: string) => { logs.push(m); }) };
   const statusBar = { setStatus: jest.fn(), setSyncComplete: jest.fn(), setProgress: jest.fn() };
 
+  const settings = { ...DEFAULT_SETTINGS, syncOnWifiOnly: false };
   const engine = new SyncEngine({
-    app, settings: { ...DEFAULT_SETTINGS, syncOnWifiOnly: false },
+    app, settings,
     localAdapter, stateDB, statusBar, webdavFactory: { createClient }, logger,
     pluginDir: PLUGIN_DIR, configDir: '.obsidian',
   } as never);
@@ -185,7 +200,7 @@ async function buildEngine(
   };
 
   return {
-    engine, stateDB, localAdapter, client, app, trashed, logs, events, sync, vault, folders,
+    engine, stateDB, localAdapter, client, app, trashed, logs, events, sync, vault, folders, settings,
     failTrash: () => { trashFails = true; },
   };
 }
@@ -208,6 +223,187 @@ async function track(stateDB: StateDB, path: string, body: string): Promise<File
 const trackDir = (stateDB: StateDB, path: string): void =>
   stateDB.setDir({ path, remoteFileId: `dir-${path}` });
 
+describe('Missing shared folders and concurrent directory changes', () => {
+  it('uploads siblings when the first upload starts tracking their new parent', async () => {
+    const anchor = await listed('Anchor.md', 'base');
+    const h = await buildEngine({ 'Anchor.md': 'base', 'Fresh/a.md': 'a', 'Fresh/b.md': 'b' }, ['Fresh'],
+      world({ listing: [anchor], exists: true }));
+    await track(h.stateDB, anchor.path, 'base');
+    // Nextcloud's successful MKCOL callback records the new identity during the first PUT.
+    h.client.uploadFile.mockImplementation(async () => { trackDir(h.stateDB, 'Fresh'); });
+
+    const summary = await h.sync();
+
+    expect(summary.errors).toEqual([]);
+    expect(summary.uploadedCount).toBe(2);
+    expect(h.client.uploadFile).toHaveBeenNthCalledWith(1, 'Fresh/a.md', expect.anything(), expect.any(Number), expect.anything());
+    expect(h.client.uploadFile).toHaveBeenNthCalledWith(2, 'Fresh/b.md', expect.anything(), expect.any(Number), expect.anything());
+    expect(h.stateDB.getFile('Fresh/a.md')).toBeDefined();
+    expect(h.stateDB.getFile('Fresh/b.md')).toBeDefined();
+    expect(h.trashed).toEqual([]);
+  });
+
+  it('refreshes the file revision before uploading an edit against a cached listing', async () => {
+    const cached = await listed('note.md', 'old');
+    const current = { ...cached, etag: 'live-etag' };
+    const h = await buildEngine({ 'note.md': 'edit on the device' }, [], world({ listing: [cached], stat: () => current }));
+    Object.assign(h.client, { inspectDirectory: async () => null });
+    await track(h.stateDB, cached.path, 'old');
+
+    await h.sync();
+    expect(h.client.statFile).toHaveBeenCalledWith(cached.path);
+    expect(h.client.uploadFile).toHaveBeenCalledWith(cached.path, expect.anything(), expect.any(Number),
+      expect.objectContaining({ ifMatchEtag: 'live-etag' }));
+  });
+
+  it('keeps edited, new and excluded files in an invisible folder, then downloads the latest visible copy', async () => {
+    const vault = { 'Shared/edit.md': 'local!', 'Shared/draft.md': 'draft', 'Shared/clean.md': 'old', 'Shared/.local': 'kept' };
+    const remote = world();
+    const h = await buildEngine(vault, ['Shared'], remote);
+    await track(h.stateDB, 'Shared/edit.md', 'server'); // Same size and stat signature.
+    await track(h.stateDB, 'Shared/clean.md', 'old');
+    trackDir(h.stateDB, 'Shared');
+
+    const denied = await h.sync();
+    expect(h.client.uploadFile).not.toHaveBeenCalled();
+    expect(h.client.createDirectory).not.toHaveBeenCalled();
+    expect(h.folders).toContain('Shared');
+    expect(vault).toEqual({ 'Shared/edit.md': 'local!', 'Shared/draft.md': 'draft', 'Shared/.local': 'kept' });
+    expect(h.stateDB.getFile('Shared/edit.md')?.localMtime).toBeUndefined();
+    expect(denied.errors).toContainEqual(expect.objectContaining({ path: 'Shared' }));
+
+    remote.dirs = [remoteDir('Shared')];
+    remote.listing = [await listed('Shared/clean.md', 'new'), await listed('Shared/edit.md', 'server')];
+    remote.bodies = { 'Shared/clean.md': 'new', 'Shared/edit.md': 'server' };
+    await h.sync();
+    expect(vault['Shared/clean.md']).toBe('new');
+    expect(h.client.deleteFile).not.toHaveBeenCalled();
+  });
+
+  it('combines local file and directory removals in the same limit', async () => {
+    const h = await buildEngine({ 'A/a.md': 'a', 'A/b.md': 'b' }, ['A'], world());
+    await track(h.stateDB, 'A/a.md', 'a');
+    await track(h.stateDB, 'A/b.md', 'b');
+    trackDir(h.stateDB, 'A');
+    Reflect.get(h.engine, 'opts').settings.massDeleteLimit = 2;
+    const summary = await h.sync();
+    expect(h.trashed).toEqual([]);
+    expect(h.folders).toEqual(['A']);
+    expect(summary.errors).toContainEqual(expect.objectContaining({ path: '(mass-delete breaker)' }));
+  });
+
+  it.each(['sync', 'watch delete', 'watch move'])('keeps every remote child of a protected root during %s', async operation => {
+    const note = { ...await listed('Shared/a.md', 'a'), etag: 'revision-a' };
+    const w = world({ listing: [note], dirs: [remoteDir('Shared')], stat: () => note });
+    const h = await buildEngine({}, [], w);
+    const inspectDirectory = jest.fn(async () => ({ protected: true, fileId: 'dir-Shared' }));
+    const moveFile = jest.fn();
+    Object.assign(h.client, { inspectDirectory, moveFile });
+    await track(h.stateDB, note.path, 'a');
+    trackDir(h.stateDB, 'Shared');
+
+    h.engine.rememberFolderDeletion('Shared');
+    if (operation === 'sync') await h.sync();
+    if (operation === 'watch delete') await h.engine.deleteSingleFile(note.path);
+    if (operation === 'watch move') {
+      await h.engine.renameSingleFile(note.path, 'Moved/a.md');
+      await h.engine.renameSingleFolder('Shared', 'Moved');
+    }
+    expect(inspectDirectory).toHaveBeenCalledWith('Shared');
+    expect(h.client.deleteFile).not.toHaveBeenCalled();
+    expect(h.client.deleteCollection).not.toHaveBeenCalled();
+    expect(moveFile).not.toHaveBeenCalled();
+    expect(h.stateDB.getFile(note.path)).toBeDefined();
+  });
+
+  it('allows an individual deletion while its shared parent remains in the local vault', async () => {
+    const note = { ...await listed('Shared/a.md', 'a'), etag: 'revision-a' };
+    const h = await buildEngine({}, ['Shared'], world({ listing: [note], dirs: [remoteDir('Shared')], stat: () => note }));
+    const inspectDirectory = jest.fn(async () => ({ protected: true, fileId: 'dir-Shared' }));
+    Object.assign(h.client, { inspectDirectory });
+    await track(h.stateDB, note.path, 'a');
+    trackDir(h.stateDB, 'Shared');
+
+    await h.engine.deleteSingleFile(note.path);
+    expect(h.client.deleteFile).toHaveBeenCalledWith(note.path, expect.any(String), 'revision-a');
+    expect(inspectDirectory).toHaveBeenCalledTimes(1);
+    expect(inspectDirectory).toHaveBeenCalledWith('Shared');
+  });
+
+  it('checks the filesystem when the vault index still shows a removed mount', async () => {
+    const note = { ...await listed('Shared/a.md', 'a'), etag: 'revision-a' };
+    const h = await buildEngine({}, ['Shared'], world({ stat: () => note }));
+    Object.assign(h.app.vault.adapter, { stat: async () => null });
+    Object.assign(h.client, { inspectDirectory: async () => ({ protected: true, fileId: 'dir-Shared' }) });
+    await track(h.stateDB, note.path, 'a');
+    trackDir(h.stateDB, 'Shared');
+
+    await h.engine.deleteSingleFile(note.path);
+    expect(h.client.deleteFile).not.toHaveBeenCalled();
+  });
+
+  it('leaves an empty replacement folder intact when the original was removed elsewhere', async () => {
+    const h = await buildEngine({}, [], world({ dirs: [remoteDir('Folder')] }));
+    trackDir(h.stateDB, 'Folder');
+    Object.assign(h.client, { inspectDirectory: async () => ({ protected: false, fileId: 'replacement' }) });
+    await h.engine.deleteSingleFolder('Folder');
+    expect(h.client.deleteCollection).not.toHaveBeenCalled();
+    expect(h.stateDB.getDir('Folder')).toBeDefined();
+  });
+
+  it('does not create from a watch event within an inaccessible tracked folder', async () => {
+    const h = await buildEngine({ 'Shared/sub/new.md': 'new local work' }, ['Shared', 'Shared/sub'], world());
+    trackDir(h.stateDB, 'Shared');
+    Object.assign(h.client, { inspectDirectory: async () => null });
+    await h.engine.syncSingleFile('Shared/sub/new.md');
+    await h.engine.createSingleFolder('Shared/sub');
+    expect(h.client.uploadFile).not.toHaveBeenCalled();
+    expect(h.client.createDirectory).not.toHaveBeenCalled();
+    expect(h.vault['Shared/sub/new.md']).toBe('new local work');
+  });
+
+  it('holds a new draft when the entire listing comes from a stale root ETag', async () => {
+    const path = 'Shared/draft.md';
+    const h = await buildEngine({ [path]: 'new local work' }, ['Shared'], world());
+    trackDir(h.stateDB, 'Shared');
+    h.stateDB.setSyncScopeFingerprint(computeSyncScopeFingerprint(DEFAULT_SETTINGS));
+    h.stateDB.setRemoteRootEtag('unchanged');
+    h.client.getRootEtag.mockResolvedValue('unchanged');
+    const inspectDirectory = jest.fn(async () => null);
+    Object.assign(h.client, { inspectDirectory });
+
+    const result = await h.sync();
+
+    expect(h.client.getFiles).not.toHaveBeenCalled();
+    expect(inspectDirectory).toHaveBeenCalledWith('Shared');
+    expect(h.client.uploadFile).not.toHaveBeenCalled();
+    expect(result.errors).toEqual([expect.objectContaining({ path })]);
+    expect(h.vault[path]).toBe('new local work');
+  });
+
+  it('keeps tracking and pending changes across repeated listings of a replacement folder', async () => {
+    const path = 'Shared/draft.md';
+    const remote = world({ dirs: [{ ...remoteDir('Shared'), fileId: 'replacement' }] });
+    const h = await buildEngine({ [path]: 'new local work' }, ['Shared'], remote);
+    trackDir(h.stateDB, 'Shared');
+    const inspectDirectory = jest.fn(async () => ({ protected: false, fileId: remote.dirs[0].fileId }));
+    Object.assign(h.client, { inspectDirectory });
+
+    for (let i = 0; i < 2; i++) {
+      const result = await h.sync();
+      expect(result.errors).toContainEqual(expect.objectContaining({ path: 'Shared' }));
+      expect(h.stateDB.getDir('Shared')?.remoteFileId).toBe('dir-Shared');
+    }
+    expect(h.client.uploadFile).not.toHaveBeenCalled();
+    expect(h.vault[path]).toBe('new local work');
+
+    remote.dirs = [remoteDir('Shared')];
+    const restored = await h.sync();
+    expect(restored.errorCount).toBe(0);
+    expect(h.client.uploadFile).toHaveBeenCalledWith(path, expect.any(ArrayBuffer), expect.any(Number), expect.anything());
+  });
+});
+
 function emptySummary(): SyncSessionSummary {
   return {
     startedAt: 0, completedAt: null, uploadedCount: 0, downloadedCount: 0, deletedCount: 0,
@@ -225,9 +421,8 @@ async function vaultWithTrashedFolder() {
   // route.
   const vault = { 'F/a.md': 'a body', 'F/sub/b.md': 'b body', 'keep.md': 'kept' };
   const w = world({
-    listing: [await listed('F/a.md', 'a body'), await listed('F/sub/b.md', 'b body'),
-      await listed('keep.md', 'kept')],
-    dirs: [], // the directory listing lost F and F/sub; the file listing did not
+    listing: [await listed('keep.md', 'kept')],
+    dirs: [],
     exists: (p) => p === 'keep.md', // asked directly, the server confirms both folders are gone
   });
   const h = await buildEngine(vault, ['F', 'F/sub'], w);
@@ -251,7 +446,7 @@ describe('[SPEC:GDP-8] trashing a folder forgets everything under it, not just t
 
     await h.sync();
 
-    expect(h.trashed).toEqual(['F/sub', 'F']); // children before parents
+    expect(h.trashed).toEqual(['F/a.md', 'F/sub/b.md', 'F/sub', 'F']);
 
     // The rows are the amplifier. While they survive, the next sync sees two tracked files that are
     // absent locally — indistinguishable from the user having deleted them — and pushes that upward.
@@ -263,7 +458,6 @@ describe('[SPEC:GDP-8] trashing a folder forgets everything under it, not just t
     // Untouched: the trash was scoped to F, and nothing else lost its tracking with it.
     expect(h.stateDB.getFile('keep.md')).toBeDefined();
     expect(h.vault['keep.md']).toBe('kept');
-    expect(h.logs.join('\n')).toContain('plugin trash — dropped tracking');
   });
 });
 
@@ -312,12 +506,12 @@ describe('[SPEC:GDP-10] a folder the listing was right about stays gone, quietly
   });
 });
 
-describe('[SPEC:GDP-11] a folder trashed because the SERVER said so forgets its subtree too', () => {
+describe('[SPEC:GDP-11] a file deletion cannot remove a directory with its subtree', () => {
   // Driven straight at processRemoteDeletion rather than through applyRemoteMirror, which is the
   // other caller that hands it a folder. Mirror finishes by reconciling State against the remote
   // listing, and that step would drop the stranded rows on its own — so a mirror-based test would
   // pass whether or not the subtree drop existed, and prove nothing about it.
-  it('drops the stale child rows the trash left behind', async () => {
+  it('keeps the tracked children and local content when the file path is a directory', async () => {
     const vault = { 'F/a.md': 'a body' };
     const h = await buildEngine(vault, ['F'], world());
     await track(h.stateDB, 'F/a.md', 'a body');
@@ -328,10 +522,10 @@ describe('[SPEC:GDP-11] a folder trashed because the SERVER said so forgets its 
       processRemoteDeletion(p: string, s: SyncSessionSummary): Promise<void>;
     }).processRemoteDeletion('F', summary);
 
-    expect(h.trashed).toEqual(['F']);
-    expect(h.vault['F/a.md']).toBeUndefined();
-    expect(h.stateDB.getFile('F/a.md')).toBeUndefined();
-    expect(h.stateDB.getDir('F')).toBeUndefined();
+    expect(h.trashed).toEqual([]);
+    expect(h.vault['F/a.md']).toBe('a body');
+    expect(h.stateDB.getFile('F/a.md')).toBeDefined();
+    expect(h.stateDB.getDir('F')).toBeDefined();
   });
 });
 
@@ -348,7 +542,7 @@ describe('[SPEC:GDP-12] a trash that failed forgets nothing', () => {
     expect(h.stateDB.getFile('F/sub/b.md')).toBeDefined();
     expect(h.stateDB.getDir('F')).toBeDefined();
     expect(h.stateDB.getDir('F/sub')).toBeDefined();
-    expect(summary.errors.map(e => e.path)).toEqual(expect.arrayContaining(['F', 'F/sub']));
+    expect(summary.errors.map(e => e.path)).toEqual(expect.arrayContaining(['F/a.md', 'F/sub/b.md']));
   });
 });
 
@@ -495,10 +689,9 @@ describe('[SPEC:GDP-26] a genuine local deletion still reaches the server', () =
 });
 
 describe('[SPEC:GDP-27] a genuine local folder deletion still reaches the server', () => {
-  it('deletes the child file and then the emptied collection', async () => {
+  it('deletes proven matching child files and keeps the collection', async () => {
     // Everything under F is gone from the vault and from the folder list, but the server still has
-    // all of it and agrees with our base. Tracked-and-absent on this side, present on that one: a
-    // deletion the user made here, in both its file and folder halves.
+    // all of it and agrees with our base. The normal guarded file deletion still applies.
     const h = await buildEngine({ 'keep.md': 'kept' }, [], world({
       listing: [await listed('F/a.md', 'a body'), await listed('keep.md', 'kept')],
       dirs: [remoteDir('F')],
@@ -511,9 +704,9 @@ describe('[SPEC:GDP-27] a genuine local folder deletion still reaches the server
     const summary = await h.sync();
 
     expect(h.client.deleteFile).toHaveBeenCalledWith('F/a.md', expect.anything());
-    expect(h.client.deleteCollection).toHaveBeenCalledWith('F');
+    expect(h.client.deleteCollection).not.toHaveBeenCalled();
     expect(h.stateDB.getFile('F/a.md')).toBeUndefined();
-    expect(h.stateDB.getDir('F')).toBeUndefined();
+    expect(h.stateDB.getDir('F')).toBeDefined();
     expect(summary.errorCount).toBe(0);
   });
 });
@@ -565,5 +758,73 @@ describe('[SPEC:GDP-29] the added round trip is bounded', () => {
     expect(h.client.statFile).toHaveBeenCalledTimes(3);
     expect(h.events.filter(e => e.startsWith('stat:')).sort())
       .toEqual(['stat:one.md', 'stat:three.md', 'stat:two.md']);
+  });
+});
+
+
+describe('Observed local folder deletion intent', () => {
+  function inspectFolders(h: Awaited<ReturnType<typeof buildEngine>>): void {
+    Object.assign(h.client, {
+      inspectDirectory: jest.fn(async (path: string) => ({ protected: false, fileId: `dir-${path}` })),
+    });
+  }
+
+  it('keeps an unexplained disappearance instead of deleting remote children', async () => {
+    const note = { ...await listed('Gone/a.md', 'a'), etag: 'a-revision' };
+    const h = await buildEngine({}, [], world({ listing: [note], dirs: [remoteDir('Gone')], stat: () => note }));
+    await track(h.stateDB, note.path, 'a');
+    trackDir(h.stateDB, 'Gone');
+    inspectFolders(h);
+
+    const result = await h.sync();
+
+    expect(h.client.deleteFile).not.toHaveBeenCalled();
+    expect(h.client.createDirectory).not.toHaveBeenCalled();
+    expect(h.stateDB.getFile(note.path)).toBeDefined();
+    expect(result.errors).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'Gone' })]));
+  });
+
+  it('carries an observed ancestor deletion into a missing descendant before a sibling restores the parent', async () => {
+    const changed = { ...await listed('Gone/first.md', 'new'), etag: 'changed' };
+    const unchanged = { ...await listed('Gone/sub/last.md', 'old'), etag: 'same' };
+    const w = world({ listing: [changed, unchanged], dirs: [remoteDir('Gone'), remoteDir('Gone/sub')],
+      bodies: { 'Gone/first.md': 'new' }, stat: path => path === changed.path ? changed : unchanged });
+    const h = await buildEngine({}, [], w);
+    h.settings.networkConcurrency = 1;
+    await track(h.stateDB, changed.path, 'old');
+    await track(h.stateDB, unchanged.path, 'old');
+    trackDir(h.stateDB, 'Gone');
+    trackDir(h.stateDB, 'Gone/sub');
+    h.engine.rememberFolderDeletion('Gone');
+    inspectFolders(h);
+    const write = h.localAdapter.atomicWriteBinary.getMockImplementation()!;
+    h.localAdapter.atomicWriteBinary.mockImplementation(async (path: string, data: ArrayBuffer) => {
+      await write(path, data);
+      h.folders.push('Gone');
+    });
+
+    const result = await h.sync();
+
+    expect(h.vault[changed.path]).toBe('new');
+    expect(h.client.deleteFile).toHaveBeenCalledTimes(1);
+    expect(h.client.deleteFile).toHaveBeenCalledWith(unchanged.path, unchanged.checksum, unchanged.etag);
+    expect(result.errors).toEqual([]);
+  });
+
+  it.each(['account', 'recreated', 'replaced'])('does not reuse recorded intent after %s changed', async change => {
+    const note = { ...await listed('Gone/a.md', 'a'), etag: 'a-revision' };
+    const h = await buildEngine({}, [], world({ listing: [note], dirs: [remoteDir('Gone')], stat: () => note }));
+    await track(h.stateDB, note.path, 'a');
+    trackDir(h.stateDB, 'Gone');
+    h.engine.rememberFolderDeletion('Gone');
+    if (change === 'account') h.settings.username = 'another-account';
+    if (change === 'recreated') h.engine.forgetFolderDeletion('Gone');
+    if (change === 'replaced') h.stateDB.setDir({ path: 'Gone', remoteFileId: 'another-folder' });
+    inspectFolders(h);
+
+    await h.sync();
+
+    expect(h.client.deleteFile).not.toHaveBeenCalled();
+    expect(h.stateDB.getFile(note.path)).toBeDefined();
   });
 });

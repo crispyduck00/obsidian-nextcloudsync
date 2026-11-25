@@ -1,9 +1,9 @@
 // Directory reconciliation (DP) — SyncEngine.reconcileDirectories orchestration logic.
-// Directories are first-class entities, symmetric with files: create/delete propagate by
-// existence diff against the tracked set — an empty directory is preserved, never auto-pruned.
+// Directory creation propagates in both directions. Server removal can clear empty local
+// folders, and local removal leaves the remote collection in place.
 // Maximal combination coverage (design policy: tests maximised): every quadrant of
 // {local, remote, tracked}, create/delete ordering, system exclusion, circuit breaker, the
-// fileLockingEnabled gate, the delete-time empty probe, and self-healing on failure.
+// protection of remote collections, and self-healing on failure.
 import { SyncEngine } from '../../../src/sync/SyncEngine';
 import { TFolder } from '../support/obsidian';
 import { DavSyncSettings, DirState, RemoteDirInfo, SyncSessionSummary } from '../../../src/types';
@@ -40,14 +40,12 @@ const rdir = (path: string): RemoteDirInfo => ({ path, fileId: `id-${path}`, eta
 
 function makeClient(over: {
   remoteDirs?: string[];
-  emptyOf?: (p: string) => boolean;
-  deleteImpl?: (p: string) => Promise<void>;
 } = {}): MockClient {
   return {
     getDirectories: jest.fn(async () => (over.remoteDirs ?? []).map(rdir)),
     createDirectory: jest.fn(async () => undefined),
-    deleteCollection: jest.fn(async (p: string) => { if (over.deleteImpl) await over.deleteImpl(p); }),
-    isRemoteDirEmpty: jest.fn(async (p: string) => (over.emptyOf ? over.emptyOf(p) : true)),
+    deleteCollection: jest.fn(async () => undefined),
+    isRemoteDirEmpty: jest.fn(async () => true),
     // trashLocal confirms absence with a Depth 0 probe first. This harness models a listing that is right
     // about absence, so the probe agrees; verifyBeforeTrash.test.ts covers the case where it is wrong.
     remoteExists: jest.fn(async () => false),
@@ -70,11 +68,15 @@ function makeEngine(opts: {
     stat: jest.fn(async () => null),
     exists: jest.fn(async () => false),
     mkdir,
+    rmdir: (p: string, recursive: boolean) => {
+      if (recursive) throw new Error('Recursive removal');
+      return trashFile(new TFolder(p));
+    },
     // The engine registers a trashed subtree here so watch mode does not read the plugin's own vault delete events as user deletions.
     ignore: jest.fn(),
   };
   const localPaths = opts.localDirs ?? [];
-  const trashFile = jest.fn(async () => undefined);
+  const trashFile = jest.fn(async (_folder: TFolder) => undefined);
   const vault = {
     adapter,
     getFiles: () => [],
@@ -121,13 +123,13 @@ describe('SyncEngine.reconcileDirectories — directory create/delete propagatio
     expect(setDir).toHaveBeenCalledWith({ path: 'fromB', remoteFileId: 'id-fromB' });
   });
 
-  it('[SPEC:DP-3] tracked & local-absent (remote present) → DELETE the remote collection (user deleted it here)', async () => {
+  it('[SPEC:DP-3] tracked & local-absent (remote present) → retain the remote collection and tracking', async () => {
     const client = makeClient({ remoteDirs: ['gone'] });
     const { engine, deleteDir } = makeEngine({ client, localDirs: [], tracked: [dirState('gone')] });
     await reconcile(engine, makeSummary());
-    expect(client.isRemoteDirEmpty).toHaveBeenCalledWith('gone');
-    expect(client.deleteCollection).toHaveBeenCalledWith('gone');
-    expect(deleteDir).toHaveBeenCalledWith('gone');
+    expect(client.isRemoteDirEmpty).not.toHaveBeenCalled();
+    expect(client.deleteCollection).not.toHaveBeenCalled();
+    expect(deleteDir).not.toHaveBeenCalled();
   });
 
   it('[SPEC:DP-4] tracked & remote-absent (local present) → trash locally (deleted on another device)', async () => {
@@ -173,35 +175,34 @@ describe('SyncEngine.reconcileDirectories — directory create/delete propagatio
   });
 
   it('[SPEC:DP-9] delete ordering: children before parents (deep-first)', async () => {
-    const client = makeClient({ remoteDirs: ['a', 'a/b', 'a/b/c'] });
-    const { engine } = makeEngine({ client, localDirs: [], tracked: [dirState('a'), dirState('a/b'), dirState('a/b/c')] });
+    const paths = ['a', 'a/b', 'a/b/c'];
+    const client = makeClient();
+    const { engine, trashFile } = makeEngine({ client, localDirs: paths, tracked: paths.map(dirState) });
     await reconcile(engine, makeSummary());
-    expect(client.deleteCollection.mock.calls.map((c) => c[0])).toEqual(['a/b/c', 'a/b', 'a']);
+    expect(trashFile.mock.calls.map(([folder]) => folder.path)).toEqual(['a/b/c', 'a/b', 'a']);
   });
 
-  it('[SPEC:DP-10] data-loss guard: a remote dir that probes non-empty at delete time is not deleted', async () => {
-    const client = makeClient({ remoteDirs: ['gone'], emptyOf: () => false });
+  it('[SPEC:DP-10] data-loss guard: an empty listing never triggers recursive remote deletion', async () => {
+    const client = makeClient({ remoteDirs: ['gone'] });
     const { engine } = makeEngine({ client, localDirs: [], tracked: [dirState('gone')] });
     await reconcile(engine, makeSummary());
     expect(client.deleteCollection).not.toHaveBeenCalled();
   });
 
   it('[SPEC:DP-11] circuit breaker: refuses a suspiciously large delete batch but still applies creations', async () => {
-    const tracked = Array.from({ length: 25 }, (_, i) => dirState(`d${i}`)); // all remote-present, local-absent → delete
-    const client = makeClient({ remoteDirs: tracked.map((d) => d.path) });
-    const { engine } = makeEngine({ client, localDirs: ['newdir'], tracked });
+    const tracked = Array.from({ length: 25 }, (_, i) => dirState(`d${i}`));
+    const client = makeClient();
+    const { engine, trashFile } = makeEngine({ client, localDirs: ['newdir', ...tracked.map(d => d.path)], tracked });
     await reconcile(engine, makeSummary());
-    expect(client.deleteCollection).not.toHaveBeenCalled();   // destructive batch refused
+    expect(trashFile).not.toHaveBeenCalled();
     expect(client.createDirectory).toHaveBeenCalledWith('newdir'); // creation still happens
   });
 
   it('[SPEC:MDV-6] dir mass-delete breaker records dirBreakerSkipped — full, uncapped, category-split', async () => {
-    // 15 deleteRemote candidates (tracked, remote-present, local-absent) + 15 trashLocal candidates
-    // (tracked, local-present, remote-absent) = 30 total candidates. denom = max(tracked=30,
-    // remoteDirs=15, localDirs=15) = 30; effectiveMassDeleteLimit(30) = max(20, floor(30*0.2)=6) = 20.
-    // 30 > 20 trips the breaker.
+    // Twenty-one actual local removals exceed the default limit. Retained server folders
+    // are outside both the removal count and the list of actions the user can approve.
     const deleteRemoteDirs = Array.from({ length: 15 }, (_, i) => dirState(`rm${i}`));
-    const trashLocalDirs = Array.from({ length: 15 }, (_, i) => dirState(`tr${i}`));
+    const trashLocalDirs = Array.from({ length: 21 }, (_, i) => dirState(`tr${i}`));
     const tracked = [...deleteRemoteDirs, ...trashLocalDirs];
     const client = makeClient({ remoteDirs: deleteRemoteDirs.map((d) => d.path) });
     const { engine } = makeEngine({
@@ -216,35 +217,27 @@ describe('SyncEngine.reconcileDirectories — directory create/delete propagatio
     expect(breakerError!.skippedPaths).toBeUndefined(); // dir breaker does not use the capped field
     expect(breakerError!.dirBreakerSkipped).toBeDefined();
     // Full, UNCAPPED lists (no 10-item truncation) — every candidate present, split by category.
-    expect(breakerError!.dirBreakerSkipped!.deleteRemote.sort()).toEqual(deleteRemoteDirs.map((d) => d.path).sort());
+    expect(breakerError!.dirBreakerSkipped!.deleteRemote).toEqual([]);
     expect(breakerError!.dirBreakerSkipped!.trashLocal.sort()).toEqual(trashLocalDirs.map((d) => d.path).sort());
   });
 
-  // The remote delete is never lock-wrapped (file locking is always off); DP-13 below is the only behaviour.
-
-  it('[SPEC:DP-13] lock OFF (always, feature 033): issues no lock but still deletes', async () => {
+  it('[SPEC:DP-13] retaining the server folder takes no lock', async () => {
     const client = makeClient({ remoteDirs: ['gone'] });
     const { engine } = makeEngine({ client, localDirs: [], tracked: [dirState('gone')], settings: settings() });
     await reconcile(engine, makeSummary());
     expect(client.lockFile).not.toHaveBeenCalled();
-    expect(client.deleteCollection).toHaveBeenCalledWith('gone');
+    expect(client.deleteCollection).not.toHaveBeenCalled();
   });
 
-  it('[SPEC:DP-14] self-healing: one failed delete is counted, never aborts the rest', async () => {
-    const client = makeClient({
-      remoteDirs: ['boom', 'ok'],
-      deleteImpl: async (p) => { if (p === 'boom') throw new Error('network'); },
-    });
-    const { engine } = makeEngine({
-      client, localDirs: [], tracked: [dirState('boom'), dirState('ok')],
-      settings: settings(),
-    });
+  it('[SPEC:DP-14] self-healing: one failed local removal never aborts the rest', async () => {
+    const client = makeClient();
+    const { engine, trashFile } = makeEngine({ client, localDirs: ['boom', 'ok'], tracked: [dirState('boom'), dirState('ok')] });
+    trashFile.mockRejectedValueOnce(new Error('shared folder is busy'));
     const summary = makeSummary();
     await reconcile(engine, summary);
-    expect(client.deleteCollection).toHaveBeenCalledWith('ok');
+    expect(trashFile).toHaveBeenCalledWith(expect.objectContaining({ path: 'ok' }));
     expect(summary.errorCount).toBe(1);
-    // No locking, so no unlock either — the self-healing continuation is the assertion.
-    expect(client.lockFile).not.toHaveBeenCalled();
+    expect(client.deleteCollection).not.toHaveBeenCalled();
   });
 
   it('[SPEC:DP-15] self-healing: a listing failure skips the session without throwing', async () => {
@@ -266,12 +259,12 @@ describe('SyncEngine.resolveSkippedDir — per-path force resolution for a mass-
     expect(client.deleteCollection).not.toHaveBeenCalled();
   });
 
-  it('[SPEC:MDV-8] deleteRemote + choice=local → confirm the deletion on the remote', async () => {
+  it('[SPEC:MDV-8] deleteRemote + choice=local → direct the user to Nextcloud', async () => {
     const client = makeClient({ remoteDirs: ['gone'] });
     const { engine, deleteDir } = makeEngine({ client, localDirs: [] });
-    await engine.resolveSkippedDir('gone', 'deleteRemote', 'local');
-    expect(client.deleteCollection).toHaveBeenCalledWith('gone');
-    expect(deleteDir).toHaveBeenCalledWith('gone');
+    await expect(engine.resolveSkippedDir('gone', 'deleteRemote', 'local')).rejects.toThrow('Remove the folder in Nextcloud');
+    expect(client.deleteCollection).not.toHaveBeenCalled();
+    expect(deleteDir).not.toHaveBeenCalled();
   });
 
   it('[SPEC:MDV-8] trashLocal + choice=remote → confirm the deletion locally (trash it)', async () => {
@@ -325,20 +318,18 @@ describe('SyncEngine.resolveAllSkippedDirs — bulk-apply one choice to every sk
   });
 
   it('[SPEC:MDV-9] partial failure: tallies failures and keeps only the still-failed paths in dirBreakerSkipped', async () => {
-    const client = makeClient({
-      remoteDirs: ['rm0', 'rm1'],
-      deleteImpl: async (p: string) => { if (p === 'rm1') throw new Error('network error'); },
-    });
-    const { engine } = makeEngine({ client, localDirs: [] });
-    const summary = summaryWithBreakerError({ deleteRemote: ['rm0', 'rm1'], trashLocal: [] });
+    const client = makeClient({ remoteDirs: ['rm0', 'rm1'] });
+    const { engine } = makeEngine({ client, localDirs: ['tr0'] });
+    const summary = summaryWithBreakerError({ deleteRemote: ['rm0', 'rm1'], trashLocal: ['tr0'] });
     setLastSummary(engine, summary);
 
-    const result = await engine.resolveAllSkippedDirs('local'); // deleteRemote+local => client.deleteCollection
+    const result = await engine.resolveAllSkippedDirs('local');
 
-    expect(result).toEqual({ resolved: 1, failed: 1 });
+    expect(result).toEqual({ resolved: 1, failed: 2 });
+    expect(client.createDirectory).toHaveBeenCalledWith('tr0');
+    expect(client.deleteCollection).not.toHaveBeenCalled();
     const remaining = summary.errors.find((e) => e.path === '(dir mass-delete breaker)');
-    expect(remaining).toBeDefined();
-    expect(remaining!.dirBreakerSkipped).toEqual({ deleteRemote: ['rm1'], trashLocal: [] });
+    expect(remaining!.dirBreakerSkipped).toEqual({ deleteRemote: ['rm0', 'rm1'], trashLocal: [] });
   });
 
   it('[SPEC:MDV-9] refuses to run while a full sync is in progress', async () => {

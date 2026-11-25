@@ -405,7 +405,7 @@ describe('ConflictApplier.resolveByWrite — creation time [SPEC:CT-3]', () => {
         const { applier, conn, calls } = build({ upload: 'ok', local: { content: 'x', mtime: 1, size: 1, ctime: local } });
         await applier.resolveByWrite(conn, 'note.md', 'merged\n', clean, remoteAt(server), 'old-remote', 'etag', summary());
         expect(calls.wroteCtime).toEqual([expectedWrite]);
-        expect(calls.uploadOpts).toEqual([{ ctime: expectedUpload }]);
+        expect(calls.uploadOpts).toEqual([expect.objectContaining({ ctime: expectedUpload, ifMatchEtag: '"r1"' })]);
       });
     }
 
@@ -533,19 +533,19 @@ describe('ConflictApplier.resolveByPreferLocal — creation time [SPEC:CT-4]', (
   it('uploads with the older of local and server creation time: older local [SPEC:CT-4]', async () => {
     const { applier, conn, calls } = build({ local: { content: 'x', mtime: 1, size: 1, ctime: OLD } });
     await applier.resolveByPreferLocal(conn, 'note.md', remoteInfo({ creationTime: NEW }), summary());
-    expect(calls.uploadOpts).toEqual([{ ctime: OLD }]);
+    expect(calls.uploadOpts).toEqual([expect.objectContaining({ ctime: OLD })]);
   });
 
   it('uploads with the older of local and server creation time: older server [SPEC:CT-4]', async () => {
     const { applier, conn, calls } = build({ local: { content: 'x', mtime: 1, size: 1, ctime: NEW } });
     await applier.resolveByPreferLocal(conn, 'note.md', remoteInfo({ creationTime: OLD }), summary());
-    expect(calls.uploadOpts).toEqual([{ ctime: OLD }]);
+    expect(calls.uploadOpts).toEqual([expect.objectContaining({ ctime: OLD })]);
   });
 
   it('sends no ctime when the server value is unknown [SPEC:CT-4]', async () => {
     const { applier, conn, calls } = build({ local: { content: 'x', mtime: 1, size: 1, ctime: OLD } });
     await applier.resolveByPreferLocal(conn, 'note.md', remoteInfo({ creationTime: undefined }), summary());
-    expect(calls.uploadOpts).toEqual([{ ctime: undefined }]);
+    expect(calls.uploadOpts).toEqual([expect.objectContaining({ ctime: undefined })]);
   });
 });
 

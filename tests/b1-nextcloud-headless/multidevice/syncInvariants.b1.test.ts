@@ -184,34 +184,51 @@ describeLive('Layer B — cross-device sync invariants', (getEnv) => {
     expect(e1).not.toBeNull();                                   // remote genuinely changed (sanity)
   }, 180_000);
 
-  // Regression: when the remote folder was deleted by another device and this device holds UN-PUSHED edits/creates
-  // under it, the upload into the missing parent must not fail with 404 forever. NextcloudClient's in-session
-  // "createdDirs" cache must drop stale ancestor entries on a 404/409 before re-issuing MKCOL.
-  it('INV-12 dir-delete (remote) × nested local edit/create: nested upload survives (no data loss)', async () => {
-    const d = dev('inv12-D'); const m = dev('inv12-M');
+  it('INV-12 an unavailable or replaced folder holds local work until the original returns', async () => {
+    const settings = { excludedFolders: ['parked-inv12'] };
+    const d = dev('inv12-D', settings); const m = dev('inv12-M', settings);
     d.vault.seedLocal('anchor.md', 'a');
     d.vault.seedLocal('Folder/note.md', 'note-base\n');
     await d.sync(); await m.sync();
-    // M removes the whole folder and syncs → remote Folder/ + note.md deleted.
-    m.vault.deleteLocalTree('Folder'); await m.sync();
+    const originalId = d.stateDB.getDir('Folder')?.remoteFileId;
+    expect(originalId).toBeTruthy();
+    // Moving the folder outside the watched area makes the same 404 as a withdrawn mount.
+    await baseClient.moveFile('Folder', 'parked-inv12');
     expect(await remoteExists('Folder/note.md')).toBe(false);
     // D (stale) edits the nested note AND creates a new nested file, then syncs.
     d.vault.seedLocal('Folder/note.md', 'note-EDITED-by-D\n');
     d.vault.seedLocal('Folder/new.md', 'brand-new\n');
-    // Probe right after D's first sync: D's authored content must reach the remote (not be trashed).
+    // Pending work stays on D and the deletion on M remains effective.
     await d.sync();
-    expect(await remoteExists('Folder/new.md')).toBe(true);   // [probe] new file pushed
-    expect(await remoteExists('Folder/note.md')).toBe(true);  // [probe] edited file restored/pushed
-    expect(d.vault.localExists('Folder/new.md')).toBe(true);  // [probe] not trashed locally by dir reconcile
-    // Converge with a few more rounds on both devices.
-    await m.sync(); await d.sync(); await m.sync();
-    // INVARIANT: D's authored content is NOT lost — it survives on remote and on D, and reaches M.
+    await m.sync();
+    expect(await remoteExists('Folder')).toBe(false);
+    expect(m.vault.folderExists('Folder')).toBe(false);
+    expect(d.vault.readLocal('Folder/new.md')).toBe('brand-new\n');
+    expect(d.vault.readLocal('Folder/note.md')).toBe('note-EDITED-by-D\n');
+    expect(d.engine.getLastSessionSummary()?.errors).toContainEqual(expect.objectContaining({ path: 'Folder' }));
+    await assertNoChurn(d, 'inv12-held');
+
+    // A different folder appearing at the same path does not adopt the pending edits, even after two cycles.
+    await baseClient.createDirectory('Folder');
+    await baseClient.uploadFile('Folder/note.md', new TextEncoder().encode('replacement\n').buffer);
+    await d.sync(); await d.sync();
+    expect(d.stateDB.getDir('Folder')?.remoteFileId).toBe(originalId);
+    expect(d.engine.getLastSessionSummary()?.errors).toContainEqual(expect.objectContaining({ path: 'Folder' }));
+    expect(d.vault.readLocal('Folder/note.md')).toBe('note-EDITED-by-D\n');
+    expect(await remoteText('Folder/note.md')).toBe('replacement\n');
+    expect(await remoteExists('Folder/new.md')).toBe(false);
+
+    // Restore the original folder with its original identity, as when access comes back.
+    await baseClient.deleteCollection('Folder');
+    await baseClient.moveFile('parked-inv12', 'Folder');
+    await d.sync(); await m.sync();
     expect(await remoteExists('Folder/new.md')).toBe(true);
     expect(await remoteText('Folder/new.md')).toBe('brand-new\n');
     expect(await remoteExists('Folder/note.md')).toBe(true);
     expect(await remoteText('Folder/note.md')).toBe('note-EDITED-by-D\n');
     expect(d.vault.readLocal('Folder/new.md')).toBe('brand-new\n');
     expect(d.vault.readLocal('Folder/note.md')).toBe('note-EDITED-by-D\n');
+    expect(m.vault.readLocal('Folder/new.md')).toBe('brand-new\n');
     // And the system converges (no churn after).
     await assertNoChurn(d, 'inv12-D');
   }, 240_000);

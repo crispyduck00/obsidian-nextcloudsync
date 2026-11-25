@@ -23,7 +23,7 @@ import { IWebDAVClient } from './IWebDAVClient';
 import { DavSyncSettings } from '../types';
 import { toRemotePath, hrefToRelative, encodeRemoteUrl, encodeServerUrl, ensureRemoteDir, mkcolStrict, prepareMissingParentRetry, isTransportFailure } from './remotePath';
 import { RemoteDirCache } from './RemoteDirCache';
-import { readMultistatus, readHref, readProp, readIsCollection, readDavProps, readLockDiscoveryOwner } from './dav/propfind';
+import { readMultistatus, readHref, readProp, readIsCollection, readDavProps, readLockDiscoveryOwner, confirmsEmptyCollection } from './dav/propfind';
 import { NO_CACHE_HEADERS } from './noCacheHeaders';
 
 export class StandardWebDAVClient implements IWebDAVClient {
@@ -170,8 +170,8 @@ export class StandardWebDAVClient implements IWebDAVClient {
     });
     if (res.status !== 207) return false; // conservative: never report empty unless the server is clear.
     try {
-      const { files, folders } = this.parseListing(res.text, path, { op: 'isRemoteDirEmpty', path, status: res.status });
-      return files.length === 0 && folders.length === 0;
+      const responses = readMultistatus(res.text, { op: 'isRemoteDirEmpty', path, status: res.status, method: 'PROPFIND' });
+      return confirmsEmptyCollection(responses, href => hrefToRelative(this.baseUrl, this.remoteBase, href) === path);
     } catch {
       return false; // an unreadable body is exactly the ambiguity this method must never trash on.
     }
@@ -241,11 +241,12 @@ export class StandardWebDAVClient implements IWebDAVClient {
 
   async uploadFile(
     remotePath: string, data: ArrayBuffer, mtime?: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; ctime?: number },
+    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; onlyIfAbsent?: boolean; ctime?: number },
   ): Promise<void> {
     const headers: Record<string, string> = { Authorization: this.authHeader, ...NO_CACHE_HEADERS };
     if (mtime) headers['X-OC-MTime'] = String(Math.floor(mtime / 1000));
     if (opts?.ifMatchEtag) headers['If-Match'] = `"${opts.ifMatchEtag.replace(/^"|"$/g, '')}"`;
+    if (opts?.onlyIfAbsent) headers['If-None-Match'] = '*';
     // PUT first; on a missing parent MKCOL the ancestors and retry once. Standard WebDAV answers 409, Nextcloud 404.
     let res = await this.req({ url: this.remoteUrl(remotePath), method: 'PUT', headers, body: data, throw: false });
     let dirError: RemoteDirCreateError | null = null;
@@ -288,8 +289,9 @@ export class StandardWebDAVClient implements IWebDAVClient {
     if (res.status < 200 || res.status >= 300) throw dirError ?? new NetworkError(res.status, res.text, 'MOVE');
   }
 
-  async deleteFile(path: string, _expectedRemoteId: string): Promise<void> {
-    const res = await this.req({ url: this.remoteUrl(path), method: 'DELETE', headers: { Authorization: this.authHeader, ...NO_CACHE_HEADERS }, throw: false });
+  async deleteFile(path: string, _expectedRemoteId: string, ifMatchEtag?: string): Promise<void> {
+    const condition: Record<string, string> = ifMatchEtag ? { 'If-Match': `"${ifMatchEtag}"` } : {};
+    const res = await this.req({ url: this.remoteUrl(path), method: 'DELETE', headers: { Authorization: this.authHeader, ...condition, ...NO_CACHE_HEADERS }, throw: false });
     if (res.status === 404) return; // blind delete: already gone = success
     if (res.status < 200 || res.status >= 300) {
       if (res.status === 423) {

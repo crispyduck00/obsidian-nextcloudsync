@@ -191,6 +191,10 @@ export interface SyncState {
   lastSyncTime: number;
   syncToken: string | null;
   files: Record<string, FileState>;
+  /** The configured Nextcloud root has been listed successfully, even if it was empty. */
+  remoteRootObserved?: boolean;
+  /** Nextcloud file ID of the configured vault root, independent of the listing cache. */
+  remoteRootFileId?: string;
   /** Absent in older state files; treated as {}. */
   directories?: Record<string, DirState>;
   /**
@@ -464,6 +468,13 @@ export class RemoteRootMissingError extends NetworkError {
   constructor() {
     super(404, '', 'PROPFIND');
     this.name = 'RemoteRootMissingError';
+  }
+}
+
+export class RemoteRootChangedError extends Error {
+  constructor() {
+    super('The configured Nextcloud vault folder has changed. Check the target before syncing.');
+    this.name = 'RemoteRootChangedError';
   }
 }
 /**

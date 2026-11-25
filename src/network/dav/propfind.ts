@@ -92,6 +92,25 @@ export function readIsCollection(prop: Element): boolean {
   return (resourcetype?.getElementsByTagNameNS(DAV_NS, 'collection').length ?? 0) > 0;
 }
 
+export function readRemovalProtection(prop: Element): boolean {
+  const read = (name: string): string | undefined =>
+    prop.getElementsByTagNameNS(NC_NS, name)[0]?.textContent?.trim().toLowerCase();
+  const permissions = prop.getElementsByTagNameNS(OC_NS, 'permissions')[0]?.textContent ?? '';
+  const mountRoot = read('is-mount-root');
+  return !permissions.includes('D') || mountRoot === 'true' || mountRoot === '1'
+    || (!mountRoot && /^(group|shared|external|federated)$/.test(read('mount-type') ?? ''))
+    || ['true', '1'].includes(read('is-protected') ?? '')
+    || ['false', '0'].includes(read('is-deletable') ?? '')
+    || ['false', '0'].includes(read('is-renameable') ?? '')
+    || ['false', '0'].includes(read('is-moveable') ?? '');
+}
+
+export function confirmsEmptyCollection(responses: Element[], isRequestedHref: (href: string) => boolean): boolean {
+  if (responses.length !== 1 || !isRequestedHref(readHref(responses[0]))) return false;
+  const prop = readProp(responses[0]);
+  return prop !== null && readIsCollection(prop);
+}
+
 // Lock owner from a lockdiscovery PROPFIND (issue #58), or null: D:owner (RFC 4918) first, then Nextcloud's nc:lock-owner (files_lock).
 // Never throws, so it cannot interrupt the 423 being handled.
 export function readLockDiscoveryOwner(xml: string): string | null {

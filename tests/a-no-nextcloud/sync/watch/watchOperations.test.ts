@@ -39,7 +39,6 @@ interface Opts {
   processFile?: (r: RemoteFileInfo, s: SyncSessionSummary) => Promise<void>;
   conflicts?: () => number;
   failRename?: boolean;
-  failFolderDelete?: boolean;
 }
 
 function build(o: Opts = {}, over: Partial<WatchDeps> = {}) {
@@ -71,11 +70,9 @@ function build(o: Opts = {}, over: Partial<WatchDeps> = {}) {
       calls.stats.push(p);
       return o.onServer === undefined ? remote({ path: p }) : o.onServer;
     },
+    isRemoteDirEmpty: async () => true,
     createDirectory: async (p: string) => { calls.createDirectory.push(p); },
-    deleteCollection: async (p: string) => {
-      if (o.failFolderDelete) throw new Error('boom');
-      calls.deleteCollection.push(p);
-    },
+    deleteCollection: async (p: string) => { calls.deleteCollection.push(p); },
     moveFile: async (a: string, b: string) => { calls.move.push([a, b]); },
   } as unknown as IWebDAVClient;
 
@@ -110,6 +107,7 @@ function build(o: Opts = {}, over: Partial<WatchDeps> = {}) {
       drop: (p: string) => { calls.droppedBase.push(p); },
     } as unknown as MergeBaseRecorder,
     transfer: {
+      acquireLock: async () => null, releaseLock: async () => undefined,
       uploadFile: async (_c: unknown, _u: unknown, p: string) => { calls.uploaded.push(p); },
     } as unknown as TransferService,
     deletion: {
@@ -299,17 +297,10 @@ describe('WatchOperations — folder operations (feature 046)', () => {
     expect(calls.deleteCollection).toEqual([]);
   });
 
-  it('deletes a tracked folder and drops its tracking', async () => {
+  it('retains a tracked collection even when the local folder is removed', async () => {
     const { watch, calls } = build({ trackedDirs: ['Old'] });
     await watch.deleteSingleFolder('Old');
-    expect(calls.deleteCollection).toEqual(['Old']);
-    expect(calls.deleteDir).toEqual(['Old']);
-  });
-
-  it('KEEPS the tracking when the remote delete failed', async () => {
-    // Dropping it would make the next sync re-create the folder locally.
-    const { watch, calls } = build({ trackedDirs: ['Old'], failFolderDelete: true });
-    await watch.deleteSingleFolder('Old');
+    expect(calls.deleteCollection).toEqual([]);
     expect(calls.deleteDir).toEqual([]);
   });
 
@@ -333,10 +324,12 @@ describe('WatchOperations — folder operations (feature 046)', () => {
     expect(calls.renames).toEqual([]);
   });
 
-  it('skips a folder operation only when BOTH sides of a rename are excluded', async () => {
-    const { watch, calls } = build({}, { isSystemExcluded: (p) => p === 'Old' });
-    await watch.renameSingleFolder('Old', 'Visible');
-    expect(calls.move).toEqual([['Old', 'Visible']]); // moving INTO scope still propagates
+  it.each(['Old', 'New'])('skips file and folder MOVEs if %s is outside scope', async (excluded) => {
+    const { watch, calls } = build({}, { isSystemExcluded: (p) => p === excluded || p.startsWith(`${excluded}/`) });
+    await watch.renameSingleFolder('Old', 'New');
+    await watch.renameSingleFile('Old/a.md', 'New/a.md');
+    expect(calls.move).toEqual([]);
+    expect(calls.renames).toEqual([]);
   });
 });
 

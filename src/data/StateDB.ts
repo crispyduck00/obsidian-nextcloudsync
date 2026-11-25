@@ -152,6 +152,24 @@ export class StateDB {
     this.state.syncToken = token;
   }
 
+  hasObservedRemoteRoot(): boolean {
+    return this.state.remoteRootObserved === true || !!this.state.syncToken || this.getRemoteRootEtag() !== null
+      || Object.keys(this.state.files).length > 0 || Object.keys(this.state.directories ?? {}).length > 0;
+  }
+
+  markRemoteRootObserved(): void {
+    this.state.remoteRootObserved = true;
+  }
+
+  getRemoteRootFileId(): string | null {
+    return this.state.remoteRootFileId ?? null;
+  }
+
+  setRemoteRootFileId(fileId: string): void {
+    this.state.remoteRootFileId = fileId;
+    this.markRemoteRootObserved();
+  }
+
   // null => the next sync full-scans (docs/spec.md §8a.5).
   getRemoteRootEtag(): string | null {
     return this.state.remoteRootEtag ?? null;

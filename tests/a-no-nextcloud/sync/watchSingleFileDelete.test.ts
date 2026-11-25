@@ -94,7 +94,7 @@ describe('[SPEC:WSF-5] SyncEngine.deleteSingleFile — C-2 deletion classificati
 
     await engine.deleteSingleFile('Notes/synced.md');
 
-    expect(deleteFile).toHaveBeenCalledWith('Notes/synced.md', 'h1');
+    expect(deleteFile).toHaveBeenCalledWith('Notes/synced.md', 'h1', 'e1');
     expect(stateDB.files.has('Notes/synced.md')).toBe(false);
   });
 

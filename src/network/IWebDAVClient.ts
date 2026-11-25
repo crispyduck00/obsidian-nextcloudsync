@@ -1,4 +1,15 @@
-import { NextcloudFeatures, RemoteFileInfo, RemoteDirInfo, SyncChanges, FileVersion, VaultRootOutcome } from '../types';
+import { DirState, NextcloudFeatures, RemoteFileInfo, RemoteDirInfo, SyncChanges, FileVersion, VaultRootOutcome } from '../types';
+
+export interface RemoteDirectoryInspection {
+  protected: boolean;
+  fileId: string | null;
+}
+
+export interface TrackedDirectories {
+  getDir(path: string): DirState | undefined;
+  getRemoteRootFileId(): string | null;
+  setRemoteRootFileId(fileId: string): void;
+}
 
 export interface IWebDAVClient {
   connect(): Promise<NextcloudFeatures>;
@@ -24,6 +35,8 @@ export interface IWebDAVClient {
   getRootEtag(): Promise<string | null>;
   /** Lists the directories (collections) beneath `path`, recursively; the base folder itself is excluded. Same unreadable-body contract as {@link getFiles}. */
   getDirectories(path: string): Promise<RemoteDirInfo[]>;
+  /** Account DAV can inspect a collection, including mount and app protection. */
+  inspectDirectory?(path: string, includeDescendants?: boolean, isExcluded?: (path: string) => boolean): Promise<RemoteDirectoryInspection | null>;
   /**
    * True iff the collection at `path` has no children (one Depth:1 probe). Data-loss guard before
    * {@link deleteCollection}. An unreadable body resolves to false.
@@ -31,6 +44,10 @@ export interface IWebDAVClient {
   isRemoteDirEmpty(path: string): Promise<boolean>;
   /** Creates a directory and any missing ancestors via MKCOL; an existing collection is fine. */
   createDirectory(path: string): Promise<void>;
+  /** Restrict automatic MKCOLs to children of an established vault root. */
+  requireExistingVaultRoot?(required: boolean): void;
+  /** Filesystem writes must never provision the path of a previously tracked collection. */
+  trackKnownDirectories?(state: TrackedDirectories): void;
   /**
    * Creates the vault folder (sync root) and reports whether it had to be created. Missing ancestors
    * are created best-effort; only the vault folder itself is judged (docs/spec.md §5.2).
@@ -52,13 +69,14 @@ export interface IWebDAVClient {
    * @param mtime ms epoch; sent as X-OC-MTime so Nextcloud preserves the timestamp.
    * @param opts.precomputedSha256 reused for the OC-Checksum header instead of re-hashing.
    * @param opts.ifMatchEtag sent as `If-Match`; a changed remote yields 412 (PreconditionFailedError).
+   * @param opts.expectedRemoteChecksum verifies the current Nextcloud body before a conditional write.
    */
   uploadFile(
     remotePath: string, data: ArrayBuffer, mtime?: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; ctime?: number },
+    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; expectedRemoteChecksum?: string; onlyIfAbsent?: boolean; ctime?: number },
   ): Promise<void>;
   moveFile(oldPath: string, newPath: string): Promise<void>;
-  deleteFile(path: string, expectedRemoteId: string): Promise<void>;
+  deleteFile(path: string, expectedRemoteId: string, ifMatchEtag?: string): Promise<void>;
   getSyncToken(): Promise<string | null>;
   /**
    * Existence check for one remote path (PROPFIND Depth 0). False only on a definitive 404;
@@ -81,11 +99,11 @@ export interface IWebDAVClient {
 
   /**
    * Uploads in chunks; the file appears atomically at the final path.
-   * @param opts `ifMatchEtag` is applied to the assembling MOVE, so a changed remote yields 412 (PreconditionFailedError) as in {@link uploadFile}.
+   * @param opts An `ifMatchEtag` uses a single conditional PUT so it is evaluated on the actual file.
    */
   uploadChunked(
     remotePath: string, data: ArrayBuffer, chunkSizeBytes: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; mtime?: number; ctime?: number },
+    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; expectedRemoteChecksum?: string; onlyIfAbsent?: boolean; mtime?: number; ctime?: number },
   ): Promise<void>;
 
   /**

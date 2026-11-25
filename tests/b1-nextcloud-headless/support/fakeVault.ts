@@ -77,9 +77,10 @@ export class FakeVault {
         const e = store.get(from);
         if (e) { addAncestors(to); store.set(to, e); store.delete(from); }
       },
-      async stat(p: string): Promise<{ size: number; mtime: number; ctime: number } | null> {
+      async stat(p: string): Promise<{ type: 'file' | 'folder'; size: number; mtime: number; ctime: number } | null> {
         const e = store.get(p);
-        return e ? { size: e.data.byteLength, mtime: e.mtime, ctime: e.ctime } : null;
+        if (e) return { type: 'file', size: e.data.byteLength, mtime: e.mtime, ctime: e.ctime };
+        return self.folderExists(p) ? { type: 'folder', size: 0, mtime: 0, ctime: 0 } : null;
       },
       // Full vault-relative paths of the immediate children of `path` (mirrors Obsidian's adapter.list).
       async list(path: string): Promise<{ files: string[]; folders: string[] }> {
@@ -105,6 +106,14 @@ export class FakeVault {
         return { files: [...files], folders: [...folders] };
       },
       async mkdir(p: string): Promise<void> { explicitFolders.add(p); addAncestors(p); },
+      async rmdir(p: string, recursive: boolean): Promise<void> {
+        if (recursive) throw new Error('Unexpected recursive folder removal');
+        const prefix = `${p}/`;
+        if ([...store.keys(), ...explicitFolders].some(path => path.startsWith(prefix))) {
+          throw new Error(`ENOTEMPTY: ${p}`);
+        }
+        explicitFolders.delete(p);
+      },
     } as unknown as DataAdapter;
 
     this.vault = {
@@ -169,12 +178,17 @@ export class FakeVault {
   failTrashFor(paths: readonly string[]): () => void {
     const fm = this.app.fileManager as unknown as { trashFile: (file: TFile | TFolder) => Promise<void> };
     const original = fm.trashFile;
+    const rmdir = this.adapter.rmdir;
+    const fails = (path: string): boolean => paths.some(candidate => candidate === path || candidate.startsWith(`${path}/`));
     fm.trashFile = async (file: TFile | TFolder): Promise<void> => {
-      const prefix = `${file.path}/`;
-      if (paths.some((p) => p === file.path || p.startsWith(prefix))) throw new Error('trash failed');
+      if (fails(file.path)) throw new Error('trash failed');
       return original(file);
     };
-    return () => { fm.trashFile = original; };
+    this.adapter.rmdir = async (path, recursive): Promise<void> => {
+      if (fails(path)) throw new Error('folder removal failed');
+      return rmdir.call(this.adapter, path, recursive);
+    };
+    return () => { fm.trashFile = original; this.adapter.rmdir = rmdir; };
   }
   deleteLocalTree(path: string): void {
     const prefix = `${path}/`;

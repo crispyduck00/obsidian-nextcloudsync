@@ -20,6 +20,7 @@ function build(opts: { blocked: boolean; running?: boolean }): Harness {
   };
 
   const client = {
+    isRemoteDirEmpty: jest.fn(async () => true),
     statFile: jest.fn(async () => null),
     createDirectory: jest.fn(async () => undefined),
     deleteCollection: jest.fn(async () => undefined),
@@ -44,7 +45,7 @@ function build(opts: { blocked: boolean; running?: boolean }): Harness {
   const newSummary = jest.spyOn(journal, 'newSummary');
   const recordError = jest.spyOn(journal, 'recordError');
   const mergeBase = { record: jest.fn(), drop: jest.fn() };
-  const transfer = { uploadFile: jest.fn(async () => undefined) };
+  const transfer = { uploadFile: jest.fn(async () => undefined), acquireLock: async () => null, releaseLock: async () => undefined };
   const deletion = { deleteLocallyMissing: jest.fn(async () => 'deleted') };
   const resolution = { dropCleanSnapshot: jest.fn() };
   const isSystemExcluded = jest.fn(() => false);
@@ -131,12 +132,12 @@ describe('[SPEC:MWM-2] watch mode honours "Wi-Fi only" on cellular', () => {
     expect(deps.notify).not.toHaveBeenCalled();
   });
 
-  it.each(OPS)('[SPEC:MWM-2] not blocked: %s proceeds to the server', async (_name, run) => {
+  it.each(OPS)('[SPEC:MWM-2] not blocked: %s follows its ordinary path', async (name, run) => {
     const { watch, mocks, logs } = build({ blocked: false });
 
     await run(watch);
 
-    expect(mocks.connect).toHaveBeenCalledTimes(1);
+    expect(mocks.connect).toHaveBeenCalledTimes(name === 'folder-delete' ? 0 : 1);
     expect(logs.filter(l => l.startsWith('watch: skipped'))).toEqual([]);
   });
 

@@ -23,7 +23,7 @@ function makeFileEngine(base: FileState) {
     requestSave: jest.fn(),
   };
   const engine = new SyncEngine({
-    app: {}, settings: {}, localAdapter: {}, stateDB, statusBar: { setStatus: jest.fn() },
+    app: {}, settings: {}, localAdapter: { stat: async () => null }, stateDB, statusBar: { setStatus: jest.fn() },
     webdavFactory: { createClient: jest.fn(async () => ({ client: { deleteFile, statFile }, features: {} })) },
     pluginDir: '', configDir: '.obsidian',
   } as never);
@@ -39,8 +39,8 @@ function makeFolderEngine(dir: DirState) {
     requestSave: jest.fn(),
   };
   const engine = new SyncEngine({
-    app: {}, settings: {}, localAdapter: {}, stateDB, statusBar: { setStatus: jest.fn() },
-    webdavFactory: { createClient: jest.fn(async () => ({ client: { deleteCollection }, features: {} })) },
+    app: {}, settings: {}, localAdapter: { stat: async () => null }, stateDB, statusBar: { setStatus: jest.fn() },
+    webdavFactory: { createClient: jest.fn(async () => ({ client: { deleteCollection, isRemoteDirEmpty: async () => true }, features: {} })) },
     pluginDir: '', configDir: '.obsidian',
   } as never);
   return { engine, dirs, stateDB, deleteCollection };
@@ -73,7 +73,7 @@ describe('[SPEC:G1-2] SyncEngine.deleteSingleFile — remote delete failure must
       requestSave: jest.fn(),
     };
     const engine = new SyncEngine({
-      app: {}, settings: {}, localAdapter: {}, stateDB, statusBar: { setStatus: jest.fn() },
+      app: {}, settings: {}, localAdapter: { stat: async () => null }, stateDB, statusBar: { setStatus: jest.fn() },
       webdavFactory: { createClient: jest.fn(async () => ({ client: { deleteFile, statFile }, features: {} })) },
       pluginDir: '', configDir: '.obsidian',
     } as never);
@@ -85,33 +85,14 @@ describe('[SPEC:G1-2] SyncEngine.deleteSingleFile — remote delete failure must
   });
 });
 
-describe('[SPEC:G1-2] SyncEngine.deleteSingleFolder — remote delete failure must not drop tracking', () => {
-  it('keeps the tracked directory when the remote collection DELETE fails', async () => {
-    const { engine, dirs, stateDB } = makeFolderEngine({ path: 'Old', remoteFileId: null });
+describe('[SPEC:G1-2] SyncEngine.deleteSingleFolder — local folder removal retains remote tracking', () => {
+  it('keeps the tracked directory without calling collection DELETE', async () => {
+    const { engine, dirs, stateDB, deleteCollection } = makeFolderEngine({ path: 'Old', remoteFileId: null });
 
     await engine.deleteSingleFolder('Old');
 
     expect(dirs.has('Old')).toBe(true);
     expect(stateDB.deleteDir).not.toHaveBeenCalled();
-  });
-
-  it('drops the tracked directory when the remote collection DELETE succeeds', async () => {
-    const dirs = new Map<string, DirState>([['Old', { path: 'Old', remoteFileId: null }]]);
-    const deleteCollection = jest.fn(async () => undefined);
-    const stateDB = {
-      getDir: (p: string) => dirs.get(p),
-      deleteDir: jest.fn((p: string) => { dirs.delete(p); }),
-      requestSave: jest.fn(),
-    };
-    const engine = new SyncEngine({
-      app: {}, settings: {}, localAdapter: {}, stateDB, statusBar: { setStatus: jest.fn() },
-      webdavFactory: { createClient: jest.fn(async () => ({ client: { deleteCollection }, features: {} })) },
-      pluginDir: '', configDir: '.obsidian',
-    } as never);
-
-    await engine.deleteSingleFolder('Old');
-
-    expect(dirs.has('Old')).toBe(false);
-    expect(stateDB.deleteDir).toHaveBeenCalledWith('Old');
+    expect(deleteCollection).not.toHaveBeenCalled();
   });
 });

@@ -6,7 +6,6 @@
 // trashed, the server is asked directly (PROPFIND Depth 0) whether it is really gone. (docs/spec.md §8a.1)
 import { DirectoryReconciler, DirectoryDeps } from '../../../../src/sync/directory/DirectoryReconciler';
 import { SyncJournal } from '../../../../src/sync/session/SyncJournal';
-import { TransferService } from '../../../../src/sync/transfer/TransferService';
 import { SyncSessionSummary, DirState } from '../../../../src/types';
 import { IWebDAVClient } from '../../../../src/network/IWebDAVClient';
 import { TFolder } from '../../support/obsidian';
@@ -34,7 +33,7 @@ function build(exists: boolean | (() => Promise<boolean>)) {
   const deps: DirectoryDeps = {
     app: {
       vault: {
-        adapter: { mkdir: async () => undefined },
+        adapter: { list: async () => ({ files: [], folders: [] }), rmdir: async (p: string) => { calls.trash.push(p); } },
         getAllFolders: () => [new TFolder('Projects/New')],
         getAbstractFileByPath: (p: string) => (p === 'Projects/New' ? new TFolder(p) : null),
       },
@@ -49,9 +48,6 @@ function build(exists: boolean | (() => Promise<boolean>)) {
       deleteFile: () => undefined,
     } as unknown as DirectoryDeps['stateDB'],
     journal: new SyncJournal({}),
-    transfer: {
-      acquireLock: async () => null, releaseLock: async () => undefined,
-    } as unknown as TransferService,
     mergeBase: { drop: () => undefined },
     dropCleanSnapshot: () => undefined,
     markOwnEvent: () => undefined,
@@ -95,7 +91,6 @@ describe('[SPEC:DTV-2] the guard does not silence genuine remote deletions', () 
 
     expect(calls.trash).toEqual(['Projects/New']);
     expect(calls.deleteDir).toEqual(['Projects/New']);
-    // deletedCount is not asserted: the local-trash branch does not count itself there (only the remote-delete branch does).
   });
 
   it('asks the server once per candidate, and not at all when there is nothing to trash', async () => {

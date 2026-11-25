@@ -146,7 +146,12 @@ export class ResolutionService {
     try {
       const outcome = await conn.uploadStrategy.upload(
         conn.client, path, localData, stat.mtime,
-        { ctime: uploadCreationTimeMs(stat.ctime, remote ? remote.creationTime : 0) },
+        {
+          ...(remote?.etag ? { ifMatchEtag: remote.etag } : {}),
+          ...(remote?.checksum ? { expectedRemoteChecksum: remote.checksum } : {}),
+          ...(!remote ? { onlyIfAbsent: true } : {}),
+          ctime: uploadCreationTimeMs(stat.ctime, remote ? remote.creationTime : 0),
+        },
       );
       if (outcome === 'skipped') throw new Error(`Upload skipped (over the size limit): ${path}`);
     } finally {
@@ -268,7 +273,12 @@ export class ResolutionService {
     const lockToken = await this.deps.transfer.acquireLock(conn.client, path);
     try {
       const outcome = await conn.uploadStrategy.upload(
-        conn.client, path, data, mtime, { ctime: uploadCreationTimeMs(before?.ctime, rc) },
+        conn.client, path, data, mtime, {
+          ...(remote?.etag ? { ifMatchEtag: remote.etag } : {}),
+          ...(remote?.checksum ? { expectedRemoteChecksum: remote.checksum } : {}),
+          ...(!remote ? { onlyIfAbsent: true } : {}),
+          ctime: uploadCreationTimeMs(before?.ctime, rc),
+        },
       );
       if (outcome === 'skipped') throw new Error(`Upload skipped (over the size limit): ${path}`);
     } finally {

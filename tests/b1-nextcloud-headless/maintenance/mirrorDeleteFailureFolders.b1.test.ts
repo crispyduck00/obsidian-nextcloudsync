@@ -1,7 +1,7 @@
 // Layer B (MDF-B1) - local-only folders that a Pull mirror cannot delete, against a live Nextcloud, driven through the
 // real SyncEngine over an in-memory vault. Covers every combination of tracked/untracked x one/both folders failing x a
 // file added after the mirror x app restart: the next sync never creates the folder on the server, retries the local
-// deletion, and keeps a folder (with its uploaded file) when the user added a file to it. Also covers leftovers above
+// deletion, and keeps a folder with pending local files when its remote path is still absent. Also covers leftovers above
 // the mass-delete limit: they are not uploaded, the retry is skipped and reported, and a second mirror clears them.
 // Each test uses its own remote workspace.
 import { describeLive } from '../support/env';
@@ -94,8 +94,11 @@ describeLive('Layer B (MDF-B1) - mirror delete failure, folders', (getEnv) => {
     } else {
       expect(target.vault.folderExists('d0')).toBe(true);
       expect(target.vault.localExists('d0/new.md')).toBe(true);
-      expect(s.uploadedCount).toBe(1);
-      expect(Object.keys(await remoteFingerprint(target.client))).toContain('d0/new.md');
+      expect(target.vault.readLocal('d0/new.md')).toBe(ADDED);
+      expect(s.uploadedCount).toBe(0);
+      expect(await remoteFingerprint(target.client)).toEqual(before);
+      expect(remoteDirs).not.toContain('d0');
+      expect(s.errors).toContainEqual(expect.objectContaining({ path: 'd0' }));
       for (const f of failing.filter((x) => x !== 'd0')) {
         expect(target.vault.folderExists(f)).toBe(false);
         expect(remoteDirs).not.toContain(f);
@@ -103,7 +106,10 @@ describeLive('Layer B (MDF-B1) - mirror delete failure, folders', (getEnv) => {
     }
 
     await target.sync();
-    expectQuiet(target);
+    if (c.add) {
+      expect(target.vault.readLocal('d0/new.md')).toBe(ADDED);
+      expect(await remoteFingerprint(target.client)).toEqual(before);
+    } else expectQuiet(target);
   }, TEST_TIMEOUT);
 
   it('[SPEC:MDF-B1-4]: leftovers above the mass-delete limit are not uploaded; a second mirror clears them', async () => {
