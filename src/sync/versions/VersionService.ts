@@ -239,6 +239,7 @@ export class VersionService {
       mtime: remote.lastModified || stat?.mtime || Date.now(),
       remoteMtime: remote.lastModified,
       remoteEtag: remote.etag ?? undefined,
+      remoteChecksum: remote.checksum ?? undefined,
       remoteFileId: remote.fileId ?? fileId,
       isConflicted: false,
     });

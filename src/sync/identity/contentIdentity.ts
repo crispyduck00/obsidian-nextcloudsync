@@ -25,6 +25,7 @@ export function convergedState(
     size: localStat.size, mtime: remote.lastModified || localStat.mtime,
     remoteFileId: remote.fileId ?? previous?.remoteFileId ?? null, isConflicted: false,
     remoteEtag: remote.etag ?? undefined,
+    remoteChecksum: remote.reportedChecksum ?? remote.checksum ?? undefined,
     ...(previous && (remote.fileId === null || remote.fileId === previous.remoteFileId) ? {
       ...(previous.ctimeLocalAttempt !== undefined ? { ctimeLocalAttempt: previous.ctimeLocalAttempt } : {}),
       ...(previous.ctimeRemoteAttempt !== undefined ? { ctimeRemoteAttempt: previous.ctimeRemoteAttempt } : {}),

@@ -6,7 +6,7 @@ import type { DavSyncSettings, FileState, RemoteFileInfo, SyncStrategy, SyncTrig
 import type { FileLogger } from '../../util/FileLogger';
 import { sha256 } from '../../util/hash';
 import { normalizePluginIdList } from '../../util/settingsMigration';
-import { remoteIdOf, withTrustedChecksum } from '../remoteIdentity';
+import { remoteRevisionChanged, withTrustedChecksum } from '../remoteIdentity';
 import {
   decideBundleDirection,
   fileSameContent,
@@ -436,8 +436,7 @@ export class PluginSyncCoordinator implements PluginPathGate, LocalWritePort, Pl
     base: FileState | null,
   ): BundleDirection {
     const localChanged = sideChanged(local.stat !== null, local.hash, base?.localHash ?? null);
-    const remoteId = remoteInfo === null ? null : remoteIdOf(remoteInfo).remoteId;
-    const remoteChanged = sideChanged(remoteInfo !== null, remoteId, base?.remoteId ?? null);
+    const remoteChanged = remoteInfo === null ? base !== null : remoteRevisionChanged(remoteInfo, base ?? undefined);
     const localSide: ManifestSide | null =
       local.stat === null ? null : { version: versionOf(local.read), mtime: local.stat.mtime };
     const remoteSide: ManifestSide | null =

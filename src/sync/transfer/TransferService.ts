@@ -206,6 +206,7 @@ export class TransferService {
         size: remote.size, mtime: remote.lastModified || localStat.mtime,
         remoteFileId: remote.fileId, isConflicted,
         remoteEtag: remote.etag ?? undefined,
+        remoteChecksum: remote.reportedChecksum ?? remote.checksum ?? undefined,
         localSize: localStat.size, localMtime: localStat.mtime, remoteMtime: remote.lastModified,
       });
       if (!isConflicted) this.deps.mergeBase.recordBytes(remote.path, data);
@@ -239,6 +240,7 @@ export class TransferService {
       size: remote.size, mtime,
       remoteFileId: remote.fileId, isConflicted: false,
       remoteEtag: remote.etag ?? undefined,
+      remoteChecksum: remote.reportedChecksum ?? remote.checksum ?? undefined,
       remoteMtime: remote.lastModified,
     };
     if (expected) {

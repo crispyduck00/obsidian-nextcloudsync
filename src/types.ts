@@ -188,6 +188,8 @@ export interface FileState {
   remoteMtime?: number;
   /** ETag of the converged remote revision, including when `remoteId` is a checksum. */
   remoteEtag?: string;
+  /** Advertised checksum observed when the converged body was verified; it may be stale. */
+  remoteChecksum?: string;
   /** Verify local presence at a moved path before treating absence there as a deletion. */
   checkAfterFolderMove?: true;
   /**
@@ -281,6 +283,8 @@ export interface RemoteFileInfo {
   path: string;
   fileId: string | null;
   checksum: string | null;
+  /** Original checksum withheld from content-equality proof until GET verifies the body. */
+  reportedChecksum?: string;
   etag: string | null;
   /** Effective Nextcloud DAV permissions, when the server provided the property. */
   permissions?: string;

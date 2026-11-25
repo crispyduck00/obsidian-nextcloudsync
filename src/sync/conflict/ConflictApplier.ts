@@ -308,6 +308,7 @@ export class ConflictApplier {
       size: stat?.size ?? 0, mtime: mergeMtime,
       remoteFileId: remote.fileId,
       remoteEtag: uploaded ? uploadedEtag : remote.etag ?? undefined,
+      remoteChecksum: uploaded ? undefined : remote.reportedChecksum ?? remote.checksum ?? undefined,
       // Stays true after a failed upload even for a clean merge, or the next sync reads the state as converged.
       isConflicted: !clean || !uploaded,
     };
@@ -430,6 +431,7 @@ export class ConflictApplier {
       path, localHash, remoteId, idType, size: remote.size, mtime,
       remoteFileId: remote.fileId, isConflicted: false, remoteMtime: remote.lastModified,
       remoteEtag: remote.etag ?? undefined,
+      remoteChecksum: remote.reportedChecksum ?? remote.checksum ?? undefined,
     };
     this.deps.stateDB.setFile(expected
       ? state
