@@ -182,7 +182,7 @@ export class ResolutionService {
     const writeMtime = this.deps.localWrite.mtimeFor(path, remote.lastModified || undefined);
     const before = await this.deps.localAdapter.stat(path);
     await this.deps.localAdapter.atomicWriteBinary(
-      path, remoteData, writeMtime, writeCreationTimeMs(before?.ctime, remote.creationTime),
+      path, remoteData, writeMtime, writeCreationTimeMs(before?.ctime, remote.creationTime), { stat: before },
     );
     this.deps.localWrite.written(path);
 
@@ -276,7 +276,7 @@ export class ResolutionService {
     }
 
     await this.deps.localAdapter.atomicWriteBinary(
-      path, data, mtime, writeCreationTimeMs(before?.ctime, rc),
+      path, data, mtime, writeCreationTimeMs(before?.ctime, rc), { stat: before },
     );
 
     const localHash = await sha256(data);

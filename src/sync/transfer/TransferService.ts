@@ -3,13 +3,13 @@
 // SyncEngine creates both lazily and can replace them, so a captured one would go stale.
 import { FileState, RemoteFileInfo, SyncSessionSummary } from '../../types';
 import { FileLockedError, FeatureUnsupportedError, NetworkError } from '../../types';
-import { LocalAdapter } from '../../data/LocalAdapter';
+import { LocalAdapter, LocalFileChangedError, type LocalStat, type LocalWriteExpectation } from '../../data/LocalAdapter';
 import { StateDB } from '../../data/StateDB';
 import { IWebDAVClient } from '../../network/IWebDAVClient';
 import { IUploadStrategy } from '../upload/IUploadStrategy';
 import { SyncJournal } from '../session/SyncJournal';
 import { MergeBaseRecorder } from '../session/MergeBaseRecorder';
-import { withLocalSignature } from '../../data/localSignature';
+import { invalidateLocalSignature, withLocalSignature } from '../../data/localSignature';
 import { FileLogger } from '../../util/FileLogger';
 import { FIXED } from '../../util/fixedSyncConfig';
 import { isAnomalousRemoteContent, isOverFileSizeLimit } from '../../util/limits';
@@ -21,11 +21,12 @@ import type { LocalWritePort } from '../plugins/PluginSyncCoordinator';
 import type { CreationTimePort } from '../ctime/CreationTimeAligner';
 
 export interface TransferDeps {
+  isBeingEdited?(path: string): boolean;
   // Aligns the creation time of files whose body this sync left unchanged (docs/spec.md §9.7). Optional so tests
   // can omit it; the engine always passes one.
   creationTime?: CreationTimePort;
   localAdapter: Pick<LocalAdapter, 'stat' | 'readBinary' | 'atomicWriteBinary'>;
-  stateDB: Pick<StateDB, 'getFile' | 'setFile'>;
+  stateDB: Pick<StateDB, 'getFile' | 'setFile'> & Partial<Pick<StateDB, 'setSyncToken'>>;
   // Chooses the mtime of a fetched body and is told after each write (a plugin's data.json gets the write time).
   localWrite: LocalWritePort;
   journal: SyncJournal;
@@ -126,7 +127,7 @@ export class TransferService {
   async downloadFile(
     client: IWebDAVClient,
     remote: RemoteFileInfo, remoteId: string,
-    idType: FileState['idType'], summary: SyncSessionSummary,
+    idType: FileState['idType'], summary: SyncSessionSummary, expected?: LocalWriteExpectation,
   ): Promise<void> {
     // Skip oversized remote files BEFORE the GET, covering the normal download and the local-delete-vs-remote-edit
     // restore. Local and Base stay untouched and no retry is queued: the skip is permanent until the cap is
@@ -152,21 +153,40 @@ export class TransferService {
     }
     // A fetched body equal to the local file is not written (docs/spec.md §5.3a): the mtime stays and no vault event fires.
     const localStat = await this.deps.localAdapter.stat(remote.path);
+    const canWrite = () => !this.deps.isBeingEdited?.(remote.path);
+    // Check the decision made before the GET. A newly present note is a local change even if the
+    // current sync would normally have treated the path as remote-only.
+    if (expected && (!canWrite() || (expected.stat === null
+      ? localStat !== null
+      : !localStat || localStat.size !== expected.stat.size || localStat.mtime !== expected.stat.mtime))) {
+      this.deferLocalWrite(remote.path, summary);
+      return;
+    }
     if (localStat && localStat.size === data.byteLength
         && bytesEqual(await this.deps.localAdapter.readBinary(remote.path), data)) {
       const sameHash = await sha256(data);
-      this.deps.stateDB.setFile(await withLocalSignature(this.deps.localAdapter, {
+      this.deps.stateDB.setFile({
         path: remote.path, localHash: sameHash, remoteId, idType,
         size: remote.size, mtime: remote.lastModified || localStat.mtime,
         remoteFileId: remote.fileId, isConflicted: false,
-      }, remote.lastModified));
+        localSize: localStat.size, localMtime: localStat.mtime, remoteMtime: remote.lastModified,
+      });
       this.deps.mergeBase.recordBytes(remote.path, data);
       void this.deps.logger?.log(`download: body identical to the local file → state converged, no write → ${remote.path}`);
       await this.deps.creationTime?.align(client, remote, localStat);
       return;
     }
     const writeMtime = this.deps.localWrite.mtimeFor(remote.path, remote.lastModified || undefined);
-    await this.deps.localAdapter.atomicWriteBinary(remote.path, data, writeMtime, writeCreationTimeMs(localStat?.ctime, remote.creationTime));
+    const writeCtime = writeCreationTimeMs(localStat?.ctime, remote.creationTime);
+    let written: LocalStat | void;
+    try {
+      written = await this.deps.localAdapter.atomicWriteBinary(remote.path, data, writeMtime, writeCtime,
+        expected ? { ...expected, canWrite } : { stat: localStat, canWrite });
+    } catch (err) {
+      if (!(err instanceof LocalFileChangedError)) throw err;
+      this.deferLocalWrite(remote.path, summary, err);
+      return;
+    }
     this.deps.localWrite.written(remote.path);
     summary.downloadedCount++;
 
@@ -175,15 +195,36 @@ export class TransferService {
       localHash, remoteId, remoteIdType: idType,
       localSize: data.byteLength, remoteSize: remote.size,
     });
-    const mtime = remote.lastModified || (await this.deps.localAdapter.stat(remote.path))?.mtime || Date.now();
-    this.deps.stateDB.setFile(await withLocalSignature(this.deps.localAdapter, {
+    const mtime = remote.lastModified || written?.mtime || Date.now();
+    const state: FileState = {
       path: remote.path, localHash, remoteId, idType,
       size: remote.size, mtime,
       remoteFileId: remote.fileId, isConflicted: false,
-    }, remote.lastModified));
+      remoteMtime: remote.lastModified,
+    };
+    if (expected) {
+      // A later stat could belong to an edit made after the write. Only use the receipt from the
+      // adapter and discard it if the write's requested mtime or byte length was no longer visible.
+      if (written && written.mtime === writeMtime && written.size === data.byteLength) {
+        state.localMtime = written.mtime;
+        state.localSize = written.size;
+      }
+      this.deps.stateDB.setFile(state);
+    } else {
+      this.deps.stateDB.setFile(await withLocalSignature(this.deps.localAdapter, state, remote.lastModified));
+    }
     // Local now equals the remote body, so it is the new merge base.
     this.deps.mergeBase.recordBytes(remote.path, data);
     await this.deps.creationTime?.align(client, remote);
+  }
+
+  deferLocalWrite(path: string, summary: SyncSessionSummary, error?: LocalFileChangedError): void {
+    if (error?.retainedCopy) this.deps.journal.recordError(summary, path, error);
+    // A same-size edit can keep the old mtime. Preserve the base and hash the actual bytes on retry.
+    invalidateLocalSignature(this.deps.stateDB, path);
+    this.deps.stateDB.setSyncToken?.(null);
+    this.deps.queueRetry(path);
+    void this.deps.logger?.log(`sync: local file changed during a write, kept both revisions and queued retry → ${path}`);
   }
 
   // Decided BEFORE any GET from the PROPFIND-advertised size; `maxFileSizeMB` 0 means unlimited. The single

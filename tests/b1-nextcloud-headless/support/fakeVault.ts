@@ -57,6 +57,14 @@ export class FakeVault {
         return e.data;
       },
       async writeBinary(p: string, d: ArrayBuffer, options?: WriteOpts): Promise<void> { addAncestors(p); store.set(p, { data: d, mtime: options?.mtime ?? Date.now(), ctime: ctimeFor(p, options) }); },
+      async process(p: string, transform: (data: string) => string, options?: WriteOpts): Promise<string> {
+        const entry = store.get(p);
+        if (!entry) throw Object.assign(new Error(`ENOENT: ${p}`), { code: 'ENOENT' });
+        const current = dec(entry.data);
+        const updated = transform(current);
+        if (updated !== current) await self.adapter.write(p, updated, options);
+        return updated;
+      },
       // Appends to the body (creating the file when absent) and applies the options' ctime / mtime like the real adapter.
       async append(p: string, d: string, options?: WriteOpts): Promise<void> {
         const e = store.get(p);
@@ -77,9 +85,9 @@ export class FakeVault {
         const e = store.get(from);
         if (e) { addAncestors(to); store.set(to, e); store.delete(from); }
       },
-      async stat(p: string): Promise<{ size: number; mtime: number; ctime: number } | null> {
+      async stat(p: string): Promise<{ type: 'file'; size: number; mtime: number; ctime: number } | null> {
         const e = store.get(p);
-        return e ? { size: e.data.byteLength, mtime: e.mtime, ctime: e.ctime } : null;
+        return e ? { type: 'file', size: e.data.byteLength, mtime: e.mtime, ctime: e.ctime } : null;
       },
       // Full vault-relative paths of the immediate children of `path` (mirrors Obsidian's adapter.list).
       async list(path: string): Promise<{ files: string[]; folders: string[] }> {

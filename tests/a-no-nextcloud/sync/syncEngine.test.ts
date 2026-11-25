@@ -318,7 +318,7 @@ describe('SyncEngine.processRemoteDeletion — out-of-scope safety', () => {
     } as unknown;
     const engineOpts = {
       app, settings, stateDB, configDir: '.obsidian',
-      localAdapter: {}, statusBar: {}, webdavFactory: {}, pluginDir: '.obsidian/plugins/nextcloud-sync',
+      localAdapter: { ignore: jest.fn() }, statusBar: {}, webdavFactory: {}, pluginDir: '.obsidian/plugins/nextcloud-sync',
     };
     const engine = new SyncEngine(engineOpts as never);
     const invoke = (path: string, summary: SyncSessionSummary) =>

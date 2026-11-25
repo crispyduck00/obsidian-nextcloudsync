@@ -176,8 +176,23 @@ export default class ObsidianNextcloudsync extends Plugin {
         }
       }, EDIT_WINDOW_MS, true);
 
+      const pendingEditorSaves = new WeakSet<TFile>();
+      this.registerEvent(this.app.workspace.on('editor-change', (_editor, { file }) => {
+        if (!file || isSyncTmpPath(file.path)) return;
+        this.lastLocalEdit.set(file.path, Date.now());
+        if (this.settings.watchOnChangeEnabled && this.localAdapter?.shouldIgnore(file.path)) {
+          // The editor and the saved-file event can arrive in either order. An unchanged echo
+          // stops at the watcher's local content check, before any server request.
+          pendingEditorSaves.add(file);
+          pendingUploads.add(file.path);
+          debouncedUpload();
+        }
+      }));
+
       this.registerEvent(this.app.vault.on('modify', (file: TAbstractFile) => {
-        if (!guard(file) || isOwnSyncEvent(file.path)) return;
+        if (!guard(file) || isSyncTmpPath(file.path)) return;
+        const editorSave = pendingEditorSaves.delete(file);
+        if (!editorSave && this.localAdapter?.shouldIgnore(file.path)) return;
         this.lastLocalEdit.set(file.path, Date.now());
         pendingUploads.add(file.path);
         debouncedUpload();
@@ -191,20 +206,44 @@ export default class ObsidianNextcloudsync extends Plugin {
         pendingUploads.add(file.path);
         debouncedUpload();
       }));
-      this.registerEvent(this.app.vault.on('delete', (file: TAbstractFile) => {
+      const handleDeletion = (path: string, folder: boolean): void => {
         if (!watchOn()) return;
-        pendingUploads.delete(file.path);
-        if (isOwnSyncEvent(file.path)) return; // e.g. atomic write replacing the old copy
-        if (file instanceof TFolder) { void this.syncEngine?.deleteSingleFolder(file.path); return; }
-        void this.syncEngine?.deleteSingleFile(file.path);
+        pendingUploads.delete(path);
+        if (isSyncTmpPath(path)) return;
+        if (this.localAdapter?.shouldIgnore(path)) {
+          const engine = this.syncEngine;
+          const { serverUrl, username } = this.settings;
+          const isCurrent = (): boolean => watchOn() && this.syncEngine === engine
+            && this.settings.serverUrl === serverUrl && this.settings.username === username;
+          this.localAdapter.afterIgnore(path, async (isPending) => {
+            if (!engine || !isCurrent() || !isPending()) return;
+            try {
+              if (await engine.isLocalDeletionPending(path, folder) && isCurrent() && isPending()) {
+                handleDeletion(path, folder);
+              }
+            } catch (err: unknown) {
+              void this.logger.log(`watch: could not recheck deletion of ${path}: ${String(err)}`, 'error');
+            }
+          });
+          return;
+        }
+        if (folder) { void this.syncEngine?.deleteSingleFolder(path); return; }
+        void this.syncEngine?.deleteSingleFile(path);
+      };
+      this.registerEvent(this.app.vault.on('delete', (file: TAbstractFile) => {
+        handleDeletion(file.path, file instanceof TFolder);
       }));
       this.registerEvent(this.app.vault.on('rename', (file: TAbstractFile, oldPath: string) => {
         if (!watchOn()) return;
         pendingUploads.delete(oldPath);
-        // tmp -> target renames are the tail of the plugin's own atomic writes.
-        if (isOwnSyncEvent(oldPath) || isOwnSyncEvent(file.path)) return;
+        // A sync write renames its temporary file. A rename between ordinary paths is new intent.
+        if (isSyncTmpPath(oldPath) || isSyncTmpPath(file.path)) return;
+        this.localAdapter?.cancelAfterIgnore(oldPath, file instanceof TFolder);
+        const recheckContent = this.localAdapter?.shouldIgnore(oldPath) === true;
         if (file instanceof TFolder) { void this.syncEngine?.renameSingleFolder(oldPath, file.path); return; }
-        void this.syncEngine?.renameSingleFile(oldPath, file.path);
+        const newPath = file.path;
+        const renamed = this.syncEngine?.renameSingleFile(oldPath, newPath);
+        if (recheckContent) void renamed?.then(() => this.syncEngine?.syncSingleFile(newPath), () => undefined);
       }));
 
       // Sync on foreground resume, on every platform (docs/spec.md §5.8). The cooldown inside the

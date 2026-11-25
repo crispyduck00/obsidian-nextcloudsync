@@ -1,11 +1,30 @@
 import type { DataWriteOptions } from 'obsidian';
 import type { CreationTimeSupport } from './creationTimeProbe';
 import { isValidCreationMs } from '../util/creationTime';
+import { sha256 } from '../util/hash';
 import { DataAdapter, FileView, Notice, TFile, Vault, Workspace, normalizePath } from 'obsidian';
 
 export interface LocalFileEntry { path: string; size: number; mtime: number; }
 
 export interface LocalStat { size: number; mtime: number; ctime?: number }
+
+export interface LocalWriteExpectation {
+  stat: LocalStat | null;
+  hash?: string;
+  canWrite?: () => boolean;
+  beforeCommit?: () => void;
+}
+
+export class LocalFileChangedError extends Error {
+  readonly requiresManualResolution: boolean;
+
+  constructor(path: string, readonly retainedCopy?: string) {
+    super(retainedCopy
+      ? `Local file changed during sync: ${path}. The previous copy is in ${retainedCopy}.`
+      : `Local file changed during sync: ${path}.`);
+    this.requiresManualResolution = retainedCopy !== undefined;
+  }
+}
 
 export type CreationTimeSupportSource = () => Promise<CreationTimeSupport>;
 
@@ -14,6 +33,8 @@ export type CreationTimeSupportSource = () => Promise<CreationTimeSupport>;
 // LEGACY_TMP_SUFFIX is only recognised, never produced, so stale temp files from older versions are still ignored and cleaned up.
 const TMP_SUFFIX = '.ncs.tmp';
 const LEGACY_TMP_SUFFIX = '.nextcloudsync.tmp';
+const PREVIOUS_SUFFIX = '.ncs.previous.ncs.tmp';
+const BINARY_PREVIOUS_PATTERN = /\.ncs-previous-(?:0|1-[^./]*)$/;
 const NAME_MAX_BYTES = 255;
 const IGNORE_TIMEOUT_MS = 5000;
 // A stored creation time further than this from the requested one is treated as not applied (docs/spec.md §9.7).
@@ -54,6 +75,25 @@ export function tmpPathFor(targetPath: string): string {
   return dir ? `${dir}/${tmpName}` : tmpName;
 }
 
+// Unlike a downloadable temp file, a staged previous file may contain the only copy of an edit.
+async function previousPathFor(path: string): Promise<string> {
+  const slash = path.lastIndexOf('/') + 1;
+  const fileName = path.slice(slash);
+  const name = '.' + fileName + PREVIOUS_SUFFIX;
+  return path.slice(0, slash) + (utf8ByteLength(name) <= NAME_MAX_BYTES
+    ? name
+    : '.' + await sha256(new TextEncoder().encode(fileName).buffer) + PREVIOUS_SUFFIX);
+}
+
+// A single backup extension preserves basename-based folder-note hooks during binary renames.
+function binaryPreviousPathFor(path: string): string | undefined {
+  const slash = path.lastIndexOf('/') + 1, dot = path.lastIndexOf('.');
+  const name = path.slice(slash, dot >= slash ? dot : undefined);
+  const extension = dot >= slash ? '1-' + path.slice(dot + 1) : '0';
+  const backup = name + '.ncs-previous-' + extension;
+  return utf8ByteLength(backup) <= NAME_MAX_BYTES ? path.slice(0, slash) + backup : undefined;
+}
+
 // Rewrites a raw write error when the target's final name itself exceeds NAME_MAX (unstorable); other errors pass through
 // unmasked. Only consulted from a catch block.
 function translateNameTooLong(err: unknown, targetPath: string): unknown {
@@ -69,13 +109,15 @@ function translateNameTooLong(err: unknown, targetPath: string): unknown {
 
 // This plugin's own atomic-write temp files (current and legacy suffix), never user content.
 export function isSyncTmpPath(path: string): boolean {
-  return path.endsWith(TMP_SUFFIX) || path.endsWith(LEGACY_TMP_SUFFIX);
+  return path.endsWith(TMP_SUFFIX) || path.endsWith(LEGACY_TMP_SUFFIX) || BINARY_PREVIOUS_PATTERN.test(path);
 }
 
 // Uses the Adapter API rather than the Vault API: it gives tmp-write -> rename atomicity, reaches paths the Vault index
 // does not track (state/log files), and reads raw bytes. Remote->local paths go through normalizePath() at the boundary.
 export class LocalAdapter {
-  private ignoreList: Map<string, number> = new Map();
+  private ignoreList = new Map<string, {
+    timer: number; deletion: boolean; onExpire?: (isCurrent: () => boolean) => Promise<void>;
+  }>();
   private creationTimeSupportPromise: Promise<CreationTimeSupport> | undefined = undefined;
 
   constructor(
@@ -155,24 +197,46 @@ export class LocalAdapter {
     return found;
   }
 
-  ignore(path: string): void {
+  ignore(path: string, deletion = false): void {
     const existing = this.ignoreList.get(path);
-    if (existing) window.clearTimeout(existing);
-    const timer = window.setTimeout(() => this.ignoreList.delete(path), IGNORE_TIMEOUT_MS);
+    if (existing) window.clearTimeout(existing.timer);
+    const entry = { timer: 0, deletion, onExpire: deletion ? undefined : existing?.onExpire };
+    const timer = window.setTimeout(() => {
+      entry.timer = 0;
+      const check = entry.onExpire;
+      const finish = (): void => { if (this.ignoreList.get(path) === entry) this.ignoreList.delete(path); };
+      if (!check) finish();
+      else void check(() => this.ignoreList.get(path) === entry && entry.onExpire === check).finally(finish);
+    }, IGNORE_TIMEOUT_MS);
     // Node timers keep the process alive in tests: unref when present (window.setTimeout returns a number in Electron).
     (timer as unknown as { unref?: () => void }).unref?.();
-    this.ignoreList.set(path, timer);
+    entry.timer = timer;
+    this.ignoreList.set(path, entry);
   }
 
   // Not consumed on read: one atomicWrite fires several Vault events (create/delete/rename) for the same path, so consuming
   // on the first would leak the rest as user edits. Entries expire by timeout.
   shouldIgnore(path: string): boolean {
-    return this.ignoreList.has(path);
+    return !!this.ignoreList.get(path)?.timer;
+  }
+
+  // A real user deletion can follow our write within the echo window. Reuse its
+  // existing timer for one final-state check; repeated events do not add work.
+  afterIgnore(path: string, onExpire: (isCurrent: () => boolean) => Promise<void>): void {
+    const entry = this.ignoreList.get(path);
+    if (entry && !entry.deletion) entry.onExpire = onExpire;
+  }
+
+  // A later rename supersedes absence at the old path, including its children.
+  cancelAfterIgnore(path: string, folder = false): void {
+    for (const [current, entry] of this.ignoreList) {
+      if (current === path || (folder && current.startsWith(path + '/'))) entry.onExpire = undefined;
+    }
   }
 
   // Call from onunload so pending timers cannot fire after teardown or leak across reloads.
   dispose(): void {
-    for (const timer of this.ignoreList.values()) window.clearTimeout(timer);
+    for (const entry of this.ignoreList.values()) window.clearTimeout(entry.timer);
     this.ignoreList.clear();
   }
 
@@ -183,83 +247,203 @@ export class LocalAdapter {
       // Mark the parent folder as our own write BEFORE creating it, so watch mode does not propagate the folder-create
       // back to the server as a spurious MKCOL.
       this.ignore(dir);
+      // mkdir can also create missing ancestors. Their create events must not cancel the
+      // user's earlier folder deletion while a download is restoring part of that tree.
+      const parents = dir.split('/');
+      parents.pop();
+      if (parents.length && !await this.adapter.exists(dir)) {
+        while (parents.length) {
+          const parent = parents.join('/');
+          if (await this.adapter.exists(parent)) break;
+          this.ignore(parent);
+          parents.pop();
+        }
+      }
       await this.adapter.mkdir(dir);
     }
   }
 
-  // An open leaf is updated in place via Vault.modify (no delete event, so Obsidian never detaches it, issue #15);
-  // otherwise tmp-write -> remove existing -> rename.
-  async atomicWrite(targetPath: string, content: string, mtime?: number, ctime?: number): Promise<void> {
+  // Update open notes in place so Obsidian keeps the leaf attached (issue #15).
+  async atomicWrite(targetPath: string, content: string, mtime?: number, ctime?: number, expected?: LocalWriteExpectation): Promise<void> {
     targetPath = normalizePath(targetPath);
     const effCtime = await this.effectiveCtime(ctime);
     const openFile = this.findOpenTFile(targetPath);
-    if (openFile) {
+    if (openFile && !expected) {
       this.ignore(targetPath);
       await this.vault!.modify(openFile, content, ...writeOptionsArgs(mtime, effCtime));
-      await this.correctTunneling(targetPath, effCtime);
-      return;
-    }
-    const tmpPath = tmpPathFor(targetPath);
-    this.ignore(tmpPath);
-    this.ignore(targetPath);
-    let targetRemoved = false;
-    try {
-      await this.ensureParentDir(targetPath);
-      await this.adapter.write(tmpPath, content, ...writeOptionsArgs(mtime, effCtime));
-      if (await this.adapter.exists(targetPath)) {
-        await this.adapter.remove(targetPath);
-        targetRemoved = true;
-      }
-      await this.adapter.rename(tmpPath, targetPath);
-    } catch (err) {
-      // If remove(targetPath) already succeeded before rename threw, tmpPath is the ONLY surviving copy of the new content:
-      // clean up tmp only when the destructive remove() never happened.
-      if (!targetRemoved && await this.adapter.exists(tmpPath)) {
-        await this.adapter.remove(tmpPath);
-      }
-      throw translateNameTooLong(err, targetPath);
+    } else if (!(expected && await this.processTextFile(openFile, targetPath, content, expected, mtime, effCtime))) {
+      await this.stageWrite(targetPath, tmp => this.adapter.write(tmp, content, ...writeOptionsArgs(mtime, effCtime)),
+        expected, expected ? utf8ByteLength(content) : undefined);
     }
     await this.correctTunneling(targetPath, effCtime);
   }
 
-  // Same open-file in-place path as atomicWrite (Vault.modifyBinary); otherwise tmp-write -> remove -> rename with read-back verification.
-  async atomicWriteBinary(targetPath: string, data: ArrayBuffer, mtime?: number, ctime?: number): Promise<void> {
+  // Text updates keep the indexed path stable for editor leaves and other plugins' rename hooks.
+  async atomicWriteBinary(targetPath: string, data: ArrayBuffer, mtime?: number, ctime?: number, expected?: LocalWriteExpectation): Promise<LocalStat | void> {
     targetPath = normalizePath(targetPath);
     const effCtime = await this.effectiveCtime(ctime);
     const openFile = this.findOpenTFile(targetPath);
+    const text = expected ? this.decodeUtf8(data) : undefined;
+    if (expected && text !== undefined && await this.processTextFile(openFile, targetPath, text, expected, mtime, effCtime)) {
+      const written = await this.adapter.stat(targetPath);
+      await this.correctTunneling(targetPath, effCtime);
+      return written ?? undefined;
+    }
     if (openFile) {
+      // A native binary write can truncate the open file before rejecting. Only the text
+      // callback above has a verified recovery snapshot; closed files use staged replacement.
+      if (expected) throw Object.assign(new Error(`Close all previews of ${targetPath} and run Sync now to safely update this binary file.`),
+        { requiresManualResolution: true });
       this.ignore(targetPath);
       await this.vault!.modifyBinary(openFile, data, ...writeOptionsArgs(mtime, effCtime));
+      const written = expected ? await this.adapter.stat(targetPath) : null;
       await this.correctTunneling(targetPath, effCtime);
+      return written ?? undefined;
+    }
+    const written = await this.stageWrite(targetPath,
+      tmp => this.adapter.writeBinary(tmp, data, ...writeOptionsArgs(mtime, effCtime)), expected, data.byteLength);
+    await this.correctTunneling(targetPath, effCtime);
+    return expected ? written : undefined;
+  }
+
+  private async stageWrite(
+    target: string, writeTemp: (tmp: string) => Promise<void>, expected?: LocalWriteExpectation, size?: number,
+  ): Promise<LocalStat | undefined> {
+    const tmp = tmpPathFor(target);
+    this.ignore(tmp);
+    if (!expected) this.ignore(target);
+    let targetRemovalAttempted = false;
+    try {
+      await this.ensureParentDir(target);
+      await writeTemp(tmp);
+      if (expected) {
+        if (size !== undefined) await this.verifyWrite(tmp, size);
+        await this.commitGuardedWrite(tmp, target, expected);
+      } else {
+        if (await this.adapter.exists(target)) {
+          targetRemovalAttempted = true;
+          this.ignore(target, true);
+          await this.adapter.remove(target);
+        }
+        await this.adapter.rename(tmp, target);
+        this.ignore(target);
+      }
+      return size === undefined ? undefined : await this.verifyWrite(target, size);
+    } catch (err) {
+      // A rejected remove may already have unlinked the target. Keep its only surviving replacement.
+      const targetMissing = targetRemovalAttempted && !await this.adapter.exists(target);
+      if (!targetMissing && await this.adapter.exists(tmp)) await this.adapter.remove(tmp);
+      throw translateNameTooLong(err, target);
+    }
+  }
+
+  private async verifyWrite(path: string, size: number): Promise<LocalStat> {
+    const written = await this.adapter.stat(path);
+    if (!written || written.size !== size) {
+      throw new Error(`write-back verification failed for ${path}: expected ${size} bytes, found ${written ? written.size : 'none'}`);
+    }
+    return written;
+  }
+
+  private decodeUtf8(bytes: ArrayBuffer): string | undefined {
+    // Keep the BOM and line endings. A binary or invalid UTF-8 payload must never go through text APIs.
+    try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }
+    catch { return undefined; }
+  }
+
+  private async processTextFile(
+    file: TFile | null, path: string, incoming: string, expected: LocalWriteExpectation, mtime?: number, ctime?: number,
+  ): Promise<boolean> {
+    if (!file && typeof this.adapter.process !== 'function') return false;
+    const bytes = await this.readExpectedTarget(path, expected, true);
+    const original = bytes && this.decodeUtf8(bytes);
+    if (original === undefined) return false;
+    const previous = await previousPathFor(path);
+    const retained = await this.retainedCopyFor(path);
+    if (retained) throw new LocalFileChangedError(path, retained);
+    const indexed = file ?? this.vault?.getAbstractFileByPath?.(path);
+    let writing = false, completed = false;
+    try {
+      // Keep recovery bytes without exposing a rename of the user's note to other plugins.
+      this.ignore(previous);
+      await this.adapter.writeBinary(previous, bytes!, ...writeOptionsArgs(expected.stat?.mtime,
+        await this.effectiveCtime(expected.stat?.ctime)));
+      if (await sha256(await this.adapter.readBinary(previous)) !== (expected.hash ?? await sha256(bytes!))) {
+        throw new Error(`Recovery copy verification failed: ${path}.`);
+      }
+      const replace = (current: string): string => {
+        if ((indexed && indexed.path !== path) || current !== original || expected.canWrite?.() === false) {
+          throw new LocalFileChangedError(path);
+        }
+        expected.beforeCommit?.();
+        this.ignore(path);
+        writing = true;
+        return incoming;
+      };
+      if (file) await this.vault!.process(file, replace, ...writeOptionsArgs(mtime, ctime));
+      else await this.adapter.process(path, replace, ...writeOptionsArgs(mtime, ctime));
+      await this.verifyWrite(path, utf8ByteLength(incoming));
+      completed = true;
+    } catch (err) {
+      if (writing) throw new LocalFileChangedError(path, previous);
+      throw err;
+    } finally {
+      if ((!writing || completed) && await this.adapter.exists(previous)) await this.adapter.remove(previous);
+    }
+    return true;
+  }
+
+  private async readExpectedTarget(
+    path: string, expected: LocalWriteExpectation, readBody = false,
+  ): Promise<ArrayBuffer | undefined> {
+    const current = await this.adapter.stat(path);
+    if (expected.canWrite?.() === false || (expected.stat === null
+      ? current !== null
+      : !current || current.type !== 'file' || current.size !== expected.stat.size || current.mtime !== expected.stat.mtime)) {
+      throw new LocalFileChangedError(path);
+    }
+    if (current === null || (!readBody && expected.hash === undefined)) return undefined;
+    const body = await this.adapter.readBinary(path);
+    if ((expected.hash !== undefined && await sha256(body) !== expected.hash) || expected.canWrite?.() === false) {
+      throw new LocalFileChangedError(path);
+    }
+    return body;
+  }
+
+  private async commitGuardedWrite(tmp: string, target: string, expected: LocalWriteExpectation): Promise<void> {
+    const previous = expected.stat === null ? null : binaryPreviousPathFor(target);
+    if (previous === undefined) {
+      throw Object.assign(new Error(`Shorten the filename before replacing ${target}: its safe binary recovery name exceeds ${NAME_MAX_BYTES} bytes.`), { requiresManualResolution: true });
+    }
+    const retained = await this.retainedCopyFor(target);
+    if (retained) throw new LocalFileChangedError(target, retained);
+    await this.readExpectedTarget(target, { ...expected, hash: undefined });
+    this.ignore(target);
+    if (!previous) {
+      // A new file or restore must use Obsidian's collision-checked rename without removing its destination.
+      expected.beforeCommit?.();
+      try { await this.adapter.rename(tmp, target); }
+      catch (err) {
+        if (await this.adapter.exists(target)) throw new LocalFileChangedError(target);
+        throw err;
+      }
       return;
     }
-    const tmpPath = tmpPathFor(targetPath);
-    this.ignore(tmpPath);
-    this.ignore(targetPath);
-    let targetRemoved = false;
+
+    // Verify the exact file displaced by the rename. An edit made after the stat above is still recoverable.
+    await this.adapter.rename(target, previous);
     try {
-      await this.ensureParentDir(targetPath);
-      await this.adapter.writeBinary(tmpPath, data, ...writeOptionsArgs(mtime, effCtime));
-      if (await this.adapter.exists(targetPath)) {
-        await this.adapter.remove(targetPath);
-        targetRemoved = true;
-      }
-      await this.adapter.rename(tmpPath, targetPath);
-      // Read-back verification (docs/spec.md §9.2): fsync is unavailable through the adapter, so confirm the byte length;
-      // a truncated write throws so the caller leaves Base unadvanced and re-syncs.
-      const written = await this.adapter.stat(targetPath);
-      if (!written || written.size !== data.byteLength) {
-        throw new Error(`write-back verification failed for ${targetPath}: expected ${data.byteLength} bytes, found ${written ? written.size : 'none'}`);
-      }
+      await this.readExpectedTarget(previous, expected);
+      expected.beforeCommit?.();
+      await this.adapter.rename(tmp, target);
     } catch (err) {
-      // See atomicWrite(): once remove(targetPath) has run, tmpPath may be the only copy and must not be deleted;
-      // if rename already succeeded, tmp is gone and this is a no-op.
-      if (!targetRemoved && await this.adapter.exists(tmpPath)) {
-        await this.adapter.remove(tmpPath);
-      }
-      throw translateNameTooLong(err, targetPath);
+      if (await this.adapter.exists(target)) throw new LocalFileChangedError(target, previous);
+      try { await this.adapter.rename(previous, target); }
+      catch { throw new LocalFileChangedError(target, previous); }
+      if (err instanceof LocalFileChangedError) throw new LocalFileChangedError(target);
+      throw err;
     }
-    await this.correctTunneling(targetPath, effCtime);
+    await this.adapter.remove(previous);
   }
 
   async read(path: string): Promise<string> {
@@ -270,13 +454,45 @@ export class LocalAdapter {
     return this.adapter.readBinary(normalizePath(path));
   }
 
+  async isFolder(path: string): Promise<boolean> {
+    return (await this.adapter.stat(normalizePath(path)))?.type === 'folder';
+  }
+
   async exists(path: string): Promise<boolean> {
     return this.adapter.exists(normalizePath(path));
   }
 
+  async isFile(path: string): Promise<boolean> {
+    return (await this.adapter.stat(normalizePath(path)))?.type === 'file';
+  }
+
+  private async retainedCopyFor(path: string): Promise<string | undefined> {
+    let found: string | undefined;
+    for (const copy of [await previousPathFor(path), binaryPreviousPathFor(path)]) {
+      if (!copy || !await this.adapter.exists(copy)) continue;
+      if (found) throw new LocalFileChangedError(path, found);
+      found = copy;
+    }
+    return found;
+  }
+
   /** adapter.stat plus `ctime` only when trusted (support !== 'untrusted') and valid. null when absent. */
   async stat(path: string): Promise<LocalStat | null> {
-    const st = await this.adapter.stat(normalizePath(path));
+    const normalized = normalizePath(path);
+    let st = await this.adapter.stat(normalized);
+    if (!isSyncTmpPath(normalized)) {
+      // Recover a vacant target; a remaining snapshot beside a live file needs a manual decision.
+      // Neither state may be classified as a new edit or deletion after a failed replacement.
+      const previous = await this.retainedCopyFor(normalized);
+      if (previous) {
+        if (st) throw new LocalFileChangedError(normalized, previous);
+        if ((await this.adapter.stat(previous))?.type !== 'file') return null;
+        this.ignore(normalized);
+        try { await this.adapter.rename(previous, normalized); }
+        catch { if (!await this.adapter.exists(normalized)) throw new LocalFileChangedError(normalized, previous); }
+        st = await this.adapter.stat(normalized);
+      }
+    }
     if (!st) return null;
     if ((await this.creationTimeSupport()) !== 'untrusted' && isValidCreationMs(st.ctime)) {
       return { size: st.size, mtime: st.mtime, ctime: st.ctime };
@@ -290,7 +506,7 @@ export class LocalAdapter {
 
   // Tmp files only: never call remove on user files.
   async removeTmp(tmpPath: string): Promise<void> {
-    if (isSyncTmpPath(tmpPath) && await this.adapter.exists(tmpPath)) {
+    if (isSyncTmpPath(tmpPath) && !tmpPath.endsWith(PREVIOUS_SUFFIX) && !BINARY_PREVIOUS_PATTERN.test(tmpPath) && await this.adapter.exists(tmpPath)) {
       await this.adapter.remove(tmpPath);
     }
   }

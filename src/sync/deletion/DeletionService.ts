@@ -29,7 +29,7 @@ export interface DeletionDeps {
   dropCleanSnapshot(path: string): void;
   // Registers a path so the vault event this plugin causes is not fed back to the watcher. Required: an
   // unwired no-op here turns a plugin trash back into a server DELETE.
-  markOwnEvent(path: string): void;
+  markOwnEvent(path: string, deletion?: boolean): void;
   logger?: Pick<FileLogger, 'log'>;
 }
 
@@ -68,7 +68,7 @@ export class DeletionService {
     if (serverHash && serverHash !== base.localHash) {
       // The server copy diverged after our base; restore it so a remote edit is never dropped.
       void this.deps.logger?.log(`conflict(local-delete vs remote-edit): restoring remote → ${remote.path}`);
-      await this.deps.transfer.downloadFile(client, remote, remoteId, idType, summary);
+      await this.deps.transfer.downloadFile(client, remote, remoteId, idType, summary, { stat: null });
       return 'restored';
     }
     // Without a reliable checksum (plain WebDAV, or recalc failed) do NOT delete: etag/size do not prove
@@ -127,8 +127,9 @@ export class DeletionService {
         if (file instanceof TFolder) {
           const stale = collectSubtreePaths(this.deps.stateDB, path);
           // The set keeps `path` from registering twice when it is already in stale.dirs.
-          for (const p of new Set([path, ...stale.files, ...stale.dirs])) this.deps.markOwnEvent(p);
+          for (const p of new Set([path, ...stale.files, ...stale.dirs])) this.deps.markOwnEvent(p, true);
         }
+        this.deps.markOwnEvent(path, true);
         await this.deps.app.fileManager.trashFile(file);
         removed = true;
         summary.downloadedCount++;
@@ -136,6 +137,7 @@ export class DeletionService {
       } else if (isSafeVaultRelativePath(path) && await this.deps.app.vault.adapter.exists(normalized)) {
         // Not a vault-tracked file (e.g. dotfiles under a config folder): delete directly. Defence in depth:
         // only for a safe path (no traversal, not absolute) so a remote-controlled path never reaches this sink.
+        this.deps.markOwnEvent(path, true);
         await this.deps.app.vault.adapter.remove(normalized);
         removed = true;
         summary.downloadedCount++;

@@ -295,6 +295,7 @@ describe('VersionService', () => {
     const service = new VersionService({
       localAdapter: {
         stat: async () => ({ size: 13, mtime: 777 }),
+        readBinary: async () => new TextEncoder().encode('existing body').buffer,
         atomicWriteBinary: async (p: string) => { calls.wrote.push(p); },
       } as never,
       stateDB: {
@@ -348,8 +349,9 @@ describe('VersionService', () => {
     expect(calls.restored).toEqual(['fid-7']);
     expect(calls.wrote).toEqual(['note.md']);
     expect(calls.setFile).toMatchObject({
-      remoteFileId: 'fid-7', idType: 'sha256', isConflicted: false, localMtime: 777,
+      remoteFileId: 'fid-7', idType: 'sha256', isConflicted: false,
     });
+    expect(calls.setFile?.localMtime).toBeUndefined();
     expect(calls.setFile?.localHash).toBe(calls.setFile?.remoteId); // both sides hold this body
     expect(calls.saves).toBe(1);
   });
