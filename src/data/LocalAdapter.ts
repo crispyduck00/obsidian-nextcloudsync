@@ -290,8 +290,10 @@ export class LocalAdapter {
       return written ?? undefined;
     }
     if (openFile) {
-      if (expected) await this.readExpectedTarget(targetPath, expected);
-      expected?.beforeCommit?.();
+      // A native binary write can truncate the open file before rejecting. Only the text
+      // callback above has a verified recovery snapshot; closed files use staged replacement.
+      if (expected) throw Object.assign(new Error(`Close all previews of ${targetPath} and run Sync now to safely update this binary file.`),
+        { requiresManualResolution: true });
       this.ignore(targetPath);
       await this.vault!.modifyBinary(openFile, data, ...writeOptionsArgs(mtime, effCtime));
       const written = expected ? await this.adapter.stat(targetPath) : null;
