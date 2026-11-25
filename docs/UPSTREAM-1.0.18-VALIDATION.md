@@ -2,7 +2,89 @@
 
 The manual candidates use upstream tag **1.0.18**, commit `21f89023fdaee58068276df3cff876fcc74a1e95`. Beta.2 and all its topic heads are reachable from `archive/integration-0.2.0-beta.2`. Earlier results below record their respective development stages. RC15 and RC16 are withdrawn. RC16 installation approval in the historical sections below is superseded by the fresh replay described first.
 
-## Current status: RC17 automated gate passed; RC15 and RC16 withdrawn
+## Current candidate status
+
+**RC18 passed the complete automated gate and is ready for a controlled test-vault run. RC17, RC16 and RC15 are withdrawn.** The independent RC17
+review reproduced an unsafe open-binary write followed by corrupt upload after restart. Its
+follow-up also reproduced a changed remote checksum/body silently skipped under a reused ETag.
+Earlier passing RC17 gates are historical evidence, not installation approval.
+
+Both corrections remain in their existing independent upstream-based owners:
+`fixes/guard-local-download` and `fixes/version-restore-state-convergence`. Open binary previews
+stop visibly before mutation and resume through the existing safe replacement after closing.
+An observed checksum checkpoint distinguishes new evidence from an unchanged stale checksum;
+normal reconciliation, Mirror, plugin bundles and revision-proof snapshots share the decision.
+No new feature, dependency, scheduler, queue or recovery journal is introduced.
+
+The composed runtime is `9e926e0f04cdf4bfad0eea802b34d3fbee1233a3`, tree
+`4404c944168783e365568ca80b8c6316af64e4eb`. Subsequent test-fixture/documentation commits do not
+change runtime/build inputs. The full unit run passes 3,820 cases with six existing private-mockup
+skips; explicit unit type checks, build, lint and secret scan pass. The two original real NC35
+reproductions now pass; fourteen native method/filesystem cases and two actual-package upgrade
+cases pass. The complete NC35 run passes 350 cases (15 existing skips); 15 released-add-on/template
+cases, seven Apache DAV cases and the real Push burst plus 330-second connected idle pass.
+The idle records zero DAV requests, mutations, scans, hashes, snapshots and additional full runs.
+
+The local tested runtime commit is `cc99daf3443efe8e68effc4eb742e746eb611c1b`; its public
+commit has exactly the same Git tree. Local/public commit mapping is retained in the evidence.
+The final change from RC17 is 35 added and 16 removed runtime lines (net 19), in 13 files.
+The manual candidate keeps the Fast Nextcloud Sync product identity and version `0.2.0-rc.18`.
+The standalone repository, stable release and BRAT rollout remain unchanged. Native Windows and
+physical Android acceptance remains the user's controlled test after automated acceptance.
+
+[Selected and historical topic inventory](TOPIC-INVENTORY.md) separates the 28 maintained topics
+from seven historical/superseded feature/fix refs; no published history is rewritten.
+
+## RC18 final acceptance — 2026-11-25
+
+| Group | Passed | Failed | Skipped | Suites |
+| --- | ---: | ---: | ---: | ---: |
+| Full default unit discovery, Node 26 | 3,820 | 0 | 6 | 249 |
+| Full isolated Nextcloud 35.0.2.2 | 350 | 0 | 15 | 72 (70 executed) |
+| Original B01/B03 server regressions | 2 | 0 | 0 | 2 |
+| Released add-ons and templates | 15 | 0 | 0 | 5 |
+| Unmodified native method / real filesystem cases | 14 | 0 | 0 | 2 |
+| Apache mod_dav | 7 | 0 | 0 | 1 |
+| Actual manual bundle / upgrade settings | 2 | 0 | 0 | 1 |
+| Real WebSocket burst + 330-second idle | 1 | 0 | 0 | 1 |
+| Isolated guard owner (focused subset) | 285 | 0 | 0 | 23 |
+| Isolated revision owner (focused subset) | 382 | 0 | 0 | 21 |
+
+Subsets and repeats are not added to the full-suite counters. Every previous unit and consolidated
+live case retains its name, multiplicity and status. Thirteen unit cases are added. Explicit source
+and all-unit types, production build, lint and secret scan pass; the Node 26 handle check reports
+zero open handles. The standalone topics retain their independent upstream base and their own
+build/lint/secret/type checks. Their unrelated private HTML fixture remains unavailable until the
+separate optional-mockup topic is composed; it is not silently copied into other topics.
+
+B01 now stops unsafe guarded writes into active/deferred binary previews before mutation; closing
+all previews resumes the existing staged exchange. B03 records observed, possibly stale checksum
+metadata and preserves its change evidence through normal sync, Mirror, plugin bundles and the
+existing Push revision-proof snapshots. This adds the optional FileState checkpoint `remoteChecksum`
+and a metadata carrier `reportedChecksum`, without a reset, separate migration, dependency, queue,
+scheduler or recovery journal. These values do not prove content equality.
+
+The previous RC17 full-server corruption reproduction (12 bytes becoming 3 after restart) and the
+repeated-ETag reproduction are retained as red controls. Both final end-to-end cases pass with
+unchanged server-byte/convergence requirements. Native methods use the original Obsidian 1.15.1
+bundle, SHA-256 `31c39502ad7ca49b003ea3fb2fef5889b00160c0290e548e3cc5c6506b8c4d31`.
+Folder Notes 1.8.26 and Filename Heading Sync 1.12.0 release digests are rechecked.
+
+A second server instance has independent test data, database, config and credentials for the
+add-on/Push acceptance. Only unchanged NC35/app code files are shared. Local HTTP and SQLite are
+not production TLS/proxy or hardware benchmarks. The 330001 ms idle includes six Team Folder
+probes through 310064 ms and records zero DAV/mutation/full-listing/local-scan/hash/snapshot work.
+The burst metric deliberately includes the writer and explicit final full syncs.
+
+Initial namespace/path/test-mock setup failures and the interrupted pre-final server run are
+preserved as harness/intermediate evidence, not counted as acceptance. The final complete live run
+is one successful run (350/0/15); no assertion was weakened. A test-only merge composition removed
+a duplicate mock key and added the existing size-skipped-list capability to its fixture. The
+productive source remained pinned during final acceptance; later changes affect tests/docs only.
+Native Windows/physical Android acceptance and the documented specific live skips remain open.
+No stable tag, GitHub Release, standalone-main update or BRAT promotion is performed.
+
+## Historical RC17 gate: superseded by the independent RC17 findings
 
 **Do not install RC15 or RC16 for a real-vault test.** A fresh RC16 replay ran the released Folder
 Notes and Filename Heading Sync handlers on both simulated peers against real Nextcloud. Two
