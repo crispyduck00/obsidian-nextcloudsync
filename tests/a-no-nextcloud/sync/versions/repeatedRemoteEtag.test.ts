@@ -75,7 +75,7 @@ it('retains the previous observation when verifying changed metadata fails', asy
 it('retains advertised checksum evidence in revision-proof snapshots without trusting it in cached sync', () => {
   const base = { path: 'note.bin', localHash: 'actual-body-hash', remoteId: 'reused', idType: 'etag' as const,
     size: 5, mtime: 1000, remoteFileId: 'f1', remoteEtag: 'reused', remoteChecksum: 'advertised', isConflicted: false };
-  const listing = new RemoteListingSource({ stateDB: { getAllFiles: () => [base] } } as never);
+  const listing = new RemoteListingSource({ stateDB: { getAllFiles: () => [base], getRootSizeSkippedFiles: () => [] } } as never);
   expect(listing.rebuildRemoteFilesFromState()[0].checksum).toBeNull();
   expect(listing.rebuildRemoteFilesFromState(true)[0]).toMatchObject({ checksum: 'advertised', etag: 'reused' });
 });
