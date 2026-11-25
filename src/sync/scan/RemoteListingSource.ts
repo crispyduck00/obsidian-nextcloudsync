@@ -65,7 +65,7 @@ export class RemoteListingSource {
     const files = this.deps.stateDB.getAllFiles().map((fs): RemoteFileInfo => ({
       path: fs.path,
       fileId: fs.remoteFileId,
-      checksum: fs.idType === 'sha256' ? fs.remoteId : null,
+      checksum: fs.idType === 'sha256' ? fs.remoteId : verifyRevision ? fs.remoteChecksum ?? null : null,
       reportedChecksum: fs.remoteChecksum,
       etag: fs.idType === 'etag' ? fs.remoteId : verifyRevision ? fs.remoteEtag ?? null : null,
       size: fs.size,

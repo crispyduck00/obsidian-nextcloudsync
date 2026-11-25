@@ -31,6 +31,8 @@ Regression cases cover a checksum change at identical ETag/size/mtime, a size ch
 state, the unchanged follow-up, and a new checksum equal to the local draft while GET contains other
 bytes. Restore, remote-win and identical-body convergence record the same observation. The topic
 remains independently based on upstream; no Push or download-guard implementation is imported.
+Revision-proof listing snapshots expose the observed checksum to existing consumers (including Push),
+while ordinary cached-sync listings keep unverified checksums out of content-equality decisions.
 
 TypeScript build checks, ESLint and the changed/added Nextcloud-independent tests run for this topic before integration. The combined tree additionally runs the full public suite and regression scenarios. Exact counts and toolchain are recorded in the integration validation document.
 
