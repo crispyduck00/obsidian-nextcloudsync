@@ -231,6 +231,31 @@ A possible design would be:
 
 The important goal is that unresolved conflict state should be visible across clients, not only in one device's local StateDB.
 
+### Deferred scope for the current candidate
+
+Owner decision, 2026-11-25: keep the existing upstream conflict rules for RC19. In particular,
+Other Files still use the configured whole-file strategy (default: latest modified). That can
+replace a never-uploaded local binary edit when a newer remote edit wins; RC19 does not promise
+that both concurrent binary revisions are retained. The conflict-copy model above is a future
+feature, not an additional fix or release requirement for this candidate.
+
+### Permission-aware read-only shares and folders
+
+A separate future feature should understand effective read/write permissions in ordinary shares,
+Group / Team Folders and nested ACL boundaries, including changes between writable and read-only
+access. Readable content should continue to sync while known read-only scope avoids inappropriate
+automatic PUT, MOVE and DELETE attempts and clearly explains the restriction in Obsidian.
+
+Nextcloud remains authoritative. UI guidance must not assume that the sync plugin can prevent
+other plugins from creating local files. Unexpected local drafts must be retained and surfaced;
+permission revocation or a hidden mount must not become deletion, private-folder recreation or
+an endless retry loop. Test read/write transitions, offline changes, restart, multiple users,
+Push/fallback and mixed-permission subtrees before implementing this as an independent topic.
+
+Both read-only support and conflict copies are deferred and must remain separate features.
+Existing server-side permission enforcement and draft-preserving 403/safety holds are already
+part of the current protection, but they are not a complete read-only editing workflow.
+
 Other future work may include further Android UI refinement and continued use of Nextcloud-native capabilities where they improve latency or transparency without weakening correctness.
 
 ## Relationship with upstream
