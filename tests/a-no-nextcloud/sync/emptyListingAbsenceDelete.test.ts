@@ -55,7 +55,6 @@ function makeLocalAdapter(files: Record<string, string>) {
     readBinary: jest.fn(async (p: string) => toBuf(files[p] ?? '')),
     atomicWrite: jest.fn(async (p: string, d: string) => { files[p] = d; }),
     atomicWriteBinary: jest.fn(async (p: string, d: ArrayBuffer) => { files[p] = dec.decode(d); }),
-    ignore: jest.fn(),
     writeBinary: jest.fn(async (p: string, d: ArrayBuffer) => { files[p] = dec.decode(d); }),
     remove: jest.fn(async (p: string) => { delete files[p]; }),
   };
