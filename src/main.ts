@@ -1,4 +1,5 @@
-import { App, Plugin, Notice, Platform, TFile, TFolder, TAbstractFile, debounce } from 'obsidian';
+import { isUnderPluginsDir } from './sync/plugins/pluginPaths';
+import { App, Plugin, Notice, Platform, TFile, TFolder, TAbstractFile } from 'obsidian';
 import { AppPasswordReader, DavSyncSettings, DEFAULT_SETTINGS, FeatureUnsupportedError } from './types';
 import { NextcloudSyncSettingTab } from './settings/SettingTab';
 import { SyncEngine } from './sync/SyncEngine';
@@ -25,6 +26,10 @@ import { collectCommunityPluginCandidates, type PluginCandidateList } from './sy
 import { debugLogPath, isActiveOwnLog } from './util/logPaths';
 import { autoNetworkConcurrency } from './util/platformDefaults';
 
+import { LocalCreationGrace } from './sync/watch/LocalCreationGrace';
+import { WatchFileQueue } from './sync/watch/WatchFileQueue';
+import { SLIDER_LIMITS } from './settings/sliderLimits';
+
 const MIN_OBSIDIAN_VERSION = '1.13.0';
 
 // How long after a keystroke a file counts as "being edited". Shared by the upload debounce and the
@@ -46,6 +51,9 @@ export default class ObsidianNextcloudsync extends Plugin {
   // In-flight `initSyncEngine`: concurrent callers (onLayoutReady and an early `runSyncNow`) await
   // it instead of each initializing. Cleared on settle so a later call (re-login) starts fresh.
   private initializingEngine?: Promise<void>;
+  private watchQueue?: WatchFileQueue;
+  private newFolderQueue?: WatchFileQueue;
+  private readonly localCreations = new LocalCreationGrace(() => this.settings.newItemDelaySeconds * 1000);
   // Flushed on unload so a debounced base write is not lost.
   baseStore?: MergeBaseStore;
   // Flushed on unload so a debounced write is not lost.
@@ -167,43 +175,69 @@ export default class ObsidianNextcloudsync extends Plugin {
         isSyncTmpPath(path) || (this.localAdapter?.shouldIgnore(path) ?? false);
 
       // Batches paths over the debounce window so each keystroke does not cost a request.
-      const pendingUploads = new Set<string>();
-      const debouncedUpload = debounce(() => {
-        const paths = [...pendingUploads];
-        pendingUploads.clear();
-        for (const path of paths) {
-          void this.syncEngine?.syncSingleFile(path);
-        }
-      }, EDIT_WINDOW_MS, true);
+      const watchQueue = new WatchFileQueue(
+        () => EDIT_WINDOW_MS,
+        () => this.settings.watchOnChangeEnabled,
+        paths => { for (const path of paths) void this.syncEngine?.syncSingleFile(path); },
+        path => this.localCreations.readyAt(path),
+      );
+      this.watchQueue = watchQueue;
+      const newFolderQueue = new WatchFileQueue(
+        () => 0,
+        () => this.settings.watchOnChangeEnabled,
+        paths => { for (const path of paths) void this.syncEngine?.createSingleFolder(path); },
+        path => this.localCreations.readyAt(path),
+      );
+      this.newFolderQueue = newFolderQueue;
 
       this.registerEvent(this.app.vault.on('modify', (file: TAbstractFile) => {
         if (!guard(file) || isOwnSyncEvent(file.path)) return;
         this.lastLocalEdit.set(file.path, Date.now());
-        pendingUploads.add(file.path);
-        debouncedUpload();
+        watchQueue.add(file.path);
       }));
       // Folders propagate immediately via single-folder ops; files use the debounced upload.
       const watchOn = (): boolean => this.settings.watchOnChangeEnabled;
       this.registerEvent(this.app.vault.on('create', (file: TAbstractFile) => {
-        if (!watchOn() || isOwnSyncEvent(file.path)) return;
-        if (file instanceof TFolder) { void this.syncEngine?.createSingleFolder(file.path); return; }
-        if (!(file instanceof TFile)) return;
-        pendingUploads.add(file.path);
-        debouncedUpload();
+        if (isUnderPluginsDir(file.path, this.app.vault.configDir) || isOwnSyncEvent(file.path)) return;
+        const folder = file instanceof TFolder;
+        if (this.syncEngine) this.syncEngine.rememberLocalCreation(file.path, folder);
+        else this.localCreations.add(file.path, folder);
+        if (!watchOn()) return;
+        if (folder) { newFolderQueue.add(file.path); return; }
+        if (file instanceof TFile) watchQueue.add(file.path);
       }));
       this.registerEvent(this.app.vault.on('delete', (file: TAbstractFile) => {
+        watchQueue.take(file.path);
+        if (isUnderPluginsDir(file.path, this.app.vault.configDir) || isOwnSyncEvent(file.path)) return;
+        const folder = file instanceof TFolder;
+        this.localCreations.remove(file.path, folder);
+        if (folder) {
+          watchQueue.removeFolder(file.path);
+          newFolderQueue.removeFolder(file.path);
+        }
         if (!watchOn()) return;
-        pendingUploads.delete(file.path);
-        if (isOwnSyncEvent(file.path)) return; // e.g. atomic write replacing the old copy
-        if (file instanceof TFolder) { void this.syncEngine?.deleteSingleFolder(file.path); return; }
+        if (folder) { void this.syncEngine?.deleteSingleFolder(file.path); return; }
         void this.syncEngine?.deleteSingleFile(file.path);
       }));
       this.registerEvent(this.app.vault.on('rename', (file: TAbstractFile, oldPath: string) => {
+        if (isUnderPluginsDir(oldPath, this.app.vault.configDir) || isUnderPluginsDir(file.path, this.app.vault.configDir)
+          || isOwnSyncEvent(oldPath) || isOwnSyncEvent(file.path)) return;
+        watchQueue.take(oldPath);
+        const folder = file instanceof TFolder;
+        const stillNew = this.syncEngine
+          ? this.syncEngine.retargetLocalCreation(oldPath, file.path, folder)
+          : this.localCreations.rename(oldPath, file.path, folder);
+        if (folder) {
+          watchQueue.rebaseFolder(oldPath, file.path);
+          newFolderQueue.rebaseFolder(oldPath, file.path);
+        }
         if (!watchOn()) return;
-        pendingUploads.delete(oldPath);
-        // tmp -> target renames are the tail of the plugin's own atomic writes.
-        if (isOwnSyncEvent(oldPath) || isOwnSyncEvent(file.path)) return;
-        if (file instanceof TFolder) { void this.syncEngine?.renameSingleFolder(oldPath, file.path); return; }
+        if (stillNew) {
+          if (folder) newFolderQueue.add(file.path);
+          else watchQueue.add(file.path);
+          return;
+        }
+        if (folder) { void this.syncEngine?.renameSingleFolder(oldPath, file.path); return; }
         void this.syncEngine?.renameSingleFile(oldPath, file.path);
       }));
 
@@ -217,6 +251,16 @@ export default class ObsidianNextcloudsync extends Plugin {
         startupSyncEnabled: () => this.settings.startupSyncDelaySeconds > 0,
       })));
     });
+  }
+
+  refreshWatchTiming(): void {
+    if (!this.settings.watchOnChangeEnabled) {
+      this.watchQueue?.clear();
+      this.newFolderQueue?.clear();
+    } else {
+      this.watchQueue?.refresh();
+      this.newFolderQueue?.refresh();
+    }
   }
 
   async runSyncNow(): Promise<void> {
@@ -418,6 +462,9 @@ export default class ObsidianNextcloudsync extends Plugin {
   // Without this on re-login/account switch, the old engine's auto-sync timer keeps running, its
   // status-bar item is never removed, and two engines read/write the same StateDB concurrently.
   private teardownSyncEngine(): void {
+    this.watchQueue?.clear();
+    this.newFolderQueue?.clear();
+    this.localCreations.clear();
     this.syncEngine?.stopAutoSync();
     // Order matters: signal an in-flight sync to stop pulling new work, then flush pending debounced
     // saves so a coalesced watch-mode update is not lost.
@@ -433,6 +480,10 @@ export default class ObsidianNextcloudsync extends Plugin {
   async loadSettings(): Promise<void> {
     const saved = (await this.loadData() ?? {}) as Partial<DavSyncSettings>;
     this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
+    const watchDelay = this.settings.newItemDelaySeconds;
+    this.settings.newItemDelaySeconds = Number.isFinite(watchDelay)
+      ? Math.max(0, Math.min(SLIDER_LIMITS.newItemDelay.max, watchDelay))
+      : DEFAULT_SETTINGS.newItemDelaySeconds;
 
     // Migrations below must run before pruneObsoleteSettings drops the keys they read.
     this.settings.configSync = { ...DEFAULT_SETTINGS.configSync };
@@ -574,6 +625,7 @@ export default class ObsidianNextcloudsync extends Plugin {
       webdavFactory,
       readAppPassword,
       pluginDir,
+      localCreationGrace: this.localCreations,
       configDir: this.app.vault.configDir,
       pluginsAwaitingRestart: this.pluginsAwaitingRestart,
       // Evaluated live from the same settings and host token as the logger, so it follows the logging

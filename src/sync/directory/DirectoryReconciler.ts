@@ -40,6 +40,7 @@ export class DirectoryReconciler {
 
   async reconcileDirectories(
     client: IWebDAVClient, summary: SyncSessionSummary, cachedDirs?: RemoteDirInfo[],
+    isHeld: (path: string, remoteObservation: boolean) => boolean = () => false,
   ): Promise<void> {
     let remoteDirInfos: RemoteDirInfo[];
     if (cachedDirs) {
@@ -63,7 +64,8 @@ export class DirectoryReconciler {
     );
     const tracked = new Map(this.deps.stateDB.getAllDirs().map(d => [d.path, d]));
 
-    const plan = classifyDirectories(remoteDirs, localDirs, tracked, (p) => this.deps.isSystemExcluded(p));
+    const plan = classifyDirectories(remoteDirs, localDirs, tracked, (p) =>
+      this.deps.isSystemExcluded(p) || isHeld(p, remoteDirs.has(p) || tracked.has(p)));
     const { mkcolRemote, mkdirLocal, deleteRemote, trashLocal, ensureTracked, dropTracked } = plan;
 
     // Circuit breaker: a partial listing would make many dirs look deleted.
@@ -102,6 +104,7 @@ export class DirectoryReconciler {
     for (const p of mkdirLocal.sort(shallowFirst)) {
       if (this.deps.isCancelled()) break;
       try {
+        this.deps.markOwnEvent(p);
         await this.deps.app.vault.adapter.mkdir(normalizePath(p));
         this.deps.stateDB.setDir({ path: p, remoteFileId: remoteDirs.get(p)?.fileId ?? null });
         this.deps.journal.recordHistory(p, 'downloaded');
