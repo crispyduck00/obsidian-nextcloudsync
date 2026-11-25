@@ -3,6 +3,7 @@ import { makeDevice, restartDevice } from '../support/engineDevice';
 import { decodeBuf, textBuf } from '../support/helpers';
 import { cleanupWorkspace } from '../support/isolation';
 import { setupWorkspace } from '../support/workspace';
+import { recordRequests } from '../support/requestRecorder';
 
 describeLive('Local writes after a regular download was scheduled', getEnv => {
   it.each([
@@ -70,6 +71,41 @@ describeLive('Local writes after a regular download was scheduled', getEnv => {
 });
 
 describeLive('A changed local revision reaches the next reconciliation', getEnv => {
+  it('holds a partial text write across restart before any damaged bytes can be uploaded', async () => {
+    const env = getEnv();
+    const { client, ws } = await setupWorkspace(env);
+    const device = makeDevice(env, ws.remoteBase, 'partial-text-write');
+    const path = 'Note.md', baseline = 'original common baseline', remote = 'new peer revision with all content';
+    const recovery = '.Note.md.ncs.previous.ncs.tmp';
+    const requests = recordRequests();
+    try {
+      await client.uploadFile(path, textBuf(baseline)); await device.sync();
+      const id = (await client.statFile(path))?.fileId;
+      await client.uploadFile(path, textBuf(remote));
+      const process = jest.spyOn(device.vault.adapter, 'process').mockImplementationOnce(async (file, transform) => {
+        const incoming = transform(await device.vault.adapter.read(file));
+        await device.vault.adapter.write(file, incoming.slice(0, 3));
+        throw new Error('volume write failed after truncation');
+      });
+      await device.sync(); process.mockRestore();
+      expect(device.vault.readLocal(path)).toBe(remote.slice(0, 3));
+      expect(device.vault.readLocal(recovery)).toBe(baseline);
+      await device.engine.flushState();
+      const restarted = await restartDevice(env, ws.remoteBase, device);
+      requests.clear(); await restarted.sync();
+      expect(restarted.engine.getLastSessionSummary()!.errorCount).toBeGreaterThan(0);
+      expect(requests.requests.every(request => ['GET', 'PROPFIND', 'REPORT', 'HEAD'].includes(request.method))).toBe(true);
+      expect(decodeBuf(await client.downloadFile(path))).toBe(remote);
+      expect((await client.statFile(path))?.fileId).toBe(id);
+      // Explicitly recover the saved revision, as the error message instructs, then retry.
+      await restarted.vault.adapter.write(path, baseline); await restarted.vault.adapter.remove(recovery);
+      await restarted.sync();
+      expect(restarted.vault.readLocal(path)).toBe(remote);
+      expect(restarted.engine.getLastSessionSummary()?.errors).toEqual([]);
+      restarted.localAdapter.dispose();
+    } finally { requests.restore(); device.localAdapter.dispose(); await cleanupWorkspace(client, ws); }
+  });
+
   it('merges a same-size, same-mtime local edit after retry and an engine restart', async () => {
     const env = getEnv();
     const { client, ws } = await setupWorkspace(env);
