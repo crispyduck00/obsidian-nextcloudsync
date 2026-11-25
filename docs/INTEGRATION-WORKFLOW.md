@@ -2,6 +2,48 @@
 
 `integration/all-topics` is the tested integration branch for the `crispyduck00/obsidian-nextcloudsync` development fork. The name **Fast Nextcloud Sync** is reserved for the standalone installable repository/plugin (`crispyduck00/fast-nextcloud-sync`).
 
+## Current candidate status
+
+**RC17 passed the automated gate. RC15 and RC16 remain withdrawn.** A fresh replay found a real
+Folder Notes integration failure in RC16: replacing a closed note temporarily renamed its indexed
+path, and the released add-on interpreted that event as a request to rename the containing folder.
+The same root cause affects binary attachments with the folder's basename. Earlier RC16 passing
+claims below are historical and are superseded by this finding; they are not installation approval.
+
+RC17 keeps the correction in `fixes/guard-local-download`, directly on the existing upstream-based
+topic. It uses atomic text callbacks with verified recovery snapshots and a basename-preserving
+binary recovery extension. It adds no feature, scheduler, queue or persisted-state schema.
+The standalone plugin repository and BRAT rollout remain unchanged.
+
+### RC17 gate (2026-11-25)
+
+The final composed runtime passes 3,807 default tests (six existing optional-fixture skips),
+350 standard Nextcloud cases (fifteen existing skips), twelve separately reported add-on/failure
+acceptance cases, six installed-native-method protocol cases and seven Apache DAV cases.
+A twelve-case live download/Restore subset is repeated after the add-on run and is not added to
+the standard total. The standalone owner passes 281 focused tests in 23 suites plus its own
+production build/types, lint and secret scan. All 3,796 previous unit cases and all 364 previous
+standard live cases retain their multiplicity and result status. Seventeen unit cases and one
+standard live case are added. All 605 tracked source files and fifteen external fixture files
+remain pinned throughout the final runs.
+
+The single RC17 runtime correction is a net 57 TypeScript lines in `LocalAdapter.ts`. Its public
+owner commit is `eb797a6c3e6595538ef2737fff1aa56f84d81a3f`. The composed runtime commit
+`e07fd45ad87287df41adf4e5bc4a896203991222` has tested tree
+`ab95078187e5dbafa8801ab6bcd455ba9759a287`; the final merge adds only the maintained fork
+documentation. The canonical owner branches remain independent upstream-based topics. Pending
+RC16 topic heads are fast-forwarded to their already integrated commits; no published history is
+rewritten. Draft PR #33 owns this correction and #43 exposes the separate general rename fix.
+
+The manual RC17 ZIP is 232,157 bytes with SHA-256
+`3501b61274144c566ff8c30cc1c7352530753ee9930a972a62812d9b2f7794f1`.
+Its Fast Nextcloud Sync manifest is unchanged from the prior installed identity except version
+`0.2.0-rc.17`. Install only the three plugin files and preserve settings, credentials, device ID,
+tracking, pending moves and history. Resolve recovery holds before any rollback to older builds.
+Native Windows and physical Android acceptance remains open; inspect the public integration CI
+for this source before installation. There is no GitHub Release, stable tag or BRAT promotion.
+
+
 ## Purpose
 
 Keep upstream `main` pristine while maintaining independently reviewable fixes and features that can
@@ -45,7 +87,11 @@ Adds optional Nextcloud `notify_push` support with:
 - selective reconciliation of known pushed file IDs
 - conservative fallback to a normal full sync for ambiguous/structural cases
 
-The normal SyncEngine remains authoritative for merge/conflict decisions.
+The normal SyncEngine remains authoritative for merge/conflict decisions. An error can explicitly
+require manual resolution. Push consumes that hint while the error stays visible, the root
+checkpoint remains invalid and the shared full-run result stays incomplete for Mobile recovery.
+Deferred Watch edits remain queued behind the failed reconciliation. Ordinary transport failures
+retain the existing bounded retry; a later genuine hint or configured/manual sync remains eligible.
 
 ### Android foreground Watch
 
@@ -115,6 +161,14 @@ creation deadline, and manual sync flushes the grace through the existing reconc
 
 - `fixes/guard-local-download`
   - preserves real local edits during downloads, restores and the sync-own-write event window
+  - rechecks an ignored user deletion once through the existing own-write timer, after verifying that the path is still missing and tracked by the same owner
+  - routes force-download and transfer/Mirror replacement callers through the existing guarded atomic-write contract; both public failure/next-full-sync model regressions pass on the combined runtime
+
+- `fixes/remote-rename-safety`
+  - reconciles token-reported remote renames from an authoritative complete listing instead of changing tracking alone
+  - stops ambiguous local filesystem aliases and different Unicode spellings before reconciliation or Mirror can delete the wrong resource
+  - accepts a manually corrected exact server filename only after matching its existing Nextcloud ID and compatible tracking, merge-base and clean-side metadata; clears the cached local signature so content is read again
+  - protects direct deletion from legacy same-ID Unicode aliases without rewriting names, guessing a move or adding a new journal
 
 - `fixes/local-vault-availability`
   - holds reconciliation when the local adapter cannot provide a trustworthy vault view
@@ -172,13 +226,14 @@ creation deadline, and manual sync flushes the grace through the existing reconc
   - persists blocked file and folder moves per device along with the original Nextcloud identities
   - holds both paths through lock, read-only and conflict states. A full sync resumes the conditional MOVE after access returns.
   - retains acknowledged first PUT/MKCOL identities through concurrent local rename and move events
+  - recognizes a manually corrected server-normalized filename only when the destination has the original Nextcloud ID and the old local filename is absent
   - the integration sends relevant Client Push IDs through the full-sync gate even with an unchanged root ETag and keeps the directory identity checks
 
 - `fixes/scoped-version-history`
   - verifies the live vault path and file ID before opening, comparing or restoring versions
   - the integration also uses this verification in the enhanced history and line history views
 
-## RC15 topic reconstruction
+## Historical RC15 topic reconstruction
 
 The selected set contains six feature topics, twenty fix topics and `docs/fork-overview`. Every
 selected topic starts directly from the pinned upstream commit, contains no merge commit and does
@@ -187,7 +242,7 @@ are merged into `integration/all-topics`, preserving its previous canonical hist
 
 The reconstruction preserves every tracked runtime and build input from the tested RC15 candidate
 `d72545c032a294e954e27e38b14496ff66eac0d1`. Additional regression tests and documentation explain
-the isolated topics and their composition. It adds no runtime behavior beyond RC15.
+the isolated topics and their composition. That reconstruction added no runtime behavior beyond RC15. The RC16 changes below are separate follow-ups.
 
 | Overlap | Integration responsibility |
 | --- | --- |
@@ -201,6 +256,62 @@ the isolated topics and their composition. It adds no runtime behavior beyond RC
 These are adaptations between independently usable topics. Shared helpers are composed once.
 A bug in a feature stays in that feature topic. General fixes own upstream behavior, and a new
 independent behavior gets its own feature topic.
+
+## RC16 ownership and composition
+
+The selection contains **28 topics: six features, twenty-one fixes and one documentation
+topic**. The new general topic is `fixes/remote-rename-safety`, directly based on the same pristine
+upstream commit. Existing topics receive their own follow-up fixes; this work adds no feature.
+
+| Change | Owning topic |
+| --- | --- |
+| Filesystem/Unicode name safety and authoritative remote-rename reconciliation | `fixes/remote-rename-safety` |
+| User deletion during the own-write window and guarded replacement callers | `fixes/guard-local-download` |
+| Push consumption of explicitly manual safety holds | `features/client-push` |
+| Recognition of an already-arrived server-normalized file rename | `fixes/persistent-file-renames` |
+| New-item directory-listing unit fixture correction; assertions unchanged | `features/new-item-delay` |
+| Observed-folder-deletion test barrier at the intended child-processing phase; assertions unchanged | `fixes/guarded-folder-reconciliation` |
+| Candidate status, validation history and branch workflow | `docs/fork-overview` |
+
+All selected topics remain independent patches on upstream `1.0.18`. Follow-up commits advance their
+owning topic without stacking a feature on a fix. Draft PRs document any optional contracts and the
+combined integration keeps its previous history.
+
+The name-safety fix uses raw filesystem entries to distinguish an exact local name from a resolved
+alias. NFC is only an ambiguity comparison; sync paths are not globally normalized or lowercased.
+The existing guarded-write API handles replacement failures. No second rename algorithm, recovery
+journal or content-baseline inference is added.
+
+Composition reuses the existing held-path predicates and pending-rename assertion. A metadata
+re-key cannot claim a destination reserved by another pending rename. The owning assertion keeps
+its existing message and reports the same optional manual-resolution error contract as the general
+name guard. Push handles that contract without importing or requiring the general fix. The shared
+full-sync result remains incomplete for other callers; a visible manual hold is not successful
+Mobile structural recovery.
+
+The frozen RC16 source snapshot `efa2991392327f1820ba89c0eb589fbc46be2e2d` passes all 248
+default-discovered suites: 3,790 tests pass and the six existing optional settings-mockup cases stay
+skipped. All 3,668 previous cases retain their result status; 122 cases are added. Source/unit type
+checks, production build, lint and the frozen-snapshot secret scan pass. The archive verifies all
+605 tracked Git blobs. The standard Nextcloud replay passes 383 cases with fifteen known skips
+across 82 selected files: 80 suites execute and two pre-existing suites remain entirely skipped.
+Separate acceptance reports pass nine add-on/mount cases, eleven compatibility/failure cases,
+twenty-four safety models and one real Unicode-name recovery case. These groups are recorded
+separately and are not added to the default unit or standard live counters.
+
+The change from RC15 is a net 258 TypeScript runtime lines across twelve files, including one
+67-line shared name-safety helper and seven StateDB lines for a private identity-cache generation.
+There is no persisted-state schema change or new queue/timer; own-write deletion reuses its
+existing expiry timer. Follow-ups remain in their owning topic.
+
+The new general fix and six existing-topic updates remain isolated: own-write handling, Client
+Push, persistent renames, the two owning test fixtures and fork documentation. No new feature is
+introduced. Dependency-path and external add-on synchronization corrections belong to the test
+harness; they change no runtime behavior or final payload/identity assertions.
+
+[Upstream 1.0.18 validation](UPSTREAM-1.0.18-VALIDATION.md) records the exact sources, hashes,
+resolved fixture failures and acceptance limits. Earlier RC15 passing counts remain historical
+evidence and do not restore approval of RC15. Native Windows and Android acceptance remains open.
 
 ## Superseded topics
 
@@ -216,9 +327,11 @@ Integration validation includes:
 - secret scan
 
 The integration branch includes all currently selected `features/*`, `fixes/*`, and maintained
-fork-documentation topic heads. The RC15 checks use simulated desktop/Android Obsidian hosts with
-real isolated Nextcloud DAV, Versions, Team Folders and notify_push connections. Native Windows and
-Android acceptance remains required. Older interactive checks do not replace that current check.
+fork-documentation topic heads. Historical RC15 checks used simulated desktop/Android Obsidian hosts
+with real isolated Nextcloud DAV, Versions, Team Folders and notify_push connections. RC16 repeats
+the full pinned standard matrix and affected acceptance checks on the proven identical runtime.
+Native Windows and Android acceptance remains required; host simulations and older interactive
+checks do not replace that step.
 
 ## Upstream workflow
 
@@ -268,8 +381,11 @@ The Beta.1 integration is retained at `archive/integration-0.2.0-beta.1`. The ma
 
 Beta.2 is retained at `archive/integration-0.2.0-beta.2`. The Beta.3 manual build adds upstream's live app-password refresh and carries the Push adaptation in the independent Client Push topic. The other feature and fix patches remain directly based on upstream.
 
-The current manual acceptance build is `0.2.0-rc.15`. Canonical topic reconstruction preserves its
-runtime and plugin identity. The standalone repository, stable release and BRAT rollout remain a
+The manual acceptance builds `0.2.0-rc.15` and `0.2.0-rc.16` are withdrawn. The fresh RC16
+replay supersedes its earlier passing claims. RC17 validation and its package digest are recorded at the top of this document. Its manual package must retain the Fast Nextcloud Sync
+plugin identity and preserve settings, Secret Storage selection, device identity, tracking,
+pending moves and history. Verify the recorded package digest and public CI before installing it
+for native-device acceptance. The standalone repository, stable release and BRAT rollout remain a
 separate promotion after real-vault acceptance.
 
 [Upstream 1.0.18 validation](UPSTREAM-1.0.18-VALIDATION.md) records compatibility checks and real-vault acceptance.
