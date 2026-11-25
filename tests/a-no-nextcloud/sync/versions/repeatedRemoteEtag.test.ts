@@ -2,6 +2,7 @@ import { sha256 } from '../../../../src/util/hash';
 import { withTrustedChecksum } from '../../../../src/sync/remoteIdentity';
 import { fileSameContent } from '../../../../src/sync/plugins/bundleDirection';
 import { shouldFetchRemoteManifest } from '../../../../src/sync/plugins/pluginCatalog';
+import { RemoteListingSource } from '../../../../src/sync/scan/RemoteListingSource';
 import { buildEngine, callProcessRemote, makeLocalAdapter, makeSummary, remoteOf, toBuf } from '../../support/engineHarness';
 
 it.each(['checksum', 'size'] as const)('detects changed %s after a checksum fallback with the same ETag', async evidence => {
@@ -69,4 +70,12 @@ it('retains the previous observation when verifying changed metadata fails', asy
     .rejects.toThrow('offline');
   expect(stateDB.getFile(path)).toEqual(base);
   expect(local.files[path]).toBe('first');
+});
+
+it('retains advertised checksum evidence in revision-proof snapshots without trusting it in cached sync', () => {
+  const base = { path: 'note.bin', localHash: 'actual-body-hash', remoteId: 'reused', idType: 'etag' as const,
+    size: 5, mtime: 1000, remoteFileId: 'f1', remoteEtag: 'reused', remoteChecksum: 'advertised', isConflicted: false };
+  const listing = new RemoteListingSource({ stateDB: { getAllFiles: () => [base] } } as never);
+  expect(listing.rebuildRemoteFilesFromState()[0].checksum).toBeNull();
+  expect(listing.rebuildRemoteFilesFromState(true)[0]).toMatchObject({ checksum: 'advertised', etag: 'reused' });
 });
