@@ -11,6 +11,7 @@
 // These tests drive the REAL SyncEngine over a real StateDB (in-memory DataAdapter); only the WebDAV client,
 // the LocalAdapter and Obsidian's App are doubles, because the bug lives in how the engine classifies what it sees.
 import { DataAdapter } from 'obsidian';
+import { localListing } from '../support/localListing';
 import { SyncEngine } from '../../../src/sync/SyncEngine';
 import { StateDB } from '../../../src/data/StateDB';
 import {
@@ -101,7 +102,7 @@ async function buildEngine(
     files: vault,
     listVaultFiles: jest.fn(() =>
       Object.keys(vault).map(p => ({ path: p, size: sizeOf(p), mtime: BASE_MTIME }))),
-    list: jest.fn(async () => ({ files: [], folders: [] })), // no dot paths in these vaults
+    list: jest.fn(async (parent: string) => localListing(parent, Object.keys(vault), folders)),
     stat: jest.fn(async (p: string) => (p in vault ? { size: sizeOf(p), mtime: BASE_MTIME } : null)),
     exists: jest.fn(async (p: string) => p in vault),
     read: jest.fn(async (p: string) => vault[p] ?? ''),
@@ -145,6 +146,8 @@ async function buildEngine(
   const app = {
     vault: {
       adapter: {
+        stat: async (p: string) => folders.includes(p) ? { size: 0, mtime: BASE_MTIME } : localAdapter.stat(p),
+        list: localAdapter.list,
         exists: jest.fn(async (p: string) => p in vault),
         remove: jest.fn(async (p: string) => { delete vault[p]; }),
         mkdir: jest.fn(async (p: string) => { if (!folders.includes(p)) folders.push(p); }),

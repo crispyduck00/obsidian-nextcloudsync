@@ -60,6 +60,11 @@ function makeEngine(opts: {
     remove: jest.fn(async () => undefined),
     // Trashing a folder registers its paths as the plugin's own events before the trash runs.
     ignore: jest.fn(),
+    list: async (folder: string) => ({
+      files: [...present].filter(p => p.slice(0, p.lastIndexOf('/') < 0 ? 0 : p.lastIndexOf('/')) === folder && opts.localFiles.includes(p)),
+      folders: [...present].filter(p => p.slice(0, p.lastIndexOf('/') < 0 ? 0 : p.lastIndexOf('/')) === folder && !opts.localFiles.includes(p)),
+    }),
+    listVaultFiles: () => opts.localFiles.filter(p => present.has(p)).map(path => ({ path, size: 1, mtime: 0 })),
     readBinary: jest.fn(async () => new ArrayBuffer(0)),
   };
   const vault = {

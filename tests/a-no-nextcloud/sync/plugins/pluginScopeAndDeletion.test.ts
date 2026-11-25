@@ -1,3 +1,4 @@
+import { localListing } from '../../support/localListing';
 // Community plugin sync, engine level: community-plugins.json and unlisted plugin folders are never touched, and the
 // deletion of a listed plugin's files goes through the ordinary mass-delete breaker. (docs/spec.md §7, §8)
 import { DataAdapter } from 'obsidian';
@@ -62,7 +63,7 @@ async function buildWorld(input: WorldInput) {
   const localAdapter = {
     listVaultFiles: jest.fn(() => [...vault.keys()].filter(p => !p.startsWith('.'))
       .map(p => ({ path: p, size: sizeOf(p), mtime: MTIME }))),
-    list: jest.fn(async () => ({ files: [], folders: [] })),
+    list: jest.fn(async (parent: string) => localListing(parent, vault.keys())),
     stat: jest.fn(async (p: string) => (vault.has(p) ? { size: sizeOf(p), mtime: MTIME } : null)),
     exists: jest.fn(async (p: string) => vault.has(p)),
     read: jest.fn(async (p: string) => vault.get(p) ?? ''),

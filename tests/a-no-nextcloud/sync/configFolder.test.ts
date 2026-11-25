@@ -1,5 +1,6 @@
 import { SyncEngine } from '../../../src/sync/SyncEngine';
 import { LocalAdapter } from '../../../src/data/LocalAdapter';
+import { localListing } from '../support/localListing';
 import { DavSyncSettings, DEFAULT_SETTINGS, ConfigSyncCategories, SyncSessionSummary, RemoteFileInfo, FileState } from '../../../src/types';
 import { DataAdapter, Vault } from 'obsidian';
 import { StateDB } from '../../../src/data/StateDB';
@@ -260,7 +261,7 @@ describe('[SPEC:CPS-2] community plugin files in the engine', () => {
       // Obsidian's vault index omits dot paths, so the config folder is reached only through stat.
       listVaultFiles: jest.fn(() => Object.keys(vault).filter(p => !p.startsWith('.'))
         .map(p => ({ path: p, size: sizeOf(p), mtime: BASE_MTIME }))),
-      list: jest.fn(async () => ({ files: [], folders: [] })),
+      list: jest.fn(async (parent: string) => localListing(parent, Object.keys(vault))),
       stat: jest.fn(async (p: string) => (p in vault ? { size: sizeOf(p), mtime: BASE_MTIME } : null)),
       exists: jest.fn(async (p: string) => p in vault),
       read: jest.fn(async (p: string) => vault[p] ?? ''),

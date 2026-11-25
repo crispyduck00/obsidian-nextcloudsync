@@ -19,6 +19,7 @@
 // a genuine creation open for a few macrotasks so the overlap is deterministic. The single-flight cache makes the
 // second caller await the first one's request, so exactly one MKCOL per path is sent and 423 never occurs.
 import { DataAdapter, requestUrl } from 'obsidian';
+import { localListing } from '../support/localListing';
 import { SyncEngine } from '../../../src/sync/SyncEngine';
 import { NextcloudClient } from '../../../src/network/NextcloudClient';
 import { StateDB } from '../../../src/data/StateDB';
@@ -239,7 +240,7 @@ function makeLocalAdapter(files: Record<string, string>) {
   return {
     files,
     listVaultFiles: jest.fn(() => Object.keys(files).map((p) => ({ path: p, size: sizeOf(p), mtime: MTIME }))),
-    list: jest.fn(async () => ({ files: [] as string[], folders: [] as string[] })),
+    list: jest.fn(async (parent: string) => localListing(parent, Object.keys(files))),
     stat: jest.fn(async (p: string) => (p in files ? { size: sizeOf(p), mtime: MTIME } : null)),
     exists: jest.fn(async (p: string) => p in files),
     read: jest.fn(async (p: string) => files[p] ?? ''),
@@ -277,6 +278,9 @@ async function buildHarness(o: HarnessOptions) {
   const app = {
     vault: {
       adapter: {
+        stat: async (p: string) => Object.keys(local.files).some(path => path.startsWith(`${p}/`))
+          ? { size: 0, mtime: MTIME } : local.stat(p),
+        list: local.list,
         mkdir: jest.fn(async () => undefined),
         exists: jest.fn(async (p: string) => p in local.files),
         remove: jest.fn(async (p: string) => { delete local.files[p]; }),
