@@ -1,19 +1,107 @@
 # Upstream 1.0.18 development candidate
 
-The manual candidates use upstream tag **1.0.18**, commit `21f89023fdaee58068276df3cff876fcc74a1e95`. Beta.2 and all its topic heads are reachable from `archive/integration-0.2.0-beta.2`. Earlier results below record their respective development stages. RC15 is withdrawn. RC16 passed automated acceptance; its recorded source, package identity and remaining native acceptance are below.
+The manual candidates use upstream tag **1.0.18**, commit `21f89023fdaee58068276df3cff876fcc74a1e95`. Beta.2 and all its topic heads are reachable from `archive/integration-0.2.0-beta.2`. Earlier results below record their respective development stages. RC15 and RC16 are withdrawn. RC16 installation approval in the historical sections below is superseded by the fresh replay described first.
 
-## Current status: RC16 automated acceptance passed; RC15 withdrawn
+## Current status: RC17 automated gate passed; RC15 and RC16 withdrawn
 
-**RC16 passed the automated acceptance recorded below. RC15 remains withdrawn.** All default
-unit/build checks and selected standard live cases pass, along with the separate add-on,
-compatibility, Unicode and modeled safety checks. No remaining automated failure is concealed by
-a changed assertion or a runtime workaround for a fixture problem.
+**Do not install RC15 or RC16 for a real-vault test.** A fresh RC16 replay ran the released Folder
+Notes and Filename Heading Sync handlers on both simulated peers against real Nextcloud. Two
+role-swapped workflows failed: a guarded replacement renamed the original note to a hidden backup,
+which caused Folder Notes to rename the parent. Final paths diverged despite zero reported sync
+errors. An additional same-basename binary-attachment reproduction confirms the same cause.
+The historical passing sections below remain evidence for their original snapshots and test
+fixtures; this finding supersedes all RC16 installation approval.
 
-The historical sections preserve their original counts and hashes for those source snapshots.
-The final RC16 record below identifies the tested source and keeps independent result groups
-separate. Verify the manual package digest and the public candidate's GitHub Actions before
-installation. Native Windows and Android Obsidian acceptance is still required. This is a release
-candidate, not an official stable release or a standalone-repository/BRAT promotion.
+RC17 fixes the cause inside `fixes/guard-local-download`; no additional feature topic is needed.
+UTF-8 updates use the existing atomic text API for closed files and open notes. A verified previous
+snapshot survives interrupted writes and blocks damaged bytes from later upload until recovery.
+Binary updates retain guarded exchange but use a recovery extension that preserves the original
+basename for Folder Notes. Old recovery names remain supported. Existing binary names whose safe
+recovery extension would exceed 255 bytes stop before renaming and require a shorter filename.
+There is no new persisted-state schema, queue, timer or scheduler.
+
+The final RC17 gate and exact runtime/package identity are recorded immediately below.
+Native Windows and physical Android acceptance remains a separate step. The standalone repository,
+stable release and BRAT rollout are not changed.
+
+## RC17 final automated gate — 2026-11-25
+
+| Gate | Final result |
+| --- | --- |
+| Complete default unit discovery | 248 suites; 3,807 passed, six existing optional settings-mockup cases skipped |
+| Standard real Nextcloud replay | 72 selected files; 70 executed suites passed, two existing suites skipped; 350 passed, fifteen existing cases skipped |
+| Released add-on / failure acceptance | Twelve passed, no skips, in four separate external fixtures |
+| Download / version-restore / restore-write subset | Twelve passed after add-on acceptance; already included in the standard replay |
+| Installed desktop/mobile process methods on a real temporary filesystem | Six passed; method bodies unmodified; not a GUI or physical-device run |
+| Apache mod_dav fallback | Seven passed |
+| Isolated download-guard topic | 281 focused tests in 23 suites; production types/build, source lint and secret scan passed |
+| Composed static gates | Production and explicit all-unit types, build, source lint and secret scan passed |
+| Source integrity | All 605 tracked files and fifteen external fixture files unchanged through the final runs |
+| Previous cases retained | All 3,796 unit and 364 standard live cases retain name, multiplicity and result status |
+
+The standard run's deliberately unreachable hostname is intercepted by the managed network and
+receives an actual HTTP 503 response. Only that test domain is routed to a verified closed loopback
+TCP port for the DNS/transport-failure case; all three native fetch attempts fail with genuine
+`ECONNREFUSED`. No production file or test assertion is changed. A separate acceptance case checks
+that the actual gateway HTTP 503 is rejected by the production WebDAV factory before sync.
+The deliberately cancelled interim text-only run is superseded and is not counted as acceptance.
+
+Both released add-ons execute on both simulated peers against real Nextcloud 34.0.6.2 and a shared
+Team Folder, with desktop/mobile Watch roles swapped. The original failing create/H1-rename/folder
+MOVE/delete flows now pass, preserving final paths and file IDs. Same-basename PNG and PDF updates
+also preserve both parent paths and IDs, with no receiver-side PUT, MOVE, DELETE or MKCOL. The
+accepted profile enables Folder Notes auto-create/rename/move and Filename Heading Sync open/save
+hooks, with focus/confirmation options disabled. Original descriptive test titles are retained;
+imports and source hashes bind the final execution to RC17.
+
+The other acceptance cases cover actual maintenance-mode recovery, a same-ID Unicode-name safety
+hold/manual correction, Team Folder MOVE/version history/restore for two users, and an actual
+partial text write through the composed Push scheduler. The latter keeps the error visible,
+retains the verified previous bytes, stops autonomous Push work and allows explicit recovery.
+Each observed ordinary two-role workflow and the partial-write hold sends zero DAV requests during
+its 7.5-second final idle window. This is bounded convergence evidence, not a claim about every
+future server metadata event. The guard adds no DAV request or global scan; a changed UTF-8 file
+has additional local snapshot I/O. Physical-device latency has not been measured.
+
+### Exact source and package
+
+- Upstream remains `21f89023fdaee58068276df3cff876fcc74a1e95` (1.0.18).
+- Existing owner: `fixes/guard-local-download`, new commit
+  `eb797a6c3e6595538ef2737fff1aa56f84d81a3f`; no feature branch is stacked onto it.
+- Public runtime: `e07fd45ad87287df41adf4e5bc4a896203991222`, tree
+  `ab95078187e5dbafa8801ab6bcd455ba9759a287`. The locally executed merge has the same tree;
+  public commit metadata differs. Final fork-documentation integration changes only two Markdown files.
+- RC17 changes one runtime file, `LocalAdapter.ts`, by a net 57 TypeScript lines against RC16.
+  No dependency, setting, persisted-state schema, journal, queue or scheduler is added.
+- `Fast-Nextcloud-Sync-0.2.0-rc.17-Test.zip`: 232,157 bytes, SHA-256
+  `3501b61274144c566ff8c30cc1c7352530753ee9930a972a62812d9b2f7794f1`.
+  Read-back verifies every packaged file, the production build bytes and the unchanged
+  `fast-nextcloud-sync` manifest identity except version `0.2.0-rc.17`.
+- Candidate: [RC17 source](https://github.com/crispyduck00/obsidian-nextcloudsync/tree/candidate/fast-nextcloud-sync-rc17).
+  The canonical integration is `integration/all-topics`; inspect its
+  [public CI](https://github.com/crispyduck00/obsidian-nextcloudsync/actions) separately from the local gate.
+
+Folder Notes 1.8.26 bundle SHA-256:
+`83d7b91819abac39626349c1b20aef2503a7cb4339334d52115650aec011a216`.
+Filename Heading Sync 1.12.0 bundle SHA-256:
+`ee98df7a77d60ec03d9536c4fe12b01cd4025a1f0938d6177f6b2014f42ae92b`.
+The installed Obsidian 1.15.1 app source used for method extraction is pinned at
+`31c39502ad7ca49b003ea3fb2fef5889b00160c0290e548e3cc5c6506b8c4d31`.
+Its proprietary bundle is not redistributed. A GUI launch is blocked by the environment's process
+singleton socket permission; native Windows and physical Android acceptance is still required.
+
+The inherited commit hook hard-codes the upstream maintainer's author identity and rejects
+pre-existing CJK fixtures. This fork retains actual authorship and runs its meaningful content,
+type/build, test and secret gates explicitly; it does not impersonate upstream or change that hook.
+
+The agreed offline-edit/peer-folder-MOVE overlap remains a visible manual safety stop. An
+interrupted local replacement beside its retained previous copy also needs explicit recovery.
+Existing binary names whose safe recovery extension exceeds 255 UTF-8 bytes stop before renaming;
+new files and ordinary UTF-8 updates retain long-name support. Resolve recovery cases before
+rolling back to an older build that does not recognize the new binary recovery suffix. Settings,
+Secret Storage selection, device identity, tracking, pending moves and history are retained on
+upgrade. No official release, stable tag, standalone-repository or BRAT rollout is performed.
+
 
 ## Password refresh and Client Push
 
@@ -288,9 +376,9 @@ compatible settings/Secret Storage selection, device identity, tracking, pending
 Do not reset tracking or remove credentials as an upgrade step. It remains a test candidate until
 native acceptance and the separate intentional stable-release decision.
 
-## Real-vault acceptance before standalone promotion
+## Real-device acceptance for RC17 before standalone promotion
 
-After verifying the recorded RC16 package digest and public candidate CI, use a separate Windows and Android test vault and a dedicated remote test folder. Back up that test vault's plugin directory, close Obsidian and install `0.2.0-rc.16` manually under the same Fast Nextcloud Sync plugin ID. Preserve the test vault's existing device ID, state and Secret Storage selection.
+After verifying the recorded RC17 package digest and public candidate CI, use a separate Windows and Android test vault and a dedicated remote test folder. Back up that test vault's plugin directory, close Obsidian and install `0.2.0-rc.17` manually under the same Fast Nextcloud Sync plugin ID. Preserve the test vault's existing device ID, state and Secret Storage selection.
 
 1. Confirm the resolved DAV path and run a two-way sync. Enable Client Push and verify a remote edit arrives. Use a second valid app password for the same test account. Change the selected secret in place and run Sync Now without restarting Obsidian. Verify another remote edit arrives. Repeat by selecting a different secret. Clear the selected secret's value, confirm that sync asks for credentials, then restore it and confirm that sync and Push recover.
 2. Put Android in the background, make a remote edit, and resume or recover Wi-Fi. Verify the note, the Push status, foreground Watch and Wi-Fi-only behavior. Test the existing internal share, a read-only or public share, and a Group Folder with expendable data.
@@ -299,4 +387,4 @@ After verifying the recorded RC16 package digest and public candidate CI, use a 
 5. Restore a test note in a Group Folder. Check the version list, then make independent edits on both devices. Verify the resulting content and version sequence.
 6. Revoke and restore read access for a disposable Team Folder subdirectory. Use Sync now after each change. Verify that unchanged copies follow the remote listing and that local edits and drafts are available when access returns. Repeat with a genuinely deleted test subdirectory and with a missing configured vault root. Verify that the missing root leaves local content intact.
 
-The verified RC16 manual ZIP is for test-vault/device acceptance. The standalone repository and BRAT rollout follow successful real-vault acceptance and an intentional release decision.
+The verified RC17 manual ZIP is for test-vault/device acceptance. The standalone repository and BRAT rollout follow successful real-vault acceptance and an intentional release decision.

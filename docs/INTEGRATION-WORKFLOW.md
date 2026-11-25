@@ -4,15 +4,45 @@
 
 ## Current candidate status
 
-**RC16 passed automated acceptance. RC15 remains withdrawn.** The final recorded source passes the
-complete unit/build gate, the 82-file standard Nextcloud replay and the separately reported add-on,
-compatibility and safety-model checks. The checks use isolated servers and simulated Obsidian hosts;
-they do not certify native Windows or Android behavior.
+**RC17 passed the automated gate. RC15 and RC16 remain withdrawn.** A fresh replay found a real
+Folder Notes integration failure in RC16: replacing a closed note temporarily renamed its indexed
+path, and the released add-on interpreted that event as a request to rename the containing folder.
+The same root cause affects binary attachments with the folder's basename. Earlier RC16 passing
+claims below are historical and are superseded by this finding; they are not installation approval.
 
-The manual package and published source are identified in
-[Upstream 1.0.18 validation](UPSTREAM-1.0.18-VALIDATION.md). Verify the public candidate's [GitHub Actions](https://github.com/crispyduck00/obsidian-nextcloudsync/actions) before
-installation. RC16 is a candidate for test-vault/device acceptance, not an official stable release.
-The standalone plugin repository and BRAT rollout remain unchanged until intentional promotion.
+RC17 keeps the correction in `fixes/guard-local-download`, directly on the existing upstream-based
+topic. It uses atomic text callbacks with verified recovery snapshots and a basename-preserving
+binary recovery extension. It adds no feature, scheduler, queue or persisted-state schema.
+The standalone plugin repository and BRAT rollout remain unchanged.
+
+### RC17 gate (2026-11-25)
+
+The final composed runtime passes 3,807 default tests (six existing optional-fixture skips),
+350 standard Nextcloud cases (fifteen existing skips), twelve separately reported add-on/failure
+acceptance cases, six installed-native-method protocol cases and seven Apache DAV cases.
+A twelve-case live download/Restore subset is repeated after the add-on run and is not added to
+the standard total. The standalone owner passes 281 focused tests in 23 suites plus its own
+production build/types, lint and secret scan. All 3,796 previous unit cases and all 364 previous
+standard live cases retain their multiplicity and result status. Seventeen unit cases and one
+standard live case are added. All 605 tracked source files and fifteen external fixture files
+remain pinned throughout the final runs.
+
+The single RC17 runtime correction is a net 57 TypeScript lines in `LocalAdapter.ts`. Its public
+owner commit is `eb797a6c3e6595538ef2737fff1aa56f84d81a3f`. The composed runtime commit
+`e07fd45ad87287df41adf4e5bc4a896203991222` has tested tree
+`ab95078187e5dbafa8801ab6bcd455ba9759a287`; the final merge adds only the maintained fork
+documentation. The canonical owner branches remain independent upstream-based topics. Pending
+RC16 topic heads are fast-forwarded to their already integrated commits; no published history is
+rewritten. Draft PR #33 owns this correction and #43 exposes the separate general rename fix.
+
+The manual RC17 ZIP is 232,157 bytes with SHA-256
+`3501b61274144c566ff8c30cc1c7352530753ee9930a972a62812d9b2f7794f1`.
+Its Fast Nextcloud Sync manifest is unchanged from the prior installed identity except version
+`0.2.0-rc.17`. Install only the three plugin files and preserve settings, credentials, device ID,
+tracking, pending moves and history. Resolve recovery holds before any rollback to older builds.
+Native Windows and physical Android acceptance remains open; inspect the public integration CI
+for this source before installation. There is no GitHub Release, stable tag or BRAT promotion.
+
 
 ## Purpose
 
@@ -351,8 +381,8 @@ The Beta.1 integration is retained at `archive/integration-0.2.0-beta.1`. The ma
 
 Beta.2 is retained at `archive/integration-0.2.0-beta.2`. The Beta.3 manual build adds upstream's live app-password refresh and carries the Push adaptation in the independent Client Push topic. The other feature and fix patches remain directly based on upstream.
 
-The previous manual acceptance build `0.2.0-rc.15` is withdrawn. `0.2.0-rc.16` has passed the
-automated acceptance described above. Its manual package must retain the Fast Nextcloud Sync
+The manual acceptance builds `0.2.0-rc.15` and `0.2.0-rc.16` are withdrawn. The fresh RC16
+replay supersedes its earlier passing claims. RC17 validation and its package digest are recorded at the top of this document. Its manual package must retain the Fast Nextcloud Sync
 plugin identity and preserve settings, Secret Storage selection, device identity, tracking,
 pending moves and history. Verify the recorded package digest and public CI before installing it
 for native-device acceptance. The standalone repository, stable release and BRAT rollout remain a
