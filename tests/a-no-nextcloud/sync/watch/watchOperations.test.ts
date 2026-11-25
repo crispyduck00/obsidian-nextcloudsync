@@ -12,7 +12,6 @@ import { MergeBaseRecorder } from '../../../../src/sync/session/MergeBaseRecorde
 import { TransferService } from '../../../../src/sync/transfer/TransferService';
 import { DeletionService } from '../../../../src/sync/deletion/DeletionService';
 import { ResolutionService } from '../../../../src/sync/resolution/ResolutionService';
-import { RenameTracker } from '../../../../src/sync/RenameTracker';
 import { FileState, RemoteFileInfo, SyncSessionSummary, NetworkError } from '../../../../src/types';
 import { IWebDAVClient } from '../../../../src/network/IWebDAVClient';
 import { IUploadStrategy } from '../../../../src/sync/upload/IUploadStrategy';
@@ -126,12 +125,11 @@ function build(o: Opts = {}, over: Partial<WatchDeps> = {}) {
     isSystemExcluded: () => false,
     isPluginPath: noPluginPath,
     connect: async () => ({ client, uploadStrategy: {} as unknown as IUploadStrategy }),
-    renameTracker: () => ({
-      applyLocalRename: async (a: string, b: string) => {
-        if (o.failRename) throw new Error('boom');
-        calls.renames.push([a, b]);
-      },
-    }) as unknown as RenameTracker,
+    retryFileRename: async (_client, a, b) => {
+      if (o.failRename) throw new Error('boom');
+      calls.renames.push([a, b]);
+      return true;
+    },
     isBlockedByWifiOnly: () => false,
     isSyncRunning: () => o.running === true,
     processFile: async (r: RemoteFileInfo, s: SyncSessionSummary) => {
@@ -313,12 +311,14 @@ describe('WatchOperations — folder operations (feature 046)', () => {
     expect(calls.deleteDir).toEqual([]);
   });
 
-  it('moves a folder and re-tracks it under the new path', async () => {
-    const { watch, calls } = build();
+  it('delegates a folder rename to the authoritative sync', async () => {
+    const reconcileFolderMove = jest.fn(async () => undefined);
+    const { watch, calls } = build({}, { reconcileFolderMove });
     await watch.renameSingleFolder('Old', 'New');
-    expect(calls.move).toEqual([['Old', 'New']]);
-    expect(calls.deleteDir).toEqual(['Old']);
-    expect(calls.setDir).toEqual(['New']);
+    expect(reconcileFolderMove).toHaveBeenCalledTimes(1);
+    expect(calls.move).toEqual([]);
+    expect(calls.deleteDir).toEqual([]);
+    expect(calls.setDir).toEqual([]);
   });
 
   it('renames a file through the rename tracker', async () => {
@@ -333,10 +333,10 @@ describe('WatchOperations — folder operations (feature 046)', () => {
     expect(calls.renames).toEqual([]);
   });
 
-  it('skips a folder operation only when BOTH sides of a rename are excluded', async () => {
+  it('keeps a folder rename held when either side is outside the included scope', async () => {
     const { watch, calls } = build({}, { isSystemExcluded: (p) => p === 'Old' });
     await watch.renameSingleFolder('Old', 'Visible');
-    expect(calls.move).toEqual([['Old', 'Visible']]); // moving INTO scope still propagates
+    expect(calls.move).toEqual([]);
   });
 });
 

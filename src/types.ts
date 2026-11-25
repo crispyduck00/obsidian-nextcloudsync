@@ -171,6 +171,8 @@ export interface FileState {
   localSize?: number;
   /** Server `lastModified` at the last converged state, separate from `localMtime`. */
   remoteMtime?: number;
+  /** Verify local presence at a moved path before treating absence there as a deletion. */
+  checkAfterFolderMove?: true;
   /**
    * Target creation time (Unix seconds) of the last local creation-time fix that the platform did not apply
    * (docs/spec.md §9.7). A planned local fix to the same target is skipped; any other target is tried.
@@ -186,13 +188,48 @@ export interface DirState {
   remoteFileId: string | null;
 }
 
+export type FileRenameIssue = 'locked' | 'read-only' | 'denied' | 'conflict' | 'local-missing' | 'scope' | 'retry';
+
+/** A local file rename whose original remote file is still owned by this operation. */
+export interface PendingFileRename {
+  source: string;
+  destination: string;
+  scope: string;
+  fileId: string | null;
+  /** Only a local rename event can authorize a MOVE across folders or after a remote edit. */
+  observed?: true;
+  /** The local path changed during its first write. Keep both paths reserved until the write is confirmed. */
+  unconfirmedCreate?: true;
+  /** Persisted before MOVE so a lost response or an app restart can be reconciled by identity. */
+  attemptedDestination?: string;
+  issue?: FileRenameIssue;
+}
+
+export type FolderMoveIssue = 'locked' | 'protected' | 'conflict' | 'local-missing' | 'scope' | 'unsupported' | 'unobserved' | 'retry';
+
+export interface PendingFolderMove {
+  source: string;
+  destination: string;
+  scope: string;
+  fileId: string | null;
+  inferred?: true;
+  /** A local delete event invalidated the destination, even if the same path now exists again. */
+  destinationRemoved?: true;
+  attemptedDestination?: string;
+  issue?: FolderMoveIssue;
+  unconfirmedCreate?: true;
+}
+
 export interface SyncState {
+  remoteRootFileId?: string;
   deviceId: string;
   lastSyncTime: number;
   syncToken: string | null;
   files: Record<string, FileState>;
   /** Absent in older state files; treated as {}. */
   directories?: Record<string, DirState>;
+  pendingFileRenames?: PendingFileRename[];
+  pendingFolderMoves?: PendingFolderMove[];
   /**
    * Vault root ETag at the end of the last real full scan; a match lets the remote listing be rebuilt
    * from state instead of a Depth:infinity PROPFIND. Absent = next sync does a real scan (docs/spec.md §8a.5).
@@ -225,6 +262,8 @@ export interface RemoteFileInfo {
   fileId: string | null;
   checksum: string | null;
   etag: string | null;
+  /** Effective Nextcloud DAV permissions, when the server provided the property. */
+  permissions?: string;
   size: number;
   lastModified: number;
   /**
@@ -278,6 +317,8 @@ export type ConflictResolution =
 
 /** One recorded sync error; `path` is empty for session-level errors. */
 export interface SyncErrorDetail {
+  /** Persistent rename failures are displayed with their original and intended paths. */
+  pendingRename?: boolean;
   path: string;
   message: string;
   /** Full list of skipped deletion candidates; set only when the file-side mass-delete breaker fires. */
@@ -444,6 +485,13 @@ export class ConflictError extends Error {
  * message reads "HTTP 404 (GET)" (issue #25); the message keeps `HTTP <status>` as its prefix. The
  * response body is deliberately not in the message: it is server text that ends up in public logs.
  */
+export class FolderMoveBlockedError extends Error {
+  constructor(readonly issue: FolderMoveIssue) {
+    super(`Folder move blocked (${issue})`);
+    this.name = 'FolderMoveBlockedError';
+  }
+}
+
 export class NetworkError extends Error {
   constructor(
     public readonly status: number,

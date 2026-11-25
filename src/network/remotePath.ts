@@ -75,23 +75,38 @@ export function encodeServerUrl(url: string): string {
   return encodeURI(url);
 }
 
+interface DirectoryRequestContext {
+  baseUrl: string;
+  authHeader: string;
+  timeoutMs?: number;
+  /** Receives the response headers for a successful creation only. */
+  beginMkdir?: (path: string) => ((headers?: Record<string, string>) => void) | undefined;
+}
+
 // Creates the parent collections of a remote file path via MKCOL (PUT does not create parents). Each level goes through the cache:
 // one MKCOL per collection in flight, and only 201/405 count as created. Throws RemoteDirCreateError at the FIRST level that
 // cannot be created, without trying its children; callers that can progress anyway (a PUT into an existing folder that refuses MKCOL) catch it.
 export async function ensureRemoteDir(
-  ctx: { baseUrl: string; authHeader: string; timeoutMs?: number },
+  ctx: DirectoryRequestContext,
   remoteFilePath: string,
   createdCache: RemoteDirCache,
 ): Promise<void> {
   for (const dir of ancestorsOf(remoteFilePath)) {
     await createdCache.ensure(dir, async (path) => {
-      const res = await requestUrlWithTimeout({
-        url: encodeRemoteUrl(ctx.baseUrl, path),
-        method: 'MKCOL',
-        headers: { Authorization: ctx.authHeader, ...NO_CACHE_HEADERS },
-        throw: false,
-      }, ctx.timeoutMs ?? 0);
-      return res.status;
+      const finish = ctx.beginMkdir?.(path);
+      let createdHeaders: Record<string, string> | undefined;
+      try {
+        const res = await requestUrlWithTimeout({
+          url: encodeRemoteUrl(ctx.baseUrl, path),
+          method: 'MKCOL',
+          headers: { Authorization: ctx.authHeader, ...NO_CACHE_HEADERS },
+          throw: false,
+        }, ctx.timeoutMs ?? 0);
+        if (res.status === 201) createdHeaders = res.headers;
+        return res.status;
+      } finally {
+        finish?.(createdHeaders);
+      }
     });
   }
 }
@@ -104,7 +119,7 @@ export function isTransportFailure(dirError: RemoteDirCreateError | null): dirEr
 }
 
 export async function prepareMissingParentRetry(
-  ctx: { baseUrl: string; authHeader: string; timeoutMs?: number },
+  ctx: DirectoryRequestContext,
   remoteFilePath: string,
   createdCache: RemoteDirCache,
 ): Promise<RemoteDirCreateError | null> {

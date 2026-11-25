@@ -270,8 +270,16 @@ export class LocalAdapter {
     return this.adapter.readBinary(normalizePath(path));
   }
 
+  async isFolder(path: string): Promise<boolean> {
+    return (await this.adapter.stat(normalizePath(path)))?.type === 'folder';
+  }
+
   async exists(path: string): Promise<boolean> {
     return this.adapter.exists(normalizePath(path));
+  }
+
+  async isFile(path: string): Promise<boolean> {
+    return (await this.adapter.stat(normalizePath(path)))?.type === 'file';
   }
 
   /** adapter.stat plus `ctime` only when trusted (support !== 'untrusted') and valid. null when absent. */

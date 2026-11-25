@@ -2,7 +2,7 @@
 // rename (MOVE). Exclusions honored; status bar shows activity. Mirrors the file-side
 // syncSingleFile/deleteSingleFile/renameSingleFile behavior.
 import { SyncEngine } from '../../../src/sync/SyncEngine';
-import { DavSyncSettings, DirState } from '../../../src/types';
+import { DavSyncSettings, DirState, PendingFolderMove } from '../../../src/types';
 
 const CONFIG_DIR = '.obsidian';
 const PLUGIN_DIR = `${CONFIG_DIR}/plugins/nextcloud-sync`;
@@ -24,12 +24,17 @@ function makeEngine(opts: { tracked?: DirState[]; settings?: DavSyncSettings } =
   };
   const features = { isNextcloud: true, version: '30', hasChecksums: true, hasFilesLocking: false, hasBulkUpload: false, hasAccountDav: true, syncToken: null };
   const statusBar = { setStatus: jest.fn(), setProgress: jest.fn(), setSyncComplete: jest.fn(), setErrorCount: jest.fn() };
+  let moves: PendingFolderMove[] = [];
   const stateDB = {
     getDir: (p: string) => dirs.get(p),
     setDir: (d: DirState) => { dirs.set(d.path, d); },
     deleteDir: (p: string) => { dirs.delete(p); },
     getAllDirs: () => [...dirs.values()],
     requestSave: jest.fn(),
+    getAllFiles: () => [],
+    getPendingFolderMoves: () => moves,
+    setPendingFolderMoves: (replacement: PendingFolderMove[]) => { moves = replacement; },
+    save: jest.fn(async () => undefined),
   };
   const engine = new SyncEngine({
     app: { vault: { adapter: {} }, fileManager: {} }, settings: opts.settings ?? settings(),
@@ -37,7 +42,9 @@ function makeEngine(opts: { tracked?: DirState[]; settings?: DavSyncSettings } =
     webdavFactory: { createClient: jest.fn(async () => ({ client, features })) },
     onFeatures: jest.fn(), pluginDir: PLUGIN_DIR, configDir: CONFIG_DIR,
   } as never);
-  return { engine, client, statusBar, dirs };
+  const full = jest.spyOn(engine as unknown as { syncManual(): Promise<void> }, 'syncManual')
+    .mockResolvedValue(undefined);
+  return { engine, client, statusBar, dirs, stateDB, full };
 }
 
 const dirState = (path: string): DirState => ({ path, remoteFileId: null });
@@ -48,6 +55,19 @@ describe('[SPEC:WF-1] SyncEngine.createSingleFolder', () => {
     await engine.createSingleFolder('Notes/2026');
     expect(client.createDirectory).toHaveBeenCalledWith('Notes/2026');
     expect(dirs.has('Notes/2026')).toBe(true);
+  });
+
+  it('retains the confirmed collection ID without a later path lookup', async () => {
+    const { engine, client, dirs } = makeEngine();
+    const stat = jest.fn(async () => ({ directoryId: 'peer-replacement' }));
+    Object.assign(client, { statFolderMovePath: stat });
+    client.createDirectory.mockImplementationOnce(async (...args: unknown[]) => {
+      const path = args[0] as string;
+      dirs.set(path, { path, remoteFileId: 'created-id' });
+    });
+    await engine.createSingleFolder('New');
+    expect(dirs.get('New')?.remoteFileId).toBe('created-id');
+    expect(stat).not.toHaveBeenCalled();
   });
 
   it('is idempotent: a failing MKCOL (already exists) is swallowed, not thrown', async () => {
@@ -92,12 +112,13 @@ describe('[SPEC:WF-2] SyncEngine.deleteSingleFolder', () => {
 });
 
 describe('[SPEC:WF-3] SyncEngine.renameSingleFolder', () => {
-  it('MOVEs the folder on the remote and retargets tracking', async () => {
-    const { engine, client, dirs } = makeEngine({ tracked: [dirState('A')] });
+  it('records the original folder ID and delegates MOVE to a full sync', async () => {
+    const { engine, client, dirs, stateDB, full } = makeEngine({ tracked: [{ path: 'A', remoteFileId: 'original' }] });
     await engine.renameSingleFolder('A', 'B');
-    expect(client.moveFile).toHaveBeenCalledWith('A', 'B');
-    expect(dirs.has('A')).toBe(false);
-    expect(dirs.has('B')).toBe(true);
+    expect(stateDB.getPendingFolderMoves()).toEqual([expect.objectContaining({ source: 'A', destination: 'B', fileId: 'original' })]);
+    expect(full).toHaveBeenCalledTimes(1);
+    expect(client.moveFile).not.toHaveBeenCalled();
+    expect(dirs.has('A')).toBe(true);
   });
 
   it('is a no-op only when BOTH old and new are excluded', async () => {

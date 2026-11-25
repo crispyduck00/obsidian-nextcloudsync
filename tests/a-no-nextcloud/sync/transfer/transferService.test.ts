@@ -160,6 +160,20 @@ describe('TransferService.uploadFile', () => {
     expect(calls.setFile[0]).toMatchObject({ localMtime: 1234 });
   });
 
+  it.each(['local-hash', 'peer-hash'])('records a newly created Nextcloud ID only for the uploaded revision (%s)', async checksum => {
+    const { transfer, client, uploadStrategy, calls } = build();
+    client.statFile = jest.fn(async () => remote({ fileId: 'server-id', checksum, lastModified: 3000 }));
+    await transfer.uploadFile(client, uploadStrategy, 'note.md', 'local-hash', 'local-hash', 'sha256',
+      remote({ fileId: null, etag: null }), summary(), true);
+    const confirmed = checksum === 'local-hash';
+    expect(calls.setFile[0]).toMatchObject({
+      remoteId: 'local-hash',
+      remoteFileId: confirmed ? 'server-id' : null,
+      remoteMtime: confirmed ? 3000 : 2000,
+    });
+    expect(client.statFile).toHaveBeenCalledTimes(1);
+  });
+
   it('records nothing when the strategy skipped the upload [SPEC:OSN-1]', async () => {
     const { transfer, client, uploadStrategy, calls } = build({ upload: 'skipped' });
     const s = summary();

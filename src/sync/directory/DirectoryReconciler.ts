@@ -29,6 +29,8 @@ export interface DirectoryDeps {
   // unwired no-op here turns a plugin trash back into a server DELETE.
   markOwnEvent(path: string): void;
   isSystemExcluded(path: string): boolean;
+  hasRenameInFolder?(path: string): boolean;
+  isRenameHeld?(path: string): boolean;
   massDeleteLimit(): number;
   // Checked between directory operations so a cancel takes effect promptly.
   isCancelled(): boolean;
@@ -63,7 +65,10 @@ export class DirectoryReconciler {
     );
     const tracked = new Map(this.deps.stateDB.getAllDirs().map(d => [d.path, d]));
 
-    const plan = classifyDirectories(remoteDirs, localDirs, tracked, (p) => this.deps.isSystemExcluded(p));
+    const plan = classifyDirectories(remoteDirs, localDirs, tracked, p =>
+      this.deps.isSystemExcluded(p) || this.deps.isRenameHeld?.(p) === true);
+    plan.deleteRemote = plan.deleteRemote.filter(path => !this.deps.hasRenameInFolder?.(path));
+    plan.trashLocal = plan.trashLocal.filter(path => !this.deps.hasRenameInFolder?.(path));
     const { mkcolRemote, mkdirLocal, deleteRemote, trashLocal, ensureTracked, dropTracked } = plan;
 
     // Circuit breaker: a partial listing would make many dirs look deleted.
@@ -89,9 +94,12 @@ export class DirectoryReconciler {
     // Parents before children.
     for (const p of mkcolRemote.sort(shallowFirst)) {
       if (this.deps.isCancelled()) break;
+      if (this.deps.isRenameHeld?.(p)) continue;
       try {
         await client.createDirectory(p);
-        this.deps.stateDB.setDir({ path: p, remoteFileId: remoteDirs.get(p)?.fileId ?? null });
+        const current = await client.statFolderMovePath?.(p);
+        if (this.deps.isRenameHeld?.(p)) continue;
+        this.deps.stateDB.setDir({ path: p, remoteFileId: current?.directoryId ?? remoteDirs.get(p)?.fileId ?? null });
         this.deps.journal.recordHistory(p, 'uploaded');
       } catch (err) {
         summary.errorCount++;
@@ -101,8 +109,10 @@ export class DirectoryReconciler {
     // Parents before children.
     for (const p of mkdirLocal.sort(shallowFirst)) {
       if (this.deps.isCancelled()) break;
+      if (this.deps.isRenameHeld?.(p)) continue;
       try {
         await this.deps.app.vault.adapter.mkdir(normalizePath(p));
+        if (this.deps.isRenameHeld?.(p)) continue;
         this.deps.stateDB.setDir({ path: p, remoteFileId: remoteDirs.get(p)?.fileId ?? null });
         this.deps.journal.recordHistory(p, 'downloaded');
       } catch (err) {
@@ -120,6 +130,7 @@ export class DirectoryReconciler {
           void this.deps.logger?.log(`dir-sync: remote dir not empty yet — keeping → ${p}`);
           continue; // children pending; self-heals next sync
         }
+        if (this.deps.hasRenameInFolder?.(p)) continue;
         await client.deleteCollection(p);
         this.deps.stateDB.deleteDir(p);
         summary.deletedCount++;
@@ -143,6 +154,7 @@ export class DirectoryReconciler {
         void this.deps.logger?.log(`dir-sync: listing omitted ${p} but the server still has it — keeping it (not trashed)`);
         continue;
       }
+      if (this.deps.hasRenameInFolder?.(p)) continue;
       const folder = this.deps.app.vault.getAbstractFileByPath(p);
       try {
         if (folder instanceof TFolder) await this.trashFolder(folder);
@@ -155,8 +167,12 @@ export class DirectoryReconciler {
         summary.errors.push({ path: p, message: `dir delete (local) failed: ${(err as Error).message}` });
       }
     }
-    for (const d of ensureTracked) this.deps.stateDB.setDir(d);
-    for (const p of dropTracked) this.deps.stateDB.deleteDir(p);
+    for (const d of ensureTracked) {
+      if (!this.deps.isRenameHeld?.(d.path)) this.deps.stateDB.setDir(d);
+    }
+    for (const p of dropTracked) {
+      if (!this.deps.isRenameHeld?.(p)) this.deps.stateDB.deleteDir(p);
+    }
   }
 
   // Trashing fires a vault `delete` event for the folder and every file under it, which watch mode would push
@@ -190,6 +206,7 @@ export class DirectoryReconciler {
     category: 'deleteRemote' | 'trashLocal',
     choice: 'remote' | 'local',
   ): Promise<void> {
+    if (this.deps.hasRenameInFolder?.(path)) throw new Error('This folder contains a pending rename.');
     if (category === 'deleteRemote') {
       if (choice === 'remote') {
         // Remote is correct: undo the apparent local deletion by recreating the folder locally.

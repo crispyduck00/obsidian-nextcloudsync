@@ -1,3 +1,4 @@
+import type { LocalAdapter } from '../../data/LocalAdapter';
 // Deletion propagation in both directions. applyLocalDeletion deletes on the server ONLY when a real content
 // hash proves the server copy never diverged. processRemoteDeletion applies a server deletion locally through
 // the user's "Deleted files" setting and never outside sync scope (docs/spec.md §8).
@@ -20,12 +21,16 @@ export type RemoteDeletionOutcome =
   | { status: 'failed'; message: string };
 
 export interface DeletionDeps {
+  assertLocalVaultAvailable?(): Promise<void>;
+  localAdapter?: Pick<LocalAdapter, 'stat'>;
   app: App;
   stateDB: Pick<StateDB, 'deleteFile' | 'getFile' | 'getAllFiles' | 'getAllDirs' | 'deleteDir'>;
   journal: SyncJournal;
   mergeBase: MergeBaseRecorder;
   transfer: TransferService;
   isSystemExcluded(path: string): boolean;
+  isRenameHeld?(path: string): boolean;
+  hasRenameInFolder?(path: string): boolean;
   dropCleanSnapshot(path: string): void;
   // Registers a path so the vault event this plugin causes is not fed back to the watcher. Required: an
   // unwired no-op here turns a plugin trash back into a server DELETE.
@@ -42,6 +47,12 @@ export class DeletionService {
     remote: RemoteFileInfo, base: FileState, remoteId: string, idType: FileState['idType'],
     summary: SyncSessionSummary,
   ): Promise<'deleted' | 'restored' | 'kept'> {
+    if (base.checkAfterFolderMove) {
+      await this.deps.assertLocalVaultAvailable?.();
+      if (await this.deps.localAdapter?.stat(remote.path) || this.deps.isRenameHeld?.(remote.path)) return 'kept';
+      await this.deps.transfer.downloadFile(client, remote, remoteId, idType, summary, true);
+      return await this.deps.localAdapter?.stat(remote.path) ? 'restored' : 'kept';
+    }
     // Decide only from a real content hash: a SHA-256 match with the last synced base is the only proof the
     // server copy is unchanged.
     let serverHash = remote.checksum ?? null;
@@ -49,6 +60,7 @@ export class DeletionService {
       try { serverHash = await client.recalcChecksum(remote.path); } catch { serverHash = null; }
     }
 
+    if (this.deps.isRenameHeld?.(remote.path)) return 'kept';
     if (serverHash && serverHash === base.localHash) {
       void this.deps.logger?.log(`delete-remote: local deletion (server checksum matches base) → ${remote.path}`);
       try {
@@ -86,6 +98,7 @@ export class DeletionService {
     // A throw reaches the caller, which keeps the tracking entry: an unanswerable probe must never be read as
     // "gone", or an outage would quietly discard the file's history.
     const remote = await client.statFile(path);
+    if (this.deps.isRenameHeld?.(path)) return 'kept';
     if (!remote) {
       void this.deps.logger?.log(`delete-remote: not on the server (Depth:0 404) — dropping tracking, no DELETE → ${path}`);
       this.deps.journal.recordHistory(path, 'deleted');
@@ -109,6 +122,7 @@ export class DeletionService {
   }
 
   async processRemoteDeletion(path: string, summary: SyncSessionSummary): Promise<RemoteDeletionOutcome> {
+    if (this.deps.isRenameHeld?.(path)) return { status: 'ignored' };
     // Security boundary at the delete sink: a compromised server could fabricate a deletion for
     // `.obsidian/...`, which would otherwise reach the raw fs remove below. Enforced here for all callers.
     if (this.deps.isSystemExcluded(path)) {
@@ -125,6 +139,7 @@ export class DeletionService {
         // Obsidian fires a `delete` event for each; register the subtree as our own so watch mode does not
         // push them to the server as user deletions.
         if (file instanceof TFolder) {
+          if (this.deps.hasRenameInFolder?.(path)) return { status: 'ignored' };
           const stale = collectSubtreePaths(this.deps.stateDB, path);
           // The set keeps `path` from registering twice when it is already in stale.dirs.
           for (const p of new Set([path, ...stale.files, ...stale.dirs])) this.deps.markOwnEvent(p);
