@@ -38,6 +38,11 @@ describe('[SPEC:MIR-1] buildMirrorPlan', () => {
       expect(plan.skipCount).toBe(1);
     });
 
+    it('downloads a different-sized file even when a restore kept the old checksum', () => {
+      const plan = buildMirrorPlan([remote('a.md', 'old')], [{ ...local('a.md', 'old'), size: 9 }], [], noExclude, true);
+      expect(plan.downloads.map(r => r.path)).toEqual(['a.md']);
+    });
+
     it('downloads (overwrites) when local hash differs from the remote checksum', () => {
       const plan = buildMirrorPlan(
         [remote('a.md', 'h-remote')],
@@ -208,13 +213,13 @@ describe('[SPEC:MIR-1] buildMirrorPlan', () => {
   describe('[SPEC:MIR-5] skipped files', () => {
     it('[SPEC:MIR-5] records skipped files with path, size and mtime and keeps skipCount in step', () => {
       const plan = buildMirrorPlan(
-        [remote('a.md', 'h-a')],
+        [{ ...remote('a.md', 'h-a'), size: 7 }],
         [{ path: 'a.md', hash: 'h-a', size: 7, mtime: 42 }],
         [],
         noExclude,
         true,
       );
-      expect(plan.skipped).toEqual([{ path: 'a.md', size: 7, mtime: 42 }]);
+      expect(plan.skipped).toEqual([{ path: 'a.md', hash: 'h-a', size: 7, mtime: 42 }]);
       expect(plan.skipCount).toBe(plan.skipped.length);
     });
   });

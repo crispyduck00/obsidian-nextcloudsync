@@ -11,6 +11,7 @@ import { TransferService } from '../transfer/TransferService';
 import { FileLogger } from '../../util/FileLogger';
 import { isSafeVaultRelativePath } from '../../network/remotePath';
 import { collectSubtreePaths, dropSubtreeTracking } from './subtreeTracking';
+import { withTrustedChecksum } from '../remoteIdentity';
 
 // What a local deletion did; a caller that must report failures (the mirror) reads it, an ordinary sync ignores it.
 export type RemoteDeletionOutcome =
@@ -44,7 +45,9 @@ export class DeletionService {
   ): Promise<'deleted' | 'restored' | 'kept'> {
     // Decide only from a real content hash: a SHA-256 match with the last synced base is the only proof the
     // server copy is unchanged.
-    let serverHash = remote.checksum ?? null;
+    const canInspect = 'inspectDirectory' in client && typeof client.inspectDirectory === 'function';
+    remote = withTrustedChecksum(remote, base, canInspect);
+    let serverHash = remote.checksum;
     if (!serverHash) {
       try { serverHash = await client.recalcChecksum(remote.path); } catch { serverHash = null; }
     }

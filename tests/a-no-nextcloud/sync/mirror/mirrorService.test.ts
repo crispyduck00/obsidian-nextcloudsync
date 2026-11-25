@@ -246,7 +246,7 @@ describe('MirrorService.applyRemoteMirror — converging the state DB', () => {
       [fstate('.obsidian/workspace.json')],
     );
     await mirror.applyRemoteMirror(client, plan({
-      remoteFiles: [remote('.obsidian/other.json'), remote('a.md')],
+      remoteFiles: [remote('.obsidian/other.json'), remote('a.md', { checksum: 'abc' })],
       skipped: [{ path: 'a.md', size: 10, mtime: 1000 }],
     }));
     expect(calls.deleteFile).toEqual([]);            // not dropped

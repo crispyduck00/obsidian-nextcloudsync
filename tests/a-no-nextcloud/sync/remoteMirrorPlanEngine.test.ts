@@ -3,7 +3,7 @@
 import { SyncEngine } from '../../../src/sync/SyncEngine';
 import { sha256 } from '../../../src/util/hash';
 import {
-  DavSyncSettings, NextcloudFeatures, RemoteFileInfo, RemoteRootMissingError,
+  DavSyncSettings, FileState, NextcloudFeatures, RemoteFileInfo, RemoteRootMissingError,
 } from '../../../src/types';
 
 const remote = (path: string, checksum: string | null): RemoteFileInfo => ({
@@ -19,6 +19,7 @@ function settings(): DavSyncSettings {
 }
 
 function makeEngine(over: {
+  tracked?: FileState;
   getFiles?: jest.Mock;
   createThrows?: boolean;
   localFiles?: Array<{ path: string; content: Uint8Array }>;
@@ -46,7 +47,7 @@ function makeEngine(over: {
     }),
   };
   const vault = { adapter: localAdapter, getAllFolders: () => [] };
-  const stateDB = { getFile: () => undefined, getAllFiles: () => [], getAllDirs: () => [] };
+  const stateDB = { getFile: (path: string) => path === over.tracked?.path ? over.tracked : undefined, getAllFiles: () => [], getAllDirs: () => [] };
   const createClient = over.createThrows
     ? jest.fn(async () => { throw new Error('no credentials'); })
     : jest.fn(async () => ({ client, features: feats }));
@@ -74,7 +75,7 @@ describe('[SPEC:MIR-1] SyncEngine.planRemoteMirror — connects on demand', () =
     // is SKIPPED, not re-downloaded (SC-004).
     const content = new TextEncoder().encode('same bytes on both sides');
     const hash = await sha256(content.buffer.slice(0) as ArrayBuffer);
-    const getFiles = jest.fn(async () => [remote('same.md', null)]); // server has no stored checksum
+    const getFiles = jest.fn(async () => [{ ...remote('same.md', null), size: content.length }]); // server has no stored checksum
     const recalcChecksum = jest.fn(async () => hash); // server computes it on demand (no download)
     const { engine } = makeEngine({
       getFiles, recalcChecksum,
@@ -85,6 +86,38 @@ describe('[SPEC:MIR-1] SyncEngine.planRemoteMirror — connects on demand', () =
     expect(plan.downloads).toHaveLength(0); // NOT re-downloaded
     expect(plan.skipCount).toBe(1);
   });
+
+  it.each(['missed revision', 'legacy state', 'fresh device', 'unchanged revision', 'verified read-only revision', 'changed reported checksum'] as const)(
+    'checks a cached same-size checksum against the remote revision (%s)', async (scenario) => {
+      const content = new TextEncoder().encode('B');
+      const hash = await sha256(content.buffer as ArrayBuffer);
+      const listed = { ...remote('note.md', hash), etag: 'current' };
+      const tracked: FileState = {
+        path: listed.path, idType: 'sha256', localHash: 'A', remoteId: 'A', size: 1, mtime: 0,
+        remoteFileId: null, isConflicted: false,
+        remoteEtag: scenario === 'legacy state' ? undefined : 'previous',
+      };
+      if (scenario === 'unchanged revision') Object.assign(tracked, { localHash: hash, remoteId: hash, remoteEtag: listed.etag });
+      if (scenario === 'verified read-only revision' || scenario === 'changed reported checksum') {
+        Object.assign(tracked, { idType: 'etag', localHash: hash, remoteEtag: listed.etag, remoteId: listed.etag,
+          remoteChecksum: scenario === 'verified read-only revision' ? 'incorrect-cached-checksum' : 'previous-checksum' });
+        listed.checksum = 'incorrect-cached-checksum';
+      }
+      const recalcChecksum = jest.fn(async () => null); // e.g. a read-only share cannot persist a new checksum
+      const { engine } = makeEngine({
+        tracked: scenario === 'fresh device' ? undefined : tracked,
+        localFiles: [{ path: listed.path, content }], getFiles: jest.fn(async () => [listed]), recalcChecksum,
+      });
+      const plan = await engine.planRemoteMirror();
+      if (scenario === 'unchanged revision' || scenario === 'verified read-only revision') {
+        expect(recalcChecksum).not.toHaveBeenCalled();
+        expect(plan.skipCount).toBe(1);
+      } else {
+        expect(recalcChecksum).toHaveBeenCalledTimes(1);
+        expect(plan.downloads).toEqual([{ ...listed, checksum: null, reportedChecksum: listed.checksum }]);
+      }
+    },
+  );
 
   it('returns ok:false (not a crash) when the server cannot be connected', async () => {
     const { engine } = makeEngine({ createThrows: true });

@@ -6,7 +6,7 @@ import type { DavSyncSettings, FileState, RemoteFileInfo, SyncStrategy, SyncTrig
 import type { FileLogger } from '../../util/FileLogger';
 import { sha256 } from '../../util/hash';
 import { normalizePluginIdList } from '../../util/settingsMigration';
-import { remoteIdOf } from '../remoteIdentity';
+import { remoteRevisionChanged, withTrustedChecksum } from '../remoteIdentity';
 import {
   decideBundleDirection,
   fileSameContent,
@@ -370,8 +370,9 @@ export class PluginSyncCoordinator implements PluginPathGate, LocalWritePort, Pl
       this.log(`plugins: local manifest read failed for ${manifestPath}: ${errorText(error)}`);
       return { id, reason: 'local-manifest-unavailable', direction: null };
     }
-    const remoteInfo = remoteByPath.get(manifestPath) ?? null;
+    const listed = remoteByPath.get(manifestPath);
     const base = this.opts.stateDB.getFile(manifestPath) ?? null;
+    const remoteInfo = listed ? withTrustedChecksum(listed, base ?? undefined, true) : null;
     const remote = await this.readRemoteManifest(client, remoteInfo, local.hash, base);
     const reason = evaluatePluginCatalogEntry({
       local: local.read,
@@ -403,7 +404,7 @@ export class PluginSyncCoordinator implements PluginPathGate, LocalWritePort, Pl
     if (remoteInfo === null) return 'absent';
     if (!shouldFetchRemoteManifest({ remoteManifest: remoteInfo, localHash, base })) return 'not-fetched';
     try {
-      const bytes = await client.downloadFile(remoteInfo.path);
+      const bytes = await client.downloadFile(remoteInfo.path, remoteInfo.etag ?? undefined);
       return parsePluginManifest(new TextDecoder().decode(bytes)) ?? 'unreadable';
     } catch (error) {
       this.log(`plugins: remote manifest fetch failed for ${remoteInfo.path}: ${errorText(error)}`);
@@ -435,8 +436,7 @@ export class PluginSyncCoordinator implements PluginPathGate, LocalWritePort, Pl
     base: FileState | null,
   ): BundleDirection {
     const localChanged = sideChanged(local.stat !== null, local.hash, base?.localHash ?? null);
-    const remoteId = remoteInfo === null ? null : remoteIdOf(remoteInfo).remoteId;
-    const remoteChanged = sideChanged(remoteInfo !== null, remoteId, base?.remoteId ?? null);
+    const remoteChanged = remoteInfo === null ? base !== null : remoteRevisionChanged(remoteInfo, base ?? undefined);
     const localSide: ManifestSide | null =
       local.stat === null ? null : { version: versionOf(local.read), mtime: local.stat.mtime };
     const remoteSide: ManifestSide | null =

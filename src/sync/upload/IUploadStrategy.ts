@@ -19,6 +19,8 @@ export interface UploadOptions {
   ifMatchEtag?: string | null;
   /** Creation time in ms to store on the server (X-OC-CTime, seconds). Omitted = header not sent. */
   ctime?: number;
+  /** ETag confirmed by the successful write response. */
+  onUploadedEtag?: (etag: string) => void;
 }
 
 /** Uploads a file by single PUT, chunked upload or skip, depending on size and server capabilities. */

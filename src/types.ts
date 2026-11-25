@@ -171,6 +171,10 @@ export interface FileState {
   localSize?: number;
   /** Server `lastModified` at the last converged state, separate from `localMtime`. */
   remoteMtime?: number;
+  /** ETag of the converged remote revision, including checksum-based identities. */
+  remoteEtag?: string;
+  /** Advertised checksum observed when the converged body was verified; it may be stale. */
+  remoteChecksum?: string;
   /**
    * Target creation time (Unix seconds) of the last local creation-time fix that the platform did not apply
    * (docs/spec.md §9.7). A planned local fix to the same target is skipped; any other target is tried.
@@ -224,6 +228,8 @@ export interface RemoteFileInfo {
   path: string;
   fileId: string | null;
   checksum: string | null;
+  /** Original checksum withheld from content-equality proof until GET verifies the body. */
+  reportedChecksum?: string;
   etag: string | null;
   size: number;
   lastModified: number;

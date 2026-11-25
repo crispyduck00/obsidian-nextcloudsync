@@ -60,12 +60,13 @@ export class RemoteListingSource {
   }
 
   // Every entry must read as "remote unchanged" against its own base: effective id = checksum ?? etag ?? size = remoteId.
-  rebuildRemoteFilesFromState(): RemoteFileInfo[] {
+  rebuildRemoteFilesFromState(verifyRevision = false): RemoteFileInfo[] {
     return this.deps.stateDB.getAllFiles().map((fs) => ({
       path: fs.path,
       fileId: fs.remoteFileId,
-      checksum: fs.idType === 'sha256' ? fs.remoteId : null,
-      etag: fs.idType === 'etag' ? fs.remoteId : null,
+      checksum: fs.idType === 'sha256' ? fs.remoteId : verifyRevision ? fs.remoteChecksum ?? null : null,
+      reportedChecksum: fs.remoteChecksum,
+      etag: fs.idType === 'etag' ? fs.remoteId : verifyRevision ? fs.remoteEtag ?? null : null,
       size: fs.size,
       lastModified: fs.remoteMtime ?? fs.mtime,
     }));

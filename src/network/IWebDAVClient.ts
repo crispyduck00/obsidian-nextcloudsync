@@ -45,8 +45,8 @@ export interface IWebDAVClient {
   deleteCollection(path: string): Promise<void>;
   /** Changes since `syncToken`. @throws RemoteListingUnreadableError when a 207 body cannot be parsed (never an empty change set). */
   getChanges(syncToken: string): Promise<SyncChanges>;
-  /** Downloads a remote file and returns its bytes (returned, not stored in a field, so concurrent downloads cannot race). */
-  downloadFile(remotePath: string): Promise<ArrayBuffer>;
+  /** Read bytes from the listed revision when an ETag is supplied. A superseded revision fails with HTTP 412. */
+  downloadFile(remotePath: string, ifMatchEtag?: string): Promise<ArrayBuffer>;
   /**
    * Uploads via a single PUT.
    * @param mtime ms epoch; sent as X-OC-MTime so Nextcloud preserves the timestamp.
@@ -55,7 +55,7 @@ export interface IWebDAVClient {
    */
   uploadFile(
     remotePath: string, data: ArrayBuffer, mtime?: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; ctime?: number },
+    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; ctime?: number; onUploadedEtag?: (etag: string) => void },
   ): Promise<void>;
   moveFile(oldPath: string, newPath: string): Promise<void>;
   deleteFile(path: string, expectedRemoteId: string): Promise<void>;
@@ -85,7 +85,7 @@ export interface IWebDAVClient {
    */
   uploadChunked(
     remotePath: string, data: ArrayBuffer, chunkSizeBytes: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; mtime?: number; ctime?: number },
+    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; mtime?: number; ctime?: number; onUploadedEtag?: (etag: string) => void },
   ): Promise<void>;
 
   /**
